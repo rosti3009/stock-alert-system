@@ -19,6 +19,7 @@ import order_lifecycle
 import portfolio_risk_engine
 from execution_quality import evaluate_execution_quality, summarize_execution_quality
 from auto_trader import process_auto_trading
+from market_regime_engine import get_cached_market_regime, get_market_regime_history, refresh_market_regime
 from market_regime import get_market_regime
 from data_fetcher import fetch_stock_data
 from indicators import compute_indicators
@@ -613,6 +614,17 @@ async def run_full_scan() -> dict:
             raise
 
 
+async def refresh_market_regime_safe() -> None:
+    try:
+        positions = await database.get_open_positions()
+        await refresh_market_regime(
+            candidates=list(_latest.values()),
+            positions=positions,
+        )
+    except Exception:
+        log.exception("Market regime refresh failed")
+
+
 async def restore_latest_from_db() -> None:
     global _top_weekly
 
@@ -855,6 +867,24 @@ async def lifespan(app: FastAPI):
     log.info(
         "Portfolio risk engine started — every %s seconds",
         config.PORTFOLIO_RISK_REFRESH_SECONDS,
+    )
+
+    # ==========================================
+    # MARKET REGIME ENGINE
+    # ==========================================
+
+    scheduler.add_job(
+        refresh_market_regime_safe,
+        "interval",
+        seconds=config.REGIME_REFRESH_SECONDS,
+        id="market_regime_engine",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    log.info(
+        "Market regime engine started — every %s seconds",
+        config.REGIME_REFRESH_SECONDS,
     )
 
     # ==========================================
@@ -1293,7 +1323,15 @@ async def api_positions():
 @app.get("/api/market-regime")
 async def api_market_regime():
     return JSONResponse(
-        get_market_regime(),
+        await get_cached_market_regime(),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/market-regime/history")
+async def api_market_regime_history(limit: int = 100):
+    return JSONResponse(
+        await get_market_regime_history(limit=limit),
         headers=no_cache_headers(),
     )
 
