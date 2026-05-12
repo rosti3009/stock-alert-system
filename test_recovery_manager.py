@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from contextlib import closing
 import asyncio
+import gc
 import os
+import time
 import sqlite3
 import tempfile
 import unittest
@@ -76,14 +79,21 @@ class RecoveryManagerTests(unittest.TestCase):
         database.DB_PATH = self.original_database_db_path
         for key, value in self.original_thresholds.items():
             setattr(config, key, value)
-        try:
-            os.unlink(self.tmp.name)
-        except FileNotFoundError:
-            pass
+        gc.collect()
+        for attempt in range(5):
+            try:
+                os.unlink(self.tmp.name)
+                break
+            except FileNotFoundError:
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.1)
 
     def write_heartbeat(self, *, connected: bool = True, age_seconds: int = 0, error: str | None = None):
         last_sync_at = (recovery_manager.now_utc() - timedelta(seconds=age_seconds)).isoformat()
-        with sqlite3.connect(self.tmp.name) as db:
+        with closing(sqlite3.connect(self.tmp.name)) as db:
             db.execute(CREATE_TWS_HEARTBEAT)
             db.execute(
                 """
@@ -100,7 +110,7 @@ class RecoveryManagerTests(unittest.TestCase):
             db.commit()
 
     def add_reconciliation_issue(self, severity: str = "HIGH"):
-        with sqlite3.connect(self.tmp.name) as db:
+        with closing(sqlite3.connect(self.tmp.name)) as db:
             db.execute(CREATE_RECONCILIATION_ISSUES)
             db.execute(
                 """

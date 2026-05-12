@@ -56,6 +56,9 @@
 
       <div class="cards health-cards">
         <div class="card health-card"><h3>Recovery State</h3><div class="value" id="recoveryState">-</div><div class="card-note" id="recoveryReason">-</div></div>
+        <div class="card health-card"><h3>Current Market Session</h3><div class="value blue" id="marketSession">-</div><div class="card-note" id="sessionPermissions">-</div></div>
+        <div class="card health-card"><h3>Next Session Transition</h3><div class="value" id="nextSessionTransition">-</div><div class="card-note" id="nextSessionState">-</div></div>
+        <div class="card health-card"><h3>Market Clock</h3><div class="value purple" id="marketClock">-</div><div class="card-note" id="marketHours">-</div></div>
         <div class="card health-card"><h3>Buy Blocked / Buy Allowed</h3><div class="value" id="buyStatus">-</div><div class="card-note">Read-only status; no orders can be placed here.</div></div>
         <div class="card health-card"><h3>Last TWS Heartbeat</h3><div class="value" id="lastHeartbeat">-</div><div class="card-note" id="heartbeatMeta">-</div></div>
         <div class="card health-card"><h3>Account Net Liquidation</h3><div class="value" id="netLiquidation">-</div><div class="card-note" id="accountUpdated">-</div></div>
@@ -119,6 +122,7 @@
 const REFRESH_MS = 10000;
 const ENDPOINTS = {
   recovery: "/api/recovery-status",
+  session: "/api/session-status",
   account: "/api/account-summary",
   openOrders: "/api/open-orders",
   executions: "/api/executions?limit=25",
@@ -206,6 +210,27 @@ function accountLookup(accountRows, tag) {
 function latestAccountUpdated(accountRows) {
   const dates = safeArray(accountRows).map(row => row.updated_at).filter(Boolean).sort().reverse();
   return dates[0] || null;
+}
+
+function sessionClass(session) {
+  const normalized = String(session || "").toUpperCase();
+  if (["MARKET_OPEN", "POWER_HOUR"].includes(normalized)) return "green";
+  if (["PREMARKET", "MARKET_CLOSE", "AFTER_HOURS"].includes(normalized)) return "yellow";
+  if (["CLOSED", "WEEKEND", "HOLIDAY"].includes(normalized)) return "red";
+  return "muted";
+}
+
+function formatSession(value) {
+  return text(value).replaceAll("_", " ");
+}
+
+function renderSession(session) {
+  setValue("marketSession", formatSession(session?.current_session), sessionClass(session?.current_session));
+  setValue("nextSessionTransition", dateTime(session?.next_transition?.at), sessionClass(session?.next_transition?.to));
+  document.getElementById("nextSessionState").textContent = `Next: ${formatSession(session?.next_transition?.to)}`;
+  setValue("marketClock", dateTime(session?.market_clock), "purple");
+  document.getElementById("marketHours").textContent = `Open ${dateTime(session?.market_open)} · Close ${dateTime(session?.market_close)}`;
+  document.getElementById("sessionPermissions").textContent = `Trade ${session?.trading_allowed ? "allowed" : "blocked"} · Scan ${session?.scan_allowed ? "allowed" : "blocked"} · Buy ${session?.buy_allowed ? "allowed" : "blocked"} · Sell ${session?.sell_allowed ? "allowed" : "blocked"}`;
 }
 
 function renderRecovery(status) {
@@ -324,8 +349,9 @@ function renderError(error) {
 
 async function refreshHealth() {
   try {
-    const [recovery, account, openOrders, executions, reconciliation, journal] = await Promise.all([
+    const [recovery, session, account, openOrders, executions, reconciliation, journal] = await Promise.all([
       fetchNoCache(ENDPOINTS.recovery),
+      fetchNoCache(ENDPOINTS.session),
       fetchNoCache(ENDPOINTS.account),
       fetchNoCache(ENDPOINTS.openOrders),
       fetchNoCache(ENDPOINTS.executions),
@@ -334,6 +360,7 @@ async function refreshHealth() {
     ]);
 
     renderRecovery(recovery);
+    renderSession(session);
     renderAccount(account);
     renderOpenOrders(openOrders);
     renderExecutions(executions);

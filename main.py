@@ -14,6 +14,7 @@ import config
 import database
 import account_sync
 import recovery_manager
+import session_manager
 from auto_trader import process_auto_trading
 from market_regime import get_market_regime
 from data_fetcher import fetch_stock_data
@@ -498,6 +499,11 @@ async def run_full_scan() -> dict:
         return {"status": "already running"}
 
     async with _scan_lock:
+        session_status = session_manager.get_cached_session_status()
+        if not session_status.get("scan_allowed"):
+            log.info("Scan skipped — session=%s scan_allowed=False", session_status.get("current_session"))
+            return {"status": "skipped", "reason": "scan not allowed in current session", "session": session_status}
+
         symbols = await get_scan_symbols()
 
         open_positions = await database.get_open_positions()
@@ -852,6 +858,17 @@ async def lifespan(app: FastAPI):
     )
 
     scheduler.add_job(
+        session_manager.refresh_session_status,
+        "interval",
+        seconds=30,
+        id="session_manager_refresh",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    log.info("Session manager heartbeat started — every 30 seconds")
+
+    scheduler.add_job(
         recovery_manager.run_recovery_check,
         "interval",
         seconds=config.RECOVERY_CHECK_INTERVAL_SECONDS,
@@ -880,6 +897,14 @@ app = FastAPI(title="Stock Alerts", lifespan=lifespan)
 # ==========================================
 # MARKET DATA GUARD API
 # ==========================================
+
+@app.get("/api/session-status")
+async def api_session_status():
+    return JSONResponse(
+        session_manager.refresh_session_status(),
+        headers=no_cache_headers(),
+    )
+
 
 @app.get("/api/recovery-status")
 async def api_recovery_status():
