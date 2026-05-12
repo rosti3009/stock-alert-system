@@ -67,6 +67,12 @@
         <div class="card health-card"><h3>Unrealized PnL</h3><div class="value" id="unrealizedPnl">-</div></div>
         <div class="card health-card"><h3>Realized PnL</h3><div class="value" id="realizedPnl">-</div></div>
         <div class="card health-card"><h3>Open Orders Count</h3><div class="value yellow" id="openOrdersCount">-</div><div class="card-note">Open order rows from TWS sync snapshot.</div></div>
+        <div class="card health-card"><h3>Total Exposure</h3><div class="value" id="totalExposure">-</div><div class="card-note" id="totalExposureMeta">-</div></div>
+        <div class="card health-card"><h3>Largest Position</h3><div class="value" id="largestPosition">-</div><div class="card-note" id="largestPositionMeta">-</div></div>
+        <div class="card health-card"><h3>Sector Concentration</h3><div class="value" id="sectorConcentration">-</div><div class="card-note" id="sectorConcentrationMeta">-</div></div>
+        <div class="card health-card"><h3>Daily Drawdown</h3><div class="value" id="dailyDrawdown">-</div><div class="card-note" id="dailyDrawdownMeta">-</div></div>
+        <div class="card health-card"><h3>Risk State</h3><div class="value" id="riskState">-</div><div class="card-note" id="riskStateMeta">-</div></div>
+        <div class="card health-card"><h3>New Buy Risk Status</h3><div class="value" id="newBuyRiskStatus">-</div><div class="card-note" id="newBuyRiskMeta">Risk engine blocks only dangerous new BUY exposure.</div></div>
         <div class="card health-card"><h3>Reconciliation Issues Count</h3><div class="value" id="reconciliationCount">-</div><div class="card-note" id="reconciliationMeta">-</div></div>
         <div class="card health-card"><h3>Latest Journal Events</h3><div class="value purple" id="journalEventsCount">-</div><div class="card-note" id="latestJournalEvent">-</div></div>
         <div class="card health-card"><h3>Order Lifecycle Events</h3><div class="value blue" id="orderLifecycleCount">-</div><div class="card-note" id="latestOrderLifecycleEvent">-</div></div>
@@ -152,7 +158,8 @@ const ENDPOINTS = {
   reconciliation: "/api/reconciliation-status",
   journal: "/api/trade-journal?limit=25",
   orderLifecycle: "/api/order-lifecycle?limit=25",
-  orderLifecycleLatest: "/api/order-lifecycle-latest?limit=25"
+  orderLifecycleLatest: "/api/order-lifecycle-latest?limit=25",
+  portfolioRisk: "/api/portfolio-risk"
 };
 
 async function fetchNoCache(url) {
@@ -335,6 +342,48 @@ function renderExecutions(executions) {
   document.getElementById("executionsRows").innerHTML = rows || `<tr><td colspan="6">No recent executions.</td></tr>`;
 }
 
+
+function riskClass(state) {
+  const normalized = String(state || "").toUpperCase();
+  if (normalized === "SAFE" || normalized === "ALLOWED") return "green";
+  if (normalized === "WARNING") return "yellow";
+  if (["DANGER", "BLOCK_NEW_BUYS", "BLOCKED"].includes(normalized)) return "red";
+  return "muted";
+}
+
+function percent(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "-";
+  return `${parsed.toFixed(2)}%`;
+}
+
+function renderPortfolioRisk(risk) {
+  const totalExposure = numberValue(risk?.total_portfolio_exposure_percent);
+  const largestPosition = risk?.largest_position || {};
+  const largestSector = risk?.largest_sector || {};
+  const riskState = text(risk?.risk_state, "UNKNOWN");
+  const buyStatus = text(risk?.new_buy_risk_status, "UNKNOWN");
+
+  setValue("totalExposure", percent(totalExposure), riskClass(riskState));
+  document.getElementById("totalExposureMeta").textContent = `${money(risk?.total_market_value)} exposed · equity ${money(risk?.account_equity)}`;
+
+  setValue("largestPosition", largestPosition.symbol ? `${largestPosition.symbol} ${percent(largestPosition.exposure_percent)}` : "-", numberValue(largestPosition.exposure_percent) > numberValue(risk?.thresholds?.max_symbol_exposure_percent) * 0.8 ? "yellow" : "green");
+  document.getElementById("largestPositionMeta").textContent = largestPosition.symbol ? `${money(largestPosition.market_value)} · ${text(largestPosition.sector)}` : "No open positions.";
+
+  setValue("sectorConcentration", largestSector.sector ? `${largestSector.sector} ${percent(largestSector.exposure_percent)}` : "-", numberValue(largestSector.exposure_percent) > numberValue(risk?.thresholds?.max_sector_exposure_percent) * 0.8 ? "yellow" : "green");
+  document.getElementById("sectorConcentrationMeta").textContent = largestSector.symbols ? `Symbols: ${largestSector.symbols.join(", ")}` : "No sector exposure.";
+
+  setValue("dailyDrawdown", percent(risk?.daily_drawdown_percent), numberValue(risk?.daily_drawdown_percent) > 0 ? riskClass(riskState) : "green");
+  document.getElementById("dailyDrawdownMeta").textContent = `Daily realized PnL ${signedMoney(risk?.daily_realized_pnl)} · unrealized drawdown ${percent(risk?.unrealized_drawdown_percent)}`;
+
+  setValue("riskState", riskState, riskClass(riskState));
+  document.getElementById("riskStateMeta").textContent = `${safeArray(risk?.alerts).length} active risk alert(s) · checked ${dateTime(risk?.checked_at)}`;
+
+  setValue("newBuyRiskStatus", buyStatus, riskClass(buyStatus));
+  document.getElementById("newBuyRiskMeta").textContent = safeArray(risk?.block_reasons).join(" · ") || "No portfolio-risk BUY block active.";
+}
+
 function renderReconciliation(status) {
   const counters = status?.counters || {};
   const openCount = Number(status?.open_count ?? counters.open ?? status?.mismatch_count ?? status?.issues_count ?? 0);
@@ -419,7 +468,7 @@ function renderError(error) {
 
 async function refreshHealth() {
   try {
-    const [recovery, session, account, openOrders, executions, reconciliation, journal, orderLifecycle, orderLifecycleLatest] = await Promise.all([
+    const [recovery, session, account, openOrders, executions, reconciliation, journal, orderLifecycle, orderLifecycleLatest, portfolioRisk] = await Promise.all([
       fetchNoCache(ENDPOINTS.recovery),
       fetchNoCache(ENDPOINTS.session),
       fetchNoCache(ENDPOINTS.account),
@@ -428,7 +477,8 @@ async function refreshHealth() {
       fetchNoCache(ENDPOINTS.reconciliation),
       fetchNoCache(ENDPOINTS.journal),
       fetchNoCache(ENDPOINTS.orderLifecycle),
-      fetchNoCache(ENDPOINTS.orderLifecycleLatest)
+      fetchNoCache(ENDPOINTS.orderLifecycleLatest),
+      fetchNoCache(ENDPOINTS.portfolioRisk)
     ]);
 
     renderRecovery(recovery);
@@ -439,6 +489,7 @@ async function refreshHealth() {
     renderReconciliation(reconciliation);
     renderJournal(journal);
     renderOrderLifecycle(orderLifecycle, orderLifecycleLatest);
+    renderPortfolioRisk(portfolioRisk);
     document.getElementById("updated").textContent = `Last refresh ${new Date().toLocaleTimeString()}`;
   } catch (error) {
     console.error("System health refresh failed", error);

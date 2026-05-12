@@ -13,6 +13,7 @@ from trading_safety import require_paper_auto_trading_allowed
 import config
 import database
 import order_lifecycle
+import portfolio_risk_engine
 from market_regime import get_market_regime
 
 log = logging.getLogger(__name__)
@@ -593,6 +594,20 @@ async def auto_open_position(
             return False
 
         limit_price = float(sizing["entry_price"])
+
+        try:
+            await portfolio_risk_engine.require_new_buy_allowed(symbol)
+        except RuntimeError as exc:
+            log.warning("AUTO BUY blocked for %s — %s", symbol, exc)
+            await _journal_buy_decision(
+                row,
+                "RISK_BLOCK_BUY",
+                "BLOCKED",
+                str(exc),
+                market,
+                {"quantity": quantity, "sizing": sizing},
+            )
+            return False
 
         if not config.AUTO_SEND_ORDERS:
             log.warning("AUTO BUY blocked for %s — AUTO_SEND_ORDERS is false", symbol)
