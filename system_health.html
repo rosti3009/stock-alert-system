@@ -73,6 +73,11 @@
         <div class="card health-card"><h3>Daily Drawdown</h3><div class="value" id="dailyDrawdown">-</div><div class="card-note" id="dailyDrawdownMeta">-</div></div>
         <div class="card health-card"><h3>Risk State</h3><div class="value" id="riskState">-</div><div class="card-note" id="riskStateMeta">-</div></div>
         <div class="card health-card"><h3>New Buy Risk Status</h3><div class="value" id="newBuyRiskStatus">-</div><div class="card-note" id="newBuyRiskMeta">Risk engine blocks only dangerous new BUY exposure.</div></div>
+        <div class="card health-card"><h3>Execution Quality State</h3><div class="value" id="executionQualityState">-</div><div class="card-note">Centralized BUY execution-quality gate.</div></div>
+        <div class="card health-card"><h3>Spread Risk</h3><div class="value" id="spreadRisk">-</div><div class="card-note">Bid/ask spread percent and absolute spread checks.</div></div>
+        <div class="card health-card"><h3>Slippage Estimate</h3><div class="value" id="slippageEstimate">-</div><div class="card-note">Estimated pre-trade slippage risk.</div></div>
+        <div class="card health-card"><h3>Liquidity Status</h3><div class="value" id="liquidityStatus">-</div><div class="card-note">Average volume and relative volume checks.</div></div>
+        <div class="card health-card"><h3>Blocked BUY Reason</h3><div class="value" id="blockedBuyReason">-</div><div class="card-note">Only dangerous execution conditions can block BUY.</div></div>
         <div class="card health-card"><h3>Reconciliation Issues Count</h3><div class="value" id="reconciliationCount">-</div><div class="card-note" id="reconciliationMeta">-</div></div>
         <div class="card health-card"><h3>Latest Journal Events</h3><div class="value purple" id="journalEventsCount">-</div><div class="card-note" id="latestJournalEvent">-</div></div>
         <div class="card health-card"><h3>Order Lifecycle Events</h3><div class="value blue" id="orderLifecycleCount">-</div><div class="card-note" id="latestOrderLifecycleEvent">-</div></div>
@@ -159,7 +164,8 @@ const ENDPOINTS = {
   journal: "/api/trade-journal?limit=25",
   orderLifecycle: "/api/order-lifecycle?limit=25",
   orderLifecycleLatest: "/api/order-lifecycle-latest?limit=25",
-  portfolioRisk: "/api/portfolio-risk"
+  portfolioRisk: "/api/portfolio-risk",
+  executionQuality: "/api/execution-quality"
 };
 
 async function fetchNoCache(url) {
@@ -345,9 +351,9 @@ function renderExecutions(executions) {
 
 function riskClass(state) {
   const normalized = String(state || "").toUpperCase();
-  if (normalized === "SAFE" || normalized === "ALLOWED") return "green";
-  if (normalized === "WARNING") return "yellow";
-  if (["DANGER", "BLOCK_NEW_BUYS", "BLOCKED"].includes(normalized)) return "red";
+  if (["SAFE", "ALLOWED", "EXECUTION_SAFE", "OK"].includes(normalized)) return "green";
+  if (["WARNING", "EXECUTION_WARNING"].includes(normalized)) return "yellow";
+  if (["DANGER", "EXECUTION_DANGER", "EXECUTION_BLOCK_BUY", "BLOCK_NEW_BUYS", "BLOCKED", "LOW"].includes(normalized)) return "red";
   return "muted";
 }
 
@@ -382,6 +388,19 @@ function renderPortfolioRisk(risk) {
 
   setValue("newBuyRiskStatus", buyStatus, riskClass(buyStatus));
   document.getElementById("newBuyRiskMeta").textContent = safeArray(risk?.block_reasons).join(" · ") || "No portfolio-risk BUY block active.";
+}
+
+function renderExecutionQuality(executionQuality) {
+  const state = text(executionQuality?.state, "UNKNOWN");
+  const spreadRisk = text(executionQuality?.spread_risk, "UNKNOWN");
+  const liquidity = text(executionQuality?.liquidity_status, "UNKNOWN");
+  const blockedReason = text(executionQuality?.blocked_buy_reason, "None");
+
+  setValue("executionQualityState", state.replace("EXECUTION_", ""), riskClass(state));
+  setValue("spreadRisk", spreadRisk, riskClass(spreadRisk));
+  setValue("slippageEstimate", percent(executionQuality?.slippage_estimate), numberValue(executionQuality?.slippage_estimate) > 0 ? riskClass(state) : "green");
+  setValue("liquidityStatus", liquidity, riskClass(liquidity));
+  setValue("blockedBuyReason", blockedReason.length > 28 ? `${blockedReason.slice(0, 28)}…` : blockedReason, executionQuality?.blocked_buy_reason ? "red" : "green");
 }
 
 function renderReconciliation(status) {
@@ -468,7 +487,7 @@ function renderError(error) {
 
 async function refreshHealth() {
   try {
-    const [recovery, session, account, openOrders, executions, reconciliation, journal, orderLifecycle, orderLifecycleLatest, portfolioRisk] = await Promise.all([
+    const [recovery, session, account, openOrders, executions, reconciliation, journal, orderLifecycle, orderLifecycleLatest, portfolioRisk, executionQuality] = await Promise.all([
       fetchNoCache(ENDPOINTS.recovery),
       fetchNoCache(ENDPOINTS.session),
       fetchNoCache(ENDPOINTS.account),
@@ -478,7 +497,8 @@ async function refreshHealth() {
       fetchNoCache(ENDPOINTS.journal),
       fetchNoCache(ENDPOINTS.orderLifecycle),
       fetchNoCache(ENDPOINTS.orderLifecycleLatest),
-      fetchNoCache(ENDPOINTS.portfolioRisk)
+      fetchNoCache(ENDPOINTS.portfolioRisk),
+      fetchNoCache(ENDPOINTS.executionQuality)
     ]);
 
     renderRecovery(recovery);
@@ -490,6 +510,7 @@ async function refreshHealth() {
     renderJournal(journal);
     renderOrderLifecycle(orderLifecycle, orderLifecycleLatest);
     renderPortfolioRisk(portfolioRisk);
+    renderExecutionQuality(executionQuality);
     document.getElementById("updated").textContent = `Last refresh ${new Date().toLocaleTimeString()}`;
   } catch (error) {
     console.error("System health refresh failed", error);

@@ -3,12 +3,12 @@ from __future__ import annotations
 import logging
 import math
 
+from execution_quality import evaluate_execution_quality
 from ib_insync import IB, Stock
 
 log = logging.getLogger(__name__)
 
 MIN_PRICE = 2.0
-MAX_SPREAD_PERCENT = 3.0
 MAX_ENTRY_DRIFT_PERCENT = 2.0
 
 
@@ -100,11 +100,27 @@ def validate_buy_before_order(
             "quote": quote,
         }
 
+    execution_quality = evaluate_execution_quality(
+        row={},
+        quote=quote,
+        limit_price=float(limit_price),
+        symbol=symbol,
+    )
+
+    if execution_quality.get("blocks_buy"):
+        return {
+            "allowed": False,
+            "reason": execution_quality.get("blocked_buy_reason") or "Execution quality blocked BUY",
+            "quote": quote,
+            "execution_quality": execution_quality,
+        }
+
     if bid <= 0 or ask <= 0:
         return {
             "allowed": False,
             "reason": "No valid bid/ask — possible halt, illiquid stock, or bad market data",
             "quote": quote,
+            "execution_quality": execution_quality,
         }
 
     if ask < bid:
@@ -112,6 +128,7 @@ def validate_buy_before_order(
             "allowed": False,
             "reason": "Invalid quote — ask below bid",
             "quote": quote,
+            "execution_quality": execution_quality,
         }
 
     mid = (bid + ask) / 2
@@ -121,16 +138,10 @@ def validate_buy_before_order(
             "allowed": False,
             "reason": "Invalid mid price",
             "quote": quote,
+            "execution_quality": execution_quality,
         }
 
     spread_percent = ((ask - bid) / mid) * 100
-
-    if spread_percent > MAX_SPREAD_PERCENT:
-        return {
-            "allowed": False,
-            "reason": f"Spread too wide {spread_percent:.2f}%",
-            "quote": quote,
-        }
 
     reference_price = market_price or last or mid
 
@@ -159,4 +170,5 @@ def validate_buy_before_order(
         "quote": quote,
         "spread_percent": round(spread_percent, 4),
         "drift_percent": round(drift_percent, 4),
+        "execution_quality": execution_quality,
     }
