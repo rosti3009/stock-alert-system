@@ -16,6 +16,7 @@ import account_sync
 import recovery_manager
 import session_manager
 import order_lifecycle
+import portfolio_risk_engine
 from auto_trader import process_auto_trading
 from market_regime import get_market_regime
 from data_fetcher import fetch_stock_data
@@ -838,6 +839,24 @@ async def lifespan(app: FastAPI):
     )
 
     # ==========================================
+    # PORTFOLIO RISK ENGINE
+    # ==========================================
+
+    scheduler.add_job(
+        portfolio_risk_engine.refresh_portfolio_risk,
+        "interval",
+        seconds=config.PORTFOLIO_RISK_REFRESH_SECONDS,
+        id="portfolio_risk_engine",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    log.info(
+        "Portfolio risk engine started — every %s seconds",
+        config.PORTFOLIO_RISK_REFRESH_SECONDS,
+    )
+
+    # ==========================================
     # MARKET DATA GUARD
     # ==========================================
 
@@ -997,6 +1016,31 @@ async def api_executions(limit: int = 200, symbol: str | None = None):
         headers=no_cache_headers(),
     )
 
+
+
+
+@app.get("/api/portfolio-risk")
+async def api_portfolio_risk():
+    return JSONResponse(
+        await portfolio_risk_engine.get_portfolio_risk(),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/exposure")
+async def api_exposure():
+    return JSONResponse(
+        await portfolio_risk_engine.get_exposure(),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/risk-alerts")
+async def api_risk_alerts():
+    return JSONResponse(
+        await portfolio_risk_engine.get_risk_alerts(),
+        headers=no_cache_headers(),
+    )
 
 @app.get("/api/order-lifecycle")
 async def api_order_lifecycle(limit: int = 200):
