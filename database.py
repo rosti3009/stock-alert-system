@@ -163,6 +163,71 @@ CREATE TABLE IF NOT EXISTS trade_journal (
 )
 """
 
+
+CREATE_ACCOUNT_SUMMARY = """
+CREATE TABLE IF NOT EXISTS account_summary (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tag TEXT NOT NULL,
+    value TEXT,
+    currency TEXT,
+    account TEXT,
+    updated_at TEXT
+)
+"""
+
+CREATE_OPEN_ORDERS = """
+CREATE TABLE IF NOT EXISTS open_orders (
+    order_id INTEGER PRIMARY KEY,
+    perm_id INTEGER,
+    symbol TEXT,
+    action TEXT,
+    order_type TEXT,
+    total_quantity REAL,
+    limit_price REAL,
+    aux_price REAL,
+    status TEXT,
+    filled REAL,
+    remaining REAL,
+    avg_fill_price REAL,
+    account TEXT,
+    raw_json TEXT,
+    updated_at TEXT
+)
+"""
+
+CREATE_EXECUTION_HISTORY = """
+CREATE TABLE IF NOT EXISTS execution_history (
+    exec_id TEXT PRIMARY KEY,
+    symbol TEXT,
+    side TEXT,
+    quantity REAL,
+    price REAL,
+    order_id INTEGER,
+    perm_id INTEGER,
+    account TEXT,
+    exchange TEXT,
+    time TEXT,
+    commission REAL DEFAULT 0,
+    realized_pnl REAL DEFAULT 0,
+    raw_json TEXT,
+    created_at TEXT
+)
+"""
+
+CREATE_EQUITY_CURVE = """
+CREATE TABLE IF NOT EXISTS equity_curve (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    account TEXT,
+    net_liquidation REAL,
+    total_cash REAL,
+    buying_power REAL,
+    unrealized_pnl REAL,
+    realized_pnl REAL,
+    source TEXT DEFAULT 'account_sync'
+)
+"""
+
 CREATE_APP_STATE = """
 CREATE TABLE IF NOT EXISTS app_state (
     key TEXT PRIMARY KEY,
@@ -190,6 +255,10 @@ async def init_db() -> None:
         await db.execute(CREATE_APP_STATE)
         await db.execute(CREATE_EXECUTIONS)
         await db.execute(CREATE_TRADE_JOURNAL)
+        await db.execute(CREATE_ACCOUNT_SUMMARY)
+        await db.execute(CREATE_OPEN_ORDERS)
+        await db.execute(CREATE_EXECUTION_HISTORY)
+        await db.execute(CREATE_EQUITY_CURVE)
 
         await _ensure_columns(db, "signals", {
             "score": "REAL",
@@ -228,6 +297,10 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trade_journal_timestamp ON trade_journal(timestamp)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trade_journal_symbol ON trade_journal(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trade_journal_event_type ON trade_journal(event_type)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_account_summary_tag ON account_summary(tag)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_open_orders_symbol ON open_orders(symbol)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_execution_history_symbol ON execution_history(symbol)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_equity_curve_timestamp ON equity_curve(timestamp)")
         await db.commit()
 
 

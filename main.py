@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 import config
 import database
+import account_sync
 from auto_trader import process_auto_trading
 from market_regime import get_market_regime
 from data_fetcher import fetch_stock_data
@@ -799,6 +800,36 @@ async def lifespan(app: FastAPI):
     )
 
     # ==========================================
+    # READ-ONLY ACCOUNT SYNC
+    # ==========================================
+
+    scheduler.add_job(
+        account_sync.run_account_sync_once,
+        "interval",
+        seconds=30,
+        id="account_sync",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    log.info(
+        "Read-only account sync started — every 30 seconds"
+    )
+
+    scheduler.add_job(
+        account_sync.run_reconciliation_status_check,
+        "interval",
+        seconds=60,
+        id="account_sync_reconciliation_status",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    log.info(
+        "Account reconciliation status check started — every 60 seconds"
+    )
+
+    # ==========================================
     # MARKET DATA GUARD
     # ==========================================
 
@@ -860,6 +891,42 @@ async def api_reconciliation():
 
     return JSONResponse(
         result,
+        headers=no_cache_headers(),
+    )
+
+
+# ==========================================
+# ACCOUNT SYNC API
+# ==========================================
+
+@app.get("/api/account-summary")
+async def api_account_summary():
+    return JSONResponse(
+        await account_sync.get_account_summary(),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/open-orders")
+async def api_open_orders():
+    return JSONResponse(
+        await account_sync.get_open_orders(),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/executions")
+async def api_executions(limit: int = 200, symbol: str | None = None):
+    return JSONResponse(
+        await account_sync.get_executions(limit=limit, symbol=symbol),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/reconciliation-status")
+async def api_reconciliation_status():
+    return JSONResponse(
+        await account_sync.get_reconciliation_status(),
         headers=no_cache_headers(),
     )
 
@@ -1013,8 +1080,8 @@ async def api_performance():
 
 
 @app.get("/api/equity-curve")
-async def api_equity_curve():
-    return JSONResponse(await database.get_equity_curve(), headers=no_cache_headers())
+async def api_equity_curve(limit: int = 500):
+    return JSONResponse(await account_sync.get_equity_curve(limit=limit), headers=no_cache_headers())
 
 
 @app.get("/api/positions")
