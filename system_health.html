@@ -79,6 +79,13 @@
         <div class="card health-card"><h3>Daily Drawdown</h3><div class="value" id="dailyDrawdown">-</div><div class="card-note" id="dailyDrawdownMeta">-</div></div>
         <div class="card health-card"><h3>Risk State</h3><div class="value" id="riskState">-</div><div class="card-note" id="riskStateMeta">-</div></div>
         <div class="card health-card"><h3>New Buy Risk Status</h3><div class="value" id="newBuyRiskStatus">-</div><div class="card-note" id="newBuyRiskMeta">Risk engine blocks only dangerous new BUY exposure.</div></div>
+        <div class="card health-card"><h3>Position Sizing State</h3><div class="value" id="positionSizingState">-</div><div class="card-note" id="positionSizingMeta">Read-only sizing gate; no order placement.</div></div>
+        <div class="card health-card"><h3>Recommended Position Size</h3><div class="value" id="recommendedPositionSize">-</div><div class="card-note" id="recommendedPositionMeta">Aggregate BUY recommendation from cached scan rows.</div></div>
+        <div class="card health-card"><h3>Max Risk Per Trade</h3><div class="value" id="maxRiskPerTrade">-</div><div class="card-note">Configured capital-at-risk ceiling.</div></div>
+        <div class="card health-card"><h3>Volatility Adjustment</h3><div class="value" id="volatilityAdjustment">-</div><div class="card-note">ATR and symbol volatility sizing factor.</div></div>
+        <div class="card health-card"><h3>Liquidity Adjustment</h3><div class="value" id="liquidityAdjustment">-</div><div class="card-note">Volume and relative-volume sizing factor.</div></div>
+        <div class="card health-card"><h3>Regime Adjustment</h3><div class="value" id="regimeAdjustment">-</div><div class="card-note">Market-regime sizing factor.</div></div>
+        <div class="card health-card"><h3>Concentration Adjustment</h3><div class="value" id="concentrationAdjustment">-</div><div class="card-note">Sector/symbol concentration sizing factor.</div></div>
         <div class="card health-card"><h3>Execution Quality State</h3><div class="value" id="executionQualityState">-</div><div class="card-note">Centralized BUY execution-quality gate.</div></div>
         <div class="card health-card"><h3>Spread Risk</h3><div class="value" id="spreadRisk">-</div><div class="card-note">Bid/ask spread percent and absolute spread checks.</div></div>
         <div class="card health-card"><h3>Slippage Estimate</h3><div class="value" id="slippageEstimate">-</div><div class="card-note">Estimated pre-trade slippage risk.</div></div>
@@ -172,6 +179,7 @@ const ENDPOINTS = {
   orderLifecycleLatest: "/api/order-lifecycle-latest?limit=25",
   portfolioRisk: "/api/portfolio-risk",
   executionQuality: "/api/execution-quality",
+  positionSizing: "/api/position-sizing",
   marketRegime: "/api/market-regime"
 };
 
@@ -358,9 +366,9 @@ function renderExecutions(executions) {
 
 function riskClass(state) {
   const normalized = String(state || "").toUpperCase();
-  if (["SAFE", "ALLOWED", "EXECUTION_SAFE", "OK", "LOW", "NORMAL"].includes(normalized)) return "green";
-  if (["WARNING", "EXECUTION_WARNING", "WATCH", "ELEVATED"].includes(normalized)) return "yellow";
-  if (["DANGER", "HIGH", "CRITICAL", "EXECUTION_DANGER", "EXECUTION_BLOCK_BUY", "BLOCK_NEW_BUYS", "BLOCKED"].includes(normalized)) return "red";
+  if (["SAFE", "ALLOWED", "EXECUTION_SAFE", "OK", "LOW", "NORMAL", "FULL_SIZE"].includes(normalized)) return "green";
+  if (["WARNING", "EXECUTION_WARNING", "WATCH", "ELEVATED", "REDUCED_SIZE", "SMALL_SIZE", "MICRO_SIZE"].includes(normalized)) return "yellow";
+  if (["DANGER", "HIGH", "CRITICAL", "EXECUTION_DANGER", "EXECUTION_BLOCK_BUY", "BLOCK_NEW_BUYS", "BLOCKED", "BLOCK_NEW_POSITION"].includes(normalized)) return "red";
   return "muted";
 }
 
@@ -420,6 +428,28 @@ function renderPortfolioRisk(risk) {
 
   setValue("newBuyRiskStatus", buyStatus, riskClass(buyStatus));
   document.getElementById("newBuyRiskMeta").textContent = safeArray(risk?.block_reasons).join(" · ") || "No portfolio-risk BUY block active.";
+}
+
+function adjustmentClass(value) {
+  const parsed = numberValue(value);
+  if (parsed <= 0.2) return "red";
+  if (parsed < 0.75) return "yellow";
+  return "green";
+}
+
+function renderPositionSizing(positionSizing) {
+  const state = text(positionSizing?.state, "UNKNOWN");
+  const blocked = positionSizing?.blocks_buy === true;
+  const reasons = safeArray(positionSizing?.block_reasons);
+  setValue("positionSizingState", state.replaceAll("_", " "), blocked ? "red" : riskClass(state));
+  document.getElementById("positionSizingMeta").textContent = reasons.join(" · ") || `${safeArray(positionSizing?.evaluations).length} sizing evaluation(s) · checked ${dateTime(positionSizing?.checked_at)}`;
+  setValue("recommendedPositionSize", money(positionSizing?.recommended_position_size_usd), blocked ? "red" : "green");
+  document.getElementById("recommendedPositionMeta").textContent = `${text(positionSizing?.recommended_share_quantity, "0")} recommended share(s)`;
+  setValue("maxRiskPerTrade", money(positionSizing?.max_risk_per_trade), "blue");
+  setValue("volatilityAdjustment", `${Math.round(numberValue(positionSizing?.volatility_adjustment) * 100)}%`, adjustmentClass(positionSizing?.volatility_adjustment));
+  setValue("liquidityAdjustment", `${Math.round(numberValue(positionSizing?.liquidity_adjustment) * 100)}%`, adjustmentClass(positionSizing?.liquidity_adjustment));
+  setValue("regimeAdjustment", `${Math.round(numberValue(positionSizing?.regime_adjustment) * 100)}%`, adjustmentClass(positionSizing?.regime_adjustment));
+  setValue("concentrationAdjustment", `${Math.round(numberValue(positionSizing?.concentration_adjustment) * 100)}%`, adjustmentClass(positionSizing?.concentration_adjustment));
 }
 
 function renderExecutionQuality(executionQuality) {
@@ -519,7 +549,7 @@ function renderError(error) {
 
 async function refreshHealth() {
   try {
-    const [recovery, session, account, openOrders, executions, reconciliation, journal, orderLifecycle, orderLifecycleLatest, portfolioRisk, executionQuality, marketRegime] = await Promise.all([
+    const [recovery, session, account, openOrders, executions, reconciliation, journal, orderLifecycle, orderLifecycleLatest, portfolioRisk, executionQuality, positionSizing, marketRegime] = await Promise.all([
       fetchNoCache(ENDPOINTS.recovery),
       fetchNoCache(ENDPOINTS.session),
       fetchNoCache(ENDPOINTS.account),
@@ -531,6 +561,7 @@ async function refreshHealth() {
       fetchNoCache(ENDPOINTS.orderLifecycleLatest),
       fetchNoCache(ENDPOINTS.portfolioRisk),
       fetchNoCache(ENDPOINTS.executionQuality),
+      fetchNoCache(ENDPOINTS.positionSizing),
       fetchNoCache(ENDPOINTS.marketRegime)
     ]);
 
@@ -544,6 +575,7 @@ async function refreshHealth() {
     renderOrderLifecycle(orderLifecycle, orderLifecycleLatest);
     renderPortfolioRisk(portfolioRisk);
     renderExecutionQuality(executionQuality);
+    renderPositionSizing(positionSizing);
     renderMarketRegime(marketRegime);
     document.getElementById("updated").textContent = `Last refresh ${new Date().toLocaleTimeString()}`;
   } catch (error) {

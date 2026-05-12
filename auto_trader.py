@@ -15,6 +15,11 @@ import database
 import order_lifecycle
 import portfolio_risk_engine
 from execution_quality import evaluate_execution_quality
+from position_sizing_engine import (
+    PositionSizingInput,
+    evaluate_position_sizing,
+    record_position_sizing_event,
+)
 from market_regime import get_market_regime
 
 log = logging.getLogger(__name__)
@@ -573,12 +578,24 @@ async def auto_open_position(
     async with _buy_lock:
         symbol = str(row.get("symbol", "")).strip().upper()
 
-        sizing = calculate_position_size(
+        limit_price = float(row.get("price") or row.get("entry_price") or 0)
+        execution_quality = evaluate_execution_quality(
+            row=row,
+            quote=None,
+            limit_price=limit_price,
+            symbol=symbol,
+        )
+        portfolio_risk = await portfolio_risk_engine.get_portfolio_risk()
+        sizing = evaluate_position_sizing(PositionSizingInput(
             row=row,
             open_positions=open_positions,
             account_equity=account_equity,
+            market_regime=market or {},
+            execution_quality=execution_quality,
+            portfolio_risk=portfolio_risk,
             size_factor=size_factor,
-        )
+        ))
+        await record_position_sizing_event(symbol, sizing)
 
         if not symbol or not sizing:
             log.info("AUTO BUY skipped for %s — sizing failed", symbol)
@@ -591,7 +608,20 @@ async def auto_open_position(
             )
             return False
 
-        quantity = float(sizing.get("quantity", 0) or 0)
+        if sizing.get("blocks_buy"):
+            reason = "; ".join(sizing.get("block_reasons") or []) or "Position sizing blocked BUY"
+            log.warning("AUTO BUY blocked for %s — %s", symbol, reason)
+            await _journal_buy_decision(
+                row,
+                "POSITION_SIZE_BLOCKED",
+                "BLOCKED",
+                reason,
+                market,
+                {"sizing": sizing, "execution_quality": execution_quality, "portfolio_risk": portfolio_risk},
+            )
+            return False
+
+        quantity = float(sizing.get("recommended_share_quantity", 0) or 0)
 
         if quantity <= 0:
             log.info("AUTO BUY skipped for %s — invalid quantity", symbol)
@@ -606,13 +636,13 @@ async def auto_open_position(
             return False
 
         limit_price = float(sizing["entry_price"])
-
         execution_quality = evaluate_execution_quality(
             row={**row, "quantity": quantity},
             quote=None,
             limit_price=limit_price,
             symbol=symbol,
         )
+        sizing["execution_quality_context"] = execution_quality
         previous_execution_state = await database.get_app_state(
             f"execution_quality_state:{symbol}",
             "",
@@ -679,7 +709,7 @@ async def auto_open_position(
                 "BLOCKED",
                 str(exc),
                 market,
-                {"quantity": quantity, "sizing": sizing},
+                {"quantity": quantity, "sizing": sizing, "portfolio_risk": portfolio_risk},
             )
             return False
 

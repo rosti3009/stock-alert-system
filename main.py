@@ -17,6 +17,7 @@ import recovery_manager
 import session_manager
 import order_lifecycle
 import portfolio_risk_engine
+import position_sizing_engine
 from execution_quality import evaluate_execution_quality, summarize_execution_quality
 from auto_trader import process_auto_trading
 from market_regime_engine import get_cached_market_regime, get_market_regime_history, refresh_market_regime
@@ -1096,6 +1097,27 @@ async def api_execution_quality_symbol(symbol: str):
         headers=no_cache_headers(),
     )
 
+
+
+
+@app.get("/api/position-sizing")
+async def api_position_sizing():
+    return JSONResponse(
+        await position_sizing_engine.get_position_sizing(list(_latest.values())),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/position-sizing/{symbol}")
+async def api_position_sizing_symbol(symbol: str):
+    normalized = str(symbol or "").strip().upper()
+    row = _latest.get(normalized, {"symbol": normalized})
+    status_code = 200 if normalized in _latest else 404
+    return JSONResponse(
+        await position_sizing_engine.get_position_sizing_for_symbol(normalized, row),
+        status_code=status_code,
+        headers=no_cache_headers(),
+    )
 
 @app.get("/api/exposure")
 async def api_exposure():
