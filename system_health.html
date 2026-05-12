@@ -286,10 +286,13 @@ function renderExecutions(executions) {
 }
 
 function renderReconciliation(status) {
-  const mismatchCount = Number(status?.mismatch_count ?? status?.issues_count ?? 0);
-  const ok = status?.ok === true || mismatchCount === 0;
-  setValue("reconciliationCount", Number.isFinite(mismatchCount) ? mismatchCount : "-", ok ? "green" : "red");
-  document.getElementById("reconciliationMeta").textContent = `${ok ? "OK" : "Manual review required"} · checked ${dateTime(status?.checked_at)}`;
+  const counters = status?.counters || {};
+  const openCount = Number(status?.open_count ?? counters.open ?? status?.mismatch_count ?? status?.issues_count ?? 0);
+  const ok = status?.ok === true || openCount === 0;
+  const resolvedCount = Number(counters.resolved ?? 0);
+  const historicalCount = Number(counters.total ?? openCount);
+  setValue("reconciliationCount", Number.isFinite(openCount) ? openCount : "-", ok ? "green" : "red");
+  document.getElementById("reconciliationMeta").textContent = `${ok ? "OK" : "Manual review required"} · open ${openCount} · resolved ${resolvedCount} · total ${historicalCount} · checked ${dateTime(status?.checked_at)}`;
 }
 
 function renderJournal(events) {

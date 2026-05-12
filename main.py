@@ -974,8 +974,20 @@ async def api_executions(limit: int = 200, symbol: str | None = None):
 
 @app.get("/api/reconciliation-status")
 async def api_reconciliation_status():
+    from reconciliation_lifecycle import get_reconciliation_status
+
     return JSONResponse(
-        await account_sync.get_reconciliation_status(),
+        await get_reconciliation_status(),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/reconciliation-history")
+async def api_reconciliation_history(limit: int = 200, status: str | None = None):
+    from reconciliation_lifecycle import get_reconciliation_history
+
+    return JSONResponse(
+        await get_reconciliation_history(limit=limit, status=status),
         headers=no_cache_headers(),
     )
 
