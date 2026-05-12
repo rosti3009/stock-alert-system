@@ -69,6 +69,7 @@
         <div class="card health-card"><h3>Open Orders Count</h3><div class="value yellow" id="openOrdersCount">-</div><div class="card-note">Open order rows from TWS sync snapshot.</div></div>
         <div class="card health-card"><h3>Reconciliation Issues Count</h3><div class="value" id="reconciliationCount">-</div><div class="card-note" id="reconciliationMeta">-</div></div>
         <div class="card health-card"><h3>Latest Journal Events</h3><div class="value purple" id="journalEventsCount">-</div><div class="card-note" id="latestJournalEvent">-</div></div>
+        <div class="card health-card"><h3>Order Lifecycle Events</h3><div class="value blue" id="orderLifecycleCount">-</div><div class="card-note" id="latestOrderLifecycleEvent">-</div></div>
       </div>
 
       <div class="health-grid">
@@ -88,6 +89,28 @@
             <table>
               <thead><tr><th>Order ID</th><th>Symbol</th><th>Action</th><th>Type</th><th>Qty</th><th>Status</th><th>Updated</th></tr></thead>
               <tbody id="openOrdersRows"><tr><td colspan="7">Loading...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="health-grid">
+        <div class="box">
+          <h3>Recent Order Lifecycle Events</h3>
+          <div class="table-wrap health-table-wrap">
+            <table>
+              <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>State</th><th>Previous</th><th>Order ID</th><th>Reason</th></tr></thead>
+              <tbody id="orderLifecycleRows"><tr><td colspan="7">Loading...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="box">
+          <h3>Latest State Per Order</h3>
+          <div class="table-wrap health-table-wrap">
+            <table>
+              <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>State</th><th>Order ID</th><th>Qty</th><th>Price</th></tr></thead>
+              <tbody id="orderLifecycleLatestRows"><tr><td colspan="7">Loading...</td></tr></tbody>
             </table>
           </div>
         </div>
@@ -127,7 +150,9 @@ const ENDPOINTS = {
   openOrders: "/api/open-orders",
   executions: "/api/executions?limit=25",
   reconciliation: "/api/reconciliation-status",
-  journal: "/api/trade-journal?limit=25"
+  journal: "/api/trade-journal?limit=25",
+  orderLifecycle: "/api/order-lifecycle?limit=25",
+  orderLifecycleLatest: "/api/order-lifecycle-latest?limit=25"
 };
 
 async function fetchNoCache(url) {
@@ -339,6 +364,51 @@ function renderJournal(events) {
   document.getElementById("journalRows").innerHTML = rows || `<tr><td colspan="5">No journal events.</td></tr>`;
 }
 
+
+function lifecycleClass(state) {
+  const normalized = String(state || "").toUpperCase();
+  if (["FILLED", "ACKNOWLEDGED", "SUBMITTED"].includes(normalized)) return "green";
+  if (["CREATED", "PARTIALLY_FILLED", "CANCEL_REQUESTED", "UNKNOWN"].includes(normalized)) return "yellow";
+  if (["CANCELLED", "REJECTED", "EXPIRED", "FAILED"].includes(normalized)) return "red";
+  return "muted";
+}
+
+function renderOrderLifecycle(events, latestStates) {
+  events = safeArray(events);
+  latestStates = safeArray(latestStates);
+  setValue("orderLifecycleCount", events.length, events.length > 0 ? "blue" : "muted");
+  const latest = events[0];
+  document.getElementById("latestOrderLifecycleEvent").textContent = latest
+    ? `${text(latest.state)} · ${text(latest.symbol)} · ${dateTime(latest.timestamp)}`
+    : "No lifecycle events.";
+
+  const eventRows = events.slice(0, 25).map(event => `
+    <tr>
+      <td>${escapeHtml(dateTime(event.timestamp))}</td>
+      <td>${escapeHtml(text(event.symbol))}</td>
+      <td>${escapeHtml(text(event.side))}</td>
+      <td><span class="badge ${lifecycleClass(event.state)}">${escapeHtml(text(event.state))}</span></td>
+      <td>${escapeHtml(text(event.previous_state))}</td>
+      <td>${escapeHtml(text(event.order_id || event.perm_id))}</td>
+      <td class="reason">${escapeHtml(text(event.reason))}</td>
+    </tr>
+  `).join("");
+  document.getElementById("orderLifecycleRows").innerHTML = eventRows || `<tr><td colspan="7">No order lifecycle events.</td></tr>`;
+
+  const latestRows = latestStates.slice(0, 25).map(event => `
+    <tr>
+      <td>${escapeHtml(dateTime(event.timestamp))}</td>
+      <td>${escapeHtml(text(event.symbol))}</td>
+      <td>${escapeHtml(text(event.side))}</td>
+      <td><span class="badge ${lifecycleClass(event.state)}">${escapeHtml(text(event.state))}</span></td>
+      <td>${escapeHtml(text(event.order_id || event.perm_id))}</td>
+      <td>${escapeHtml(text(event.quantity))}</td>
+      <td>${escapeHtml(money(event.price))}</td>
+    </tr>
+  `).join("");
+  document.getElementById("orderLifecycleLatestRows").innerHTML = latestRows || `<tr><td colspan="7">No latest lifecycle states.</td></tr>`;
+}
+
 function renderError(error) {
   setValue("recoveryState", "ERROR", "red");
   document.getElementById("overallState").textContent = "ERROR";
@@ -349,14 +419,16 @@ function renderError(error) {
 
 async function refreshHealth() {
   try {
-    const [recovery, session, account, openOrders, executions, reconciliation, journal] = await Promise.all([
+    const [recovery, session, account, openOrders, executions, reconciliation, journal, orderLifecycle, orderLifecycleLatest] = await Promise.all([
       fetchNoCache(ENDPOINTS.recovery),
       fetchNoCache(ENDPOINTS.session),
       fetchNoCache(ENDPOINTS.account),
       fetchNoCache(ENDPOINTS.openOrders),
       fetchNoCache(ENDPOINTS.executions),
       fetchNoCache(ENDPOINTS.reconciliation),
-      fetchNoCache(ENDPOINTS.journal)
+      fetchNoCache(ENDPOINTS.journal),
+      fetchNoCache(ENDPOINTS.orderLifecycle),
+      fetchNoCache(ENDPOINTS.orderLifecycleLatest)
     ]);
 
     renderRecovery(recovery);
@@ -366,6 +438,7 @@ async function refreshHealth() {
     renderExecutions(executions);
     renderReconciliation(reconciliation);
     renderJournal(journal);
+    renderOrderLifecycle(orderLifecycle, orderLifecycleLatest);
     document.getElementById("updated").textContent = `Last refresh ${new Date().toLocaleTimeString()}`;
   } catch (error) {
     console.error("System health refresh failed", error);

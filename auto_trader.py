@@ -12,6 +12,7 @@ from trading_safety import require_paper_auto_trading_allowed
 
 import config
 import database
+import order_lifecycle
 from market_regime import get_market_regime
 
 log = logging.getLogger(__name__)
@@ -185,6 +186,7 @@ def execute_limit_buy_sync(
     quantity: float,
     limit_price: float,
 ) -> dict:
+    symbol = str(symbol).strip().upper()
     require_paper_auto_trading_allowed("AUTO BUY")
     require_buy_allowed("auto_trader")
 
@@ -195,6 +197,18 @@ def execute_limit_buy_sync(
 
     try:
         client_id = int(config.IBKR_CLIENT_ID) + BUY_CLIENT_ID_OFFSET
+
+        order_lifecycle.safe_record_order_lifecycle_event_sync({
+            "symbol": symbol,
+            "side": "BUY",
+            "quantity": quantity,
+            "price": limit_price,
+            "client_id": client_id,
+            "source_module": "auto_trader.execute_limit_buy_sync",
+            "state": order_lifecycle.OrderState.CREATED,
+            "reason": "AUTO BUY limit order created locally before TWS submission",
+            "raw_payload": {"symbol": symbol, "quantity": quantity, "limit_price": limit_price},
+        })
 
         ib.connect(
             config.IBKR_HOST,
@@ -213,6 +227,17 @@ def execute_limit_buy_sync(
         )
 
         if not protection.get("allowed"):
+            order_lifecycle.safe_record_order_lifecycle_event_sync({
+                "symbol": symbol,
+                "side": "BUY",
+                "quantity": quantity,
+                "price": limit_price,
+                "client_id": client_id,
+                "source_module": "auto_trader.execute_limit_buy_sync",
+                "state": order_lifecycle.OrderState.REJECTED,
+                "reason": protection.get("reason") or "Quote protection blocked order before submission",
+                "raw_payload": protection,
+            })
             return {
                 "symbol": symbol,
                 "order_id": None,
@@ -240,6 +265,19 @@ def execute_limit_buy_sync(
                 and action == "BUY"
                 and status in OPEN_ORDER_STATUSES
             ):
+                order_lifecycle.safe_record_order_lifecycle_event_sync({
+                    "symbol": symbol,
+                    "side": "BUY",
+                    "quantity": quantity,
+                    "price": limit_price,
+                    "order_id": trade.order.orderId,
+                    "perm_id": getattr(trade.order, "permId", None),
+                    "client_id": client_id,
+                    "source_module": "auto_trader.execute_limit_buy_sync",
+                    "state": order_lifecycle.OrderState.ACKNOWLEDGED,
+                    "reason": "Existing pending BUY order found; no duplicate order submitted",
+                    "raw_payload": {"status": status, "filled": trade.orderStatus.filled, "remaining": trade.orderStatus.remaining},
+                })
                 return {
                     "symbol": symbol,
                     "order_id": trade.order.orderId,
@@ -272,11 +310,26 @@ def execute_limit_buy_sync(
             order,
         )
 
+        order_lifecycle.safe_record_order_lifecycle_event_sync({
+            "symbol": symbol,
+            "side": "BUY",
+            "quantity": quantity,
+            "price": limit_price,
+            "order_id": trade.order.orderId,
+            "perm_id": getattr(trade.order, "permId", None),
+            "client_id": client_id,
+            "source_module": "auto_trader.execute_limit_buy_sync",
+            "state": order_lifecycle.OrderState.SUBMITTED,
+            "reason": "AUTO BUY limit order submitted to TWS",
+            "raw_payload": {"order": getattr(trade.order, "__dict__", {})},
+        })
+
         ib.sleep(3)
 
-        return {
+        result = {
             "symbol": symbol,
             "order_id": trade.order.orderId,
+            "perm_id": getattr(trade.order, "permId", None),
             "action": "BUY",
             "order_type": "LMT",
             "limit_price": float(limit_price),
@@ -285,6 +338,35 @@ def execute_limit_buy_sync(
             "remaining": float(trade.orderStatus.remaining or 0),
             "avg_fill_price": float(trade.orderStatus.avgFillPrice or 0),
         }
+
+        order_lifecycle.safe_record_order_lifecycle_event_sync({
+            "symbol": symbol,
+            "side": "BUY",
+            "quantity": quantity,
+            "price": limit_price,
+            "order_id": result["order_id"],
+            "perm_id": result["perm_id"],
+            "client_id": client_id,
+            "source_module": "auto_trader.execute_limit_buy_sync",
+            "state": order_lifecycle.map_ibkr_status_to_state(result["status"], result["filled"], result["remaining"]),
+            "reason": f"TWS order status after submission: {result['status']}",
+            "raw_payload": result,
+        })
+
+        return result
+
+    except Exception as exc:
+        order_lifecycle.safe_record_order_lifecycle_event_sync({
+            "symbol": symbol,
+            "side": "BUY",
+            "quantity": quantity,
+            "price": limit_price,
+            "source_module": "auto_trader.execute_limit_buy_sync",
+            "state": order_lifecycle.OrderState.FAILED,
+            "reason": str(exc),
+            "raw_payload": {"symbol": symbol, "quantity": quantity, "limit_price": limit_price, "error": str(exc)},
+        })
+        raise
 
     finally:
         try:

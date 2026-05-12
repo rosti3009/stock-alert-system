@@ -237,6 +237,25 @@ CREATE TABLE IF NOT EXISTS app_state (
 )
 """
 
+CREATE_ORDER_LIFECYCLE_EVENTS = """
+CREATE TABLE IF NOT EXISTS order_lifecycle_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    symbol TEXT,
+    side TEXT,
+    quantity REAL,
+    price REAL,
+    order_id INTEGER,
+    perm_id INTEGER,
+    client_id INTEGER,
+    source_module TEXT,
+    state TEXT NOT NULL,
+    previous_state TEXT,
+    reason TEXT,
+    raw_json TEXT
+)
+"""
+
 
 async def _ensure_columns(db: aiosqlite.Connection, table: str, columns: dict[str, str]) -> None:
     async with db.execute(f"PRAGMA table_info({table})") as cursor:
@@ -261,6 +280,7 @@ async def init_db() -> None:
         await db.execute(CREATE_OPEN_ORDERS)
         await db.execute(CREATE_EXECUTION_HISTORY)
         await db.execute(CREATE_EQUITY_CURVE)
+        await db.execute(CREATE_ORDER_LIFECYCLE_EVENTS)
 
         await _ensure_columns(db, "signals", {
             "score": "REAL",
@@ -304,6 +324,10 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_open_orders_symbol ON open_orders(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_execution_history_symbol ON execution_history(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_equity_curve_timestamp ON equity_curve(timestamp)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_order_lifecycle_timestamp ON order_lifecycle_events(timestamp)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_order_lifecycle_symbol ON order_lifecycle_events(symbol)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_order_lifecycle_order_id ON order_lifecycle_events(order_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_order_lifecycle_perm_id ON order_lifecycle_events(perm_id)")
         await db.commit()
 
 

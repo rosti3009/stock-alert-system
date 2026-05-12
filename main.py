@@ -15,6 +15,7 @@ import database
 import account_sync
 import recovery_manager
 import session_manager
+import order_lifecycle
 from auto_trader import process_auto_trading
 from market_regime import get_market_regime
 from data_fetcher import fetch_stock_data
@@ -993,6 +994,30 @@ async def api_open_orders():
 async def api_executions(limit: int = 200, symbol: str | None = None):
     return JSONResponse(
         await account_sync.get_executions(limit=limit, symbol=symbol),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/order-lifecycle")
+async def api_order_lifecycle(limit: int = 200):
+    return JSONResponse(
+        await order_lifecycle.get_order_lifecycle_events(limit=limit),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/order-lifecycle/{symbol}")
+async def api_order_lifecycle_symbol(symbol: str, limit: int = 200):
+    return JSONResponse(
+        await order_lifecycle.get_order_lifecycle_events(limit=limit, symbol=symbol),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/order-lifecycle-latest")
+async def api_order_lifecycle_latest(limit: int = 200):
+    return JSONResponse(
+        await order_lifecycle.get_latest_order_lifecycle_states(limit=limit),
         headers=no_cache_headers(),
     )
 
