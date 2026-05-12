@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>System Health — Trading System</title>
+  <link rel="stylesheet" href="/layout.css">
+</head>
+
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-title">TRADING SYSTEM</div>
+      <div class="brand-subtitle">Institutional Dashboard</div>
+    </div>
+
+    <nav class="side-nav">
+      <a href="/dashboard">📊 Dashboard</a>
+      <a href="/market">🌐 Market</a>
+      <a href="/scanner">🔎 Scanner</a>
+      <a href="/analytics">📈 Analytics</a>
+      <a href="/positions">💼 Positions</a>
+      <a href="/portfolio">📁 Portfolio</a>
+      <a href="/history">📜 History</a>
+      <a href="/risk">⚠ Risk</a>
+      <a href="/system-health" class="active">🩺 System Health</a>
+      <a href="/strategies">🧠 Strategies</a>
+      <a href="/settings">⚙ Settings</a>
+    </nav>
+  </aside>
+
+  <main class="main-area">
+    <div class="topbar">
+      <div>
+        <h1 class="page-title">System Health & Monitoring</h1>
+        <div class="page-subtitle">Read-only operational status · Recovery · Account · Orders · Reconciliation</div>
+      </div>
+
+      <div class="status-row">
+        <div class="live-dot" id="refreshDot"></div>
+        <div>READ ONLY</div>
+        <div>|</div>
+        <div id="updated">Loading...</div>
+      </div>
+    </div>
+
+    <div class="container">
+      <div class="health-banner" id="healthBanner">
+        <div>
+          <div class="health-banner-label">Overall Recovery State</div>
+          <div class="health-banner-state" id="overallState">Loading...</div>
+        </div>
+        <div class="health-banner-meta" id="healthMeta">Fetching live system status every 10 seconds.</div>
+      </div>
+
+      <div class="cards health-cards">
+        <div class="card health-card"><h3>Recovery State</h3><div class="value" id="recoveryState">-</div><div class="card-note" id="recoveryReason">-</div></div>
+        <div class="card health-card"><h3>Buy Blocked / Buy Allowed</h3><div class="value" id="buyStatus">-</div><div class="card-note">Read-only status; no orders can be placed here.</div></div>
+        <div class="card health-card"><h3>Last TWS Heartbeat</h3><div class="value" id="lastHeartbeat">-</div><div class="card-note" id="heartbeatMeta">-</div></div>
+        <div class="card health-card"><h3>Account Net Liquidation</h3><div class="value" id="netLiquidation">-</div><div class="card-note" id="accountUpdated">-</div></div>
+        <div class="card health-card"><h3>Buying Power</h3><div class="value blue" id="buyingPower">-</div></div>
+        <div class="card health-card"><h3>Cash</h3><div class="value green" id="cashValue">-</div></div>
+        <div class="card health-card"><h3>Unrealized PnL</h3><div class="value" id="unrealizedPnl">-</div></div>
+        <div class="card health-card"><h3>Realized PnL</h3><div class="value" id="realizedPnl">-</div></div>
+        <div class="card health-card"><h3>Open Orders Count</h3><div class="value yellow" id="openOrdersCount">-</div><div class="card-note">Open order rows from TWS sync snapshot.</div></div>
+        <div class="card health-card"><h3>Reconciliation Issues Count</h3><div class="value" id="reconciliationCount">-</div><div class="card-note" id="reconciliationMeta">-</div></div>
+        <div class="card health-card"><h3>Latest Journal Events</h3><div class="value purple" id="journalEventsCount">-</div><div class="card-note" id="latestJournalEvent">-</div></div>
+      </div>
+
+      <div class="health-grid">
+        <div class="box">
+          <h3>Recovery Issues</h3>
+          <div class="table-wrap health-table-wrap">
+            <table>
+              <thead><tr><th>Severity</th><th>Type</th><th>Source</th><th>Symbol</th><th>Message</th></tr></thead>
+              <tbody id="recoveryIssuesRows"><tr><td colspan="5">Loading...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="box">
+          <h3>Open Orders</h3>
+          <div class="table-wrap health-table-wrap">
+            <table>
+              <thead><tr><th>Order ID</th><th>Symbol</th><th>Action</th><th>Type</th><th>Qty</th><th>Status</th><th>Updated</th></tr></thead>
+              <tbody id="openOrdersRows"><tr><td colspan="7">Loading...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="health-grid">
+        <div class="box">
+          <h3>Recent Executions</h3>
+          <div class="table-wrap health-table-wrap">
+            <table>
+              <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Realized PnL</th></tr></thead>
+              <tbody id="executionsRows"><tr><td colspan="6">Loading...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="box">
+          <h3>Latest Journal Events</h3>
+          <div class="table-wrap health-table-wrap">
+            <table>
+              <thead><tr><th>Time</th><th>Symbol</th><th>Event</th><th>Decision</th><th>Reason</th></tr></thead>
+              <tbody id="journalRows"><tr><td colspan="5">Loading...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+const REFRESH_MS = 10000;
+const ENDPOINTS = {
+  recovery: "/api/recovery-status",
+  account: "/api/account-summary",
+  openOrders: "/api/open-orders",
+  executions: "/api/executions?limit=25",
+  reconciliation: "/api/reconciliation-status",
+  journal: "/api/trade-journal?limit=25"
+};
+
+async function fetchNoCache(url) {
+  const response = await fetch(`${url}${url.includes("?") ? "&" : "?"}_=${Date.now()}`, {cache: "no-store"});
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  return response.json();
+}
+
+function safeArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function text(value, fallback = "-") {
+  if (value === null || value === undefined || value === "") return fallback;
+  return String(value);
+}
+
+function numberValue(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function money(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "-";
+  return parsed.toLocaleString("en-US", {style: "currency", currency: "USD", maximumFractionDigits: 2});
+}
+
+function signedMoney(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "-";
+  return `${parsed >= 0 ? "+" : ""}${money(parsed)}`;
+}
+
+function dateTime(value) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return text(value);
+  return date.toLocaleString();
+}
+
+function relativeAge(seconds) {
+  if (seconds === null || seconds === undefined || Number.isNaN(Number(seconds))) return "age unknown";
+  const value = Number(seconds);
+  if (value < 60) return `${Math.max(0, Math.round(value))}s ago`;
+  if (value < 3600) return `${Math.round(value / 60)}m ago`;
+  return `${Math.round(value / 3600)}h ago`;
+}
+
+function healthClass(status) {
+  const normalized = String(status || "").toUpperCase();
+  if (normalized === "HEALTHY" || normalized === "OK" || normalized === "BUY_ALLOWED") return "green";
+  if (normalized === "DEGRADED") return "yellow";
+  if (["RECOVERY", "BLOCK_BUY", "MANUAL_REVIEW_REQUIRED", "BUY_BLOCKED"].includes(normalized)) return "red";
+  return "muted";
+}
+
+function setValue(id, value, className = "") {
+  const element = document.getElementById(id);
+  element.textContent = value;
+  element.className = `value ${className}`.trim();
+}
+
+function accountLookup(accountRows, tag) {
+  const match = safeArray(accountRows).find(row => String(row.tag || "").toLowerCase() === tag.toLowerCase());
+  return match ? match.value : null;
+}
+
+function latestAccountUpdated(accountRows) {
+  const dates = safeArray(accountRows).map(row => row.updated_at).filter(Boolean).sort().reverse();
+  return dates[0] || null;
+}
+
+function renderRecovery(status) {
+  const state = text(status?.state, "UNKNOWN");
+  const stateClass = healthClass(state);
+  const buyBlocked = status?.buy_blocked === true;
+  const buyLabel = buyBlocked ? "Buy Blocked" : "Buy Allowed";
+  const heartbeat = status?.heartbeat || {};
+
+  setValue("recoveryState", state, stateClass);
+  setValue("buyStatus", buyLabel, buyBlocked ? "red" : "green");
+  setValue("lastHeartbeat", dateTime(heartbeat.last_sync_at), heartbeat.connected ? "green" : "red");
+
+  document.getElementById("recoveryReason").textContent = status?.buy_block_reason || `${status?.issues_count || 0} open recovery issue(s)`;
+  document.getElementById("heartbeatMeta").textContent = `${heartbeat.connected ? "Connected" : "Disconnected or unknown"} · ${relativeAge(heartbeat.age_seconds)} · account ${text(heartbeat.account)}`;
+  document.getElementById("overallState").textContent = state;
+  document.getElementById("overallState").className = `health-banner-state ${stateClass}`;
+  document.getElementById("healthBanner").className = `health-banner health-banner-${stateClass}`;
+  document.getElementById("healthMeta").textContent = `Checked ${dateTime(status?.checked_at)} · BUY status: ${buyLabel}`;
+
+  const issues = safeArray(status?.issues);
+  const rows = issues.slice(0, 25).map(issue => `
+    <tr>
+      <td><span class="badge ${healthClass(issue.severity === "LOW" ? "DEGRADED" : "BLOCK_BUY")}">${escapeHtml(text(issue.severity))}</span></td>
+      <td>${escapeHtml(text(issue.issue_type))}</td>
+      <td>${escapeHtml(text(issue.source))}</td>
+      <td>${escapeHtml(text(issue.symbol))}</td>
+      <td class="reason">${escapeHtml(text(issue.message))}</td>
+    </tr>
+  `).join("");
+  document.getElementById("recoveryIssuesRows").innerHTML = rows || `<tr><td colspan="5">No recovery issues reported.</td></tr>`;
+}
+
+function renderAccount(accountRows) {
+  const netLiquidation = accountLookup(accountRows, "NetLiquidation");
+  const buyingPower = accountLookup(accountRows, "BuyingPower");
+  const cash = accountLookup(accountRows, "TotalCashValue");
+  const unrealized = accountLookup(accountRows, "UnrealizedPnL");
+  const realized = accountLookup(accountRows, "RealizedPnL");
+
+  setValue("netLiquidation", money(netLiquidation), "green");
+  setValue("buyingPower", money(buyingPower), "blue");
+  setValue("cashValue", money(cash), "green");
+  setValue("unrealizedPnl", signedMoney(unrealized), numberValue(unrealized) >= 0 ? "green" : "red");
+  setValue("realizedPnl", signedMoney(realized), numberValue(realized) >= 0 ? "green" : "red");
+  document.getElementById("accountUpdated").textContent = `Updated ${dateTime(latestAccountUpdated(accountRows))}`;
+}
+
+function renderOpenOrders(orders) {
+  orders = safeArray(orders);
+  setValue("openOrdersCount", orders.length, orders.length > 0 ? "yellow" : "green");
+  const rows = orders.slice(0, 25).map(order => `
+    <tr>
+      <td>${escapeHtml(text(order.order_id))}</td>
+      <td>${escapeHtml(text(order.symbol))}</td>
+      <td>${escapeHtml(text(order.action))}</td>
+      <td>${escapeHtml(text(order.order_type))}</td>
+      <td>${escapeHtml(text(order.total_quantity))}</td>
+      <td>${escapeHtml(text(order.status))}</td>
+      <td>${escapeHtml(dateTime(order.updated_at))}</td>
+    </tr>
+  `).join("");
+  document.getElementById("openOrdersRows").innerHTML = rows || `<tr><td colspan="7">No open orders.</td></tr>`;
+}
+
+function renderExecutions(executions) {
+  const rows = safeArray(executions).slice(0, 25).map(execution => `
+    <tr>
+      <td>${escapeHtml(dateTime(execution.time || execution.created_at))}</td>
+      <td>${escapeHtml(text(execution.symbol))}</td>
+      <td>${escapeHtml(text(execution.side))}</td>
+      <td>${escapeHtml(text(execution.quantity))}</td>
+      <td>${escapeHtml(money(execution.price))}</td>
+      <td class="${numberValue(execution.realized_pnl) >= 0 ? "green" : "red"}">${escapeHtml(signedMoney(execution.realized_pnl))}</td>
+    </tr>
+  `).join("");
+  document.getElementById("executionsRows").innerHTML = rows || `<tr><td colspan="6">No recent executions.</td></tr>`;
+}
+
+function renderReconciliation(status) {
+  const mismatchCount = Number(status?.mismatch_count ?? status?.issues_count ?? 0);
+  const ok = status?.ok === true || mismatchCount === 0;
+  setValue("reconciliationCount", Number.isFinite(mismatchCount) ? mismatchCount : "-", ok ? "green" : "red");
+  document.getElementById("reconciliationMeta").textContent = `${ok ? "OK" : "Manual review required"} · checked ${dateTime(status?.checked_at)}`;
+}
+
+function renderJournal(events) {
+  events = safeArray(events);
+  setValue("journalEventsCount", events.length, "purple");
+  const latest = events[0];
+  document.getElementById("latestJournalEvent").textContent = latest
+    ? `${text(latest.event_type)} · ${text(latest.symbol)} · ${dateTime(latest.timestamp)}`
+    : "No journal events.";
+  const rows = events.slice(0, 25).map(event => `
+    <tr>
+      <td>${escapeHtml(dateTime(event.timestamp))}</td>
+      <td>${escapeHtml(text(event.symbol))}</td>
+      <td>${escapeHtml(text(event.event_type))}</td>
+      <td>${escapeHtml(text(event.decision))}</td>
+      <td class="reason">${escapeHtml(text(event.reason))}</td>
+    </tr>
+  `).join("");
+  document.getElementById("journalRows").innerHTML = rows || `<tr><td colspan="5">No journal events.</td></tr>`;
+}
+
+function renderError(error) {
+  setValue("recoveryState", "ERROR", "red");
+  document.getElementById("overallState").textContent = "ERROR";
+  document.getElementById("overallState").className = "health-banner-state red";
+  document.getElementById("healthBanner").className = "health-banner health-banner-red";
+  document.getElementById("healthMeta").textContent = `Unable to refresh all health data: ${error.message}`;
+}
+
+async function refreshHealth() {
+  try {
+    const [recovery, account, openOrders, executions, reconciliation, journal] = await Promise.all([
+      fetchNoCache(ENDPOINTS.recovery),
+      fetchNoCache(ENDPOINTS.account),
+      fetchNoCache(ENDPOINTS.openOrders),
+      fetchNoCache(ENDPOINTS.executions),
+      fetchNoCache(ENDPOINTS.reconciliation),
+      fetchNoCache(ENDPOINTS.journal)
+    ]);
+
+    renderRecovery(recovery);
+    renderAccount(account);
+    renderOpenOrders(openOrders);
+    renderExecutions(executions);
+    renderReconciliation(reconciliation);
+    renderJournal(journal);
+    document.getElementById("updated").textContent = `Last refresh ${new Date().toLocaleTimeString()}`;
+  } catch (error) {
+    console.error("System health refresh failed", error);
+    renderError(error);
+    document.getElementById("updated").textContent = `Refresh failed ${new Date().toLocaleTimeString()}`;
+  }
+}
+
+refreshHealth();
+setInterval(refreshHealth, REFRESH_MS);
+</script>
+</body>
+</html>

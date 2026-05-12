@@ -1038,6 +1038,12 @@ async def serve_risk():
     return serve_html_file("risk.html", fallback_to_index=True)
 
 
+@app.get("/system-health", response_class=HTMLResponse)
+@app.get("/system_health", response_class=HTMLResponse)
+async def serve_system_health():
+    return serve_html_file("system_health.html", fallback_to_index=True)
+
+
 @app.get("/strategies", response_class=HTMLResponse)
 async def serve_strategies():
     return serve_html_file("strategies.html", fallback_to_index=True)
