@@ -413,6 +413,48 @@ async def refresh_open_positions() -> list[dict]:
         new_action = position_update.get("action")
         new_status = position_update.get("status", "OPEN")
 
+        journal_event_by_action = {
+            "STOP_LOSS_HIT": "STOP_LOSS_TRIGGERED",
+            "TAKE_PROFIT_1": "TP1_TRIGGERED",
+            "TAKE_PROFIT_2": "TP2_TRIGGERED",
+            "TRAILING_STOP_UPDATED": "TRAILING_STOP_UPDATED",
+            "SELL_SIGNAL": "SELL_SIGNAL_DETECTED",
+        }
+
+        journal_event_type = journal_event_by_action.get(new_action)
+
+        if journal_event_type and new_action != previous_action:
+            await database.safe_record_trade_journal_event({
+                "symbol": symbol,
+                "event_type": journal_event_type,
+                "decision": new_action,
+                "reason": position_update.get("reason"),
+                "source_module": "main.refresh_open_positions",
+                "signal_score": scan_result.get("score"),
+                "weekly_score": scan_result.get("weekly_score"),
+                "price": position_update.get("current_price"),
+                "quantity": position_update.get("sell_quantity") or position.get("quantity"),
+                "stop_loss": position_update.get("stop_loss"),
+                "take_profit_1": position_update.get("take_profit_1"),
+                "take_profit_2": position_update.get("take_profit_2"),
+                "risk_percent": scan_result.get("risk_percent"),
+                "realized_pnl": (
+                    position_update.get("profit_amount")
+                    if new_status == "CLOSED"
+                    else None
+                ),
+                "unrealized_pnl": (
+                    position_update.get("profit_amount")
+                    if new_status != "CLOSED"
+                    else None
+                ),
+                "raw_payload": {
+                    "position": position,
+                    "scan_result": scan_result,
+                    "position_update": position_update,
+                },
+            })
+
         updated = await database.update_position(symbol, {
             "current_price": position_update.get("current_price"),
             "profit_amount": position_update.get("profit_amount"),
@@ -950,6 +992,14 @@ async def api_rebuild_top_weekly():
 @app.get("/api/history")
 async def api_history():
     return JSONResponse(await database.get_recent_signals(50), headers=no_cache_headers())
+
+
+@app.get("/api/trade-journal")
+async def api_trade_journal(limit: int = 200, symbol: str | None = None):
+    return JSONResponse(
+        await database.get_trade_journal(limit=limit, symbol=symbol),
+        headers=no_cache_headers(),
+    )
 
 
 @app.get("/api/scan-runs")

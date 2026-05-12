@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import config
+import database
 from ibkr_client import IBKRClient
+from trading_safety import require_paper_auto_trading_allowed
 
 
 class TradeEngine:
@@ -15,20 +17,7 @@ class TradeEngine:
         self.client.disconnect()
 
     def _validate_trading_permissions(self) -> None:
-        if config.TRADING_MODE == "OFF":
-            raise RuntimeError("Trading blocked: TRADING_MODE is OFF")
-
-        if not config.AUTO_SEND_ORDERS:
-            raise RuntimeError("Trading blocked: AUTO_SEND_ORDERS is false")
-
-        if not config.IBKR_PAPER_TRADING:
-            raise RuntimeError("Trading blocked: IBKR_PAPER_TRADING is false")
-
-        if config.IBKR_ENABLE_REAL_TRADING:
-            raise RuntimeError("Trading blocked: LIVE trading is enabled")
-
-        if int(config.IBKR_PORT) != 7497:
-            raise RuntimeError("Trading blocked: IBKR port is not Paper port 7497")
+        require_paper_auto_trading_allowed("Trading")
 
     def _validate_order_risk(
         self,
@@ -80,7 +69,24 @@ class TradeEngine:
         quantity: float,
         limit_price: float,
     ) -> dict | None:
-        self._validate_trading_permissions()
+        try:
+            self._validate_trading_permissions()
+        except RuntimeError as exc:
+            database.safe_record_trade_journal_event_sync({
+                "symbol": symbol,
+                "event_type": "BUY_BLOCKED_BY_SAFETY_GATE",
+                "decision": "BLOCKED",
+                "reason": str(exc),
+                "source_module": "trade_engine",
+                "price": limit_price,
+                "quantity": quantity,
+                "raw_payload": {
+                    "symbol": symbol,
+                    "quantity": quantity,
+                    "limit_price": limit_price,
+                },
+            })
+            raise
 
         risk = self._validate_order_risk(
             symbol=symbol,
