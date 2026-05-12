@@ -121,6 +121,17 @@ SYMBOL_SECTOR_OVERRIDES = {}
 
 
 # ==============================
+# EXECUTION QUALITY
+# ==============================
+MAX_SPREAD_PERCENT = get_float("MAX_SPREAD_PERCENT", 3.0)
+MAX_SPREAD_DOLLARS = get_float("MAX_SPREAD_DOLLARS", 0.50)
+MIN_RELATIVE_VOLUME = get_float("MIN_RELATIVE_VOLUME", 0.75)
+MIN_AVERAGE_VOLUME = get_float("MIN_AVERAGE_VOLUME", 500000.0)
+MAX_SLIPPAGE_ESTIMATE = get_float("MAX_SLIPPAGE_ESTIMATE", 1.0)
+MAX_INTRADAY_VOLATILITY = get_float("MAX_INTRADAY_VOLATILITY", 6.0)
+MAX_CANDLE_EXPANSION_PERCENT = get_float("MAX_CANDLE_EXPANSION_PERCENT", 250.0)
+
+# ==============================
 # SYMBOLS FALLBACK
 # ==============================
 SYMBOLS = [

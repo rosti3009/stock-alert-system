@@ -14,6 +14,7 @@ import config
 import database
 import order_lifecycle
 import portfolio_risk_engine
+from execution_quality import evaluate_execution_quality
 from market_regime import get_market_regime
 
 log = logging.getLogger(__name__)
@@ -239,6 +240,16 @@ def execute_limit_buy_sync(
                 "reason": protection.get("reason") or "Quote protection blocked order before submission",
                 "raw_payload": protection,
             })
+            database.safe_record_trade_journal_event_sync({
+                "symbol": symbol,
+                "event_type": "EXECUTION_BLOCK_BUY" if protection.get("execution_quality", {}).get("blocks_buy") else "BUY_BLOCKED_BY_SAFETY_GATE",
+                "decision": "BLOCKED",
+                "reason": protection.get("reason") or "Quote protection blocked order before submission",
+                "source_module": "auto_trader.execute_limit_buy_sync",
+                "price": limit_price,
+                "quantity": quantity,
+                "raw_payload": protection,
+            })
             return {
                 "symbol": symbol,
                 "order_id": None,
@@ -251,6 +262,7 @@ def execute_limit_buy_sync(
                 "avg_fill_price": 0.0,
                 "reason": protection.get("reason"),
                 "quote": protection.get("quote"),
+                "execution_quality": protection.get("execution_quality"),
             }
 
         ib.reqAllOpenOrders()
@@ -594,6 +606,68 @@ async def auto_open_position(
             return False
 
         limit_price = float(sizing["entry_price"])
+
+        execution_quality = evaluate_execution_quality(
+            row={**row, "quantity": quantity},
+            quote=None,
+            limit_price=limit_price,
+            symbol=symbol,
+        )
+        previous_execution_state = await database.get_app_state(
+            f"execution_quality_state:{symbol}",
+            "",
+        )
+        await database.set_app_state(
+            f"execution_quality_state:{symbol}",
+            execution_quality.get("state"),
+        )
+
+        if execution_quality.get("blocks_buy"):
+            reason = execution_quality.get("blocked_buy_reason") or "Execution quality blocked BUY"
+            log.warning("AUTO BUY blocked for %s — %s", symbol, reason)
+            await _journal_buy_decision(
+                row,
+                "EXECUTION_BLOCK_BUY",
+                "BLOCKED",
+                reason,
+                market,
+                {
+                    "quantity": quantity,
+                    "limit_price": limit_price,
+                    "sizing": sizing,
+                    "execution_quality": execution_quality,
+                },
+            )
+            return False
+
+        if execution_quality.get("state") in {"EXECUTION_WARNING", "EXECUTION_DANGER"}:
+            await _journal_buy_decision(
+                row,
+                "EXECUTION_WARNING",
+                "WARNING",
+                "; ".join(execution_quality.get("warnings") or execution_quality.get("dangers") or ["Execution quality warning"]),
+                market,
+                {
+                    "quantity": quantity,
+                    "limit_price": limit_price,
+                    "sizing": sizing,
+                    "execution_quality": execution_quality,
+                },
+            )
+        elif previous_execution_state == "EXECUTION_BLOCK_BUY":
+            await _journal_buy_decision(
+                row,
+                "EXECUTION_RECOVERED",
+                "RECOVERED",
+                "Execution quality recovered; BUY may continue through remaining safety gates",
+                market,
+                {
+                    "quantity": quantity,
+                    "limit_price": limit_price,
+                    "sizing": sizing,
+                    "execution_quality": execution_quality,
+                },
+            )
 
         try:
             await portfolio_risk_engine.require_new_buy_allowed(symbol)

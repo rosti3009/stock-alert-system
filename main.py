@@ -17,6 +17,7 @@ import recovery_manager
 import session_manager
 import order_lifecycle
 import portfolio_risk_engine
+from execution_quality import evaluate_execution_quality, summarize_execution_quality
 from auto_trader import process_auto_trading
 from market_regime import get_market_regime
 from data_fetcher import fetch_stock_data
@@ -1023,6 +1024,45 @@ async def api_executions(limit: int = 200, symbol: str | None = None):
 async def api_portfolio_risk():
     return JSONResponse(
         await portfolio_risk_engine.get_portfolio_risk(),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/execution-quality")
+async def api_execution_quality():
+    evaluations = [
+        evaluate_execution_quality(row=row, symbol=symbol)
+        for symbol, row in sorted(_latest.items())
+    ]
+    return JSONResponse(
+        summarize_execution_quality(evaluations),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/execution-quality/{symbol}")
+async def api_execution_quality_symbol(symbol: str):
+    normalized = str(symbol or "").strip().upper()
+    row = _latest.get(normalized)
+
+    if not row:
+        return JSONResponse(
+            {
+                "symbol": normalized,
+                "state": "EXECUTION_WARNING",
+                "allowed": True,
+                "blocks_buy": False,
+                "blocked_buy_reason": None,
+                "warnings": ["No cached scan data available for execution-quality evaluation"],
+                "dangers": [],
+                "metrics": {},
+            },
+            status_code=404,
+            headers=no_cache_headers(),
+        )
+
+    return JSONResponse(
+        evaluate_execution_quality(row=row, symbol=normalized),
         headers=no_cache_headers(),
     )
 
