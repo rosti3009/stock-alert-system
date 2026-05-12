@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from ib_insync import IB, Stock, LimitOrder
 from trade_protection import validate_buy_before_order
+from trading_safety import require_paper_auto_trading_allowed
 
 import config
 import database
@@ -31,6 +32,60 @@ OPEN_ORDER_STATUSES = {
 }
 
 _buy_lock = asyncio.Lock()
+
+
+def _base_journal_event(
+    row: dict,
+    event_type: str,
+    decision: str,
+    reason: str,
+    market: dict | None = None,
+    extra: dict | None = None,
+) -> dict:
+    payload = dict(row or {})
+
+    if extra:
+        payload.update(extra)
+
+    return {
+        "symbol": str(payload.get("symbol") or "").strip().upper(),
+        "event_type": event_type,
+        "decision": decision,
+        "reason": reason,
+        "source_module": "auto_trader",
+        "signal_score": payload.get("score"),
+        "weekly_score": payload.get("weekly_score"),
+        "market_regime": (market or {}).get("regime"),
+        "price": payload.get("price") or payload.get("entry_price"),
+        "quantity": payload.get("quantity"),
+        "stop_loss": payload.get("stop_loss"),
+        "take_profit_1": payload.get("take_profit_1"),
+        "take_profit_2": payload.get("take_profit_2"),
+        "risk_percent": payload.get("risk_percent"),
+        "realized_pnl": payload.get("realized_pnl"),
+        "unrealized_pnl": payload.get("unrealized_pnl"),
+        "raw_payload": payload,
+    }
+
+
+async def _journal_buy_decision(
+    row: dict,
+    event_type: str,
+    decision: str,
+    reason: str,
+    market: dict | None = None,
+    extra: dict | None = None,
+) -> None:
+    await database.safe_record_trade_journal_event(
+        _base_journal_event(
+            row=row,
+            event_type=event_type,
+            decision=decision,
+            reason=reason,
+            market=market,
+            extra=extra,
+        )
+    )
 
 
 def is_us_regular_market_open() -> bool:
@@ -129,6 +184,8 @@ def execute_limit_buy_sync(
     quantity: float,
     limit_price: float,
 ) -> dict:
+    require_paper_auto_trading_allowed("AUTO BUY")
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -297,10 +354,24 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
         if signal == "BUY":
             if not market_is_open:
                 log.info("AUTO BUY skipped for %s — US market closed", symbol)
+                await _journal_buy_decision(
+                    row,
+                    "BUY_CANDIDATE_REJECTED",
+                    "REJECTED",
+                    "US market closed",
+                    market,
+                )
                 continue
 
             if not allow_new_buys:
                 log.info("AUTO BUY blocked for %s — market regime is %s", symbol, regime)
+                await _journal_buy_decision(
+                    row,
+                    "BUY_CANDIDATE_REJECTED",
+                    "REJECTED",
+                    f"Market regime blocks new buys: {regime}",
+                    market,
+                )
                 continue
 
             if score < min_score_override:
@@ -310,21 +381,51 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
                     score,
                     min_score_override,
                 )
+                await _journal_buy_decision(
+                    row,
+                    "BUY_CANDIDATE_REJECTED",
+                    "REJECTED",
+                    f"Score too low ({score} < {min_score_override})",
+                    market,
+                )
                 continue
 
             if symbol in open_symbols:
                 log.info("AUTO BUY skipped for %s — position already open", symbol)
+                await _journal_buy_decision(
+                    row,
+                    "BUY_CANDIDATE_REJECTED",
+                    "REJECTED",
+                    "Position already open",
+                    market,
+                )
                 continue
 
             if current_open_count >= max_positions:
                 log.info("AUTO BUY skipped for %s — max positions reached", symbol)
+                await _journal_buy_decision(
+                    row,
+                    "BUY_CANDIDATE_REJECTED",
+                    "REJECTED",
+                    f"Max positions reached {current_open_count}/{max_positions}",
+                    market,
+                )
                 continue
+
+            await _journal_buy_decision(
+                row,
+                "BUY_CANDIDATE_ACCEPTED",
+                "ACCEPTED",
+                "BUY candidate passed auto-trading filters",
+                market,
+            )
 
             opened = await auto_open_position(
                 row=row,
                 open_positions=open_positions,
                 account_equity=account_equity,
                 size_factor=size_factor,
+                market=market,
             )
 
             if opened:
@@ -336,6 +437,19 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
 
         elif signal == "SELL":
             if symbol in open_symbols:
+                await database.safe_record_trade_journal_event({
+                    "symbol": symbol,
+                    "event_type": "SELL_SIGNAL_DETECTED",
+                    "decision": "CLOSE",
+                    "reason": "SELL signal",
+                    "source_module": "auto_trader",
+                    "signal_score": row.get("score"),
+                    "weekly_score": row.get("weekly_score"),
+                    "market_regime": regime,
+                    "price": row.get("price"),
+                    "raw_payload": row,
+                })
+
                 closed = await auto_close_position(symbol, "SELL signal")
 
                 if closed:
@@ -357,6 +471,7 @@ async def auto_open_position(
     open_positions: list[dict],
     account_equity: float,
     size_factor: float = 1.0,
+    market: dict | None = None,
 ) -> bool:
     async with _buy_lock:
         symbol = str(row.get("symbol", "")).strip().upper()
@@ -370,18 +485,41 @@ async def auto_open_position(
 
         if not symbol or not sizing:
             log.info("AUTO BUY skipped for %s — sizing failed", symbol)
+            await _journal_buy_decision(
+                row,
+                "BUY_CANDIDATE_REJECTED",
+                "REJECTED",
+                "Position sizing failed",
+                market,
+            )
             return False
 
         quantity = float(sizing.get("quantity", 0) or 0)
 
         if quantity <= 0:
             log.info("AUTO BUY skipped for %s — invalid quantity", symbol)
+            await _journal_buy_decision(
+                row,
+                "BUY_CANDIDATE_REJECTED",
+                "REJECTED",
+                "Invalid quantity",
+                market,
+                {"quantity": quantity, "sizing": sizing},
+            )
             return False
 
         limit_price = float(sizing["entry_price"])
 
         if not config.AUTO_SEND_ORDERS:
             log.warning("AUTO BUY blocked for %s — AUTO_SEND_ORDERS is false", symbol)
+            await _journal_buy_decision(
+                row,
+                "BUY_BLOCKED_BY_SAFETY_GATE",
+                "BLOCKED",
+                "AUTO_SEND_ORDERS is false",
+                market,
+                {"quantity": quantity, "sizing": sizing},
+            )
             return False
 
         try:
@@ -394,10 +532,31 @@ async def auto_open_position(
 
         except Exception as e:
             log.exception("AUTO BUY execution failed for %s | %s", symbol, e)
+            event_type = (
+                "BUY_BLOCKED_BY_SAFETY_GATE"
+                if "blocked:" in str(e)
+                else "BUY_CANDIDATE_REJECTED"
+            )
+            await _journal_buy_decision(
+                row,
+                event_type,
+                "BLOCKED" if event_type == "BUY_BLOCKED_BY_SAFETY_GATE" else "REJECTED",
+                str(e),
+                market,
+                {"quantity": quantity, "limit_price": limit_price, "sizing": sizing},
+            )
             return False
 
         if not order_result:
             log.warning("AUTO BUY blocked for %s — empty TWS result", symbol)
+            await _journal_buy_decision(
+                row,
+                "BUY_CANDIDATE_REJECTED",
+                "REJECTED",
+                "Empty TWS result",
+                market,
+                {"quantity": quantity, "limit_price": limit_price, "sizing": sizing},
+            )
             return False
 
         order_status = str(order_result.get("status") or "")
@@ -417,13 +576,39 @@ async def auto_open_position(
                 "AUTO BUY skipped for %s — pending BUY order already exists",
                 symbol,
             )
+            await _journal_buy_decision(
+                row,
+                "BUY_CANDIDATE_REJECTED",
+                "REJECTED",
+                "Pending BUY order already exists",
+                market,
+                {"quantity": quantity, "order_result": order_result, "sizing": sizing},
+            )
             return False
+
+        if order_result.get("order_id"):
+            await _journal_buy_decision(
+                row,
+                "BUY_ORDER_SUBMITTED",
+                "SUBMITTED",
+                f"TWS order status: {order_status}",
+                market,
+                {"quantity": quantity, "order_result": order_result, "sizing": sizing},
+            )
 
         if order_status not in FILLED_STATUSES or filled <= 0:
             log.warning(
                 "AUTO BUY NOT SAVED TO DB | %s | order accepted but not filled yet | status=%s",
                 symbol,
                 order_status,
+            )
+            await _journal_buy_decision(
+                row,
+                "BUY_CANDIDATE_REJECTED",
+                "REJECTED",
+                f"Order accepted but not filled: {order_status}",
+                market,
+                {"quantity": quantity, "order_result": order_result, "sizing": sizing},
             )
             return False
 
@@ -464,10 +649,39 @@ async def auto_open_position(
                 real_entry_price,
             )
 
+            await _journal_buy_decision(
+                row,
+                "BUY_ORDER_FILLED",
+                "FILLED",
+                "AUTO BUY filled in TWS and saved to DB",
+                market,
+                {
+                    "quantity": filled,
+                    "price": real_entry_price,
+                    "order_result": order_result,
+                    "position_payload": payload,
+                    "sizing": sizing,
+                },
+            )
+
             return True
 
         except Exception as e:
             log.warning("AUTO BUY filled but DB save failed for %s: %s", symbol, e)
+            await _journal_buy_decision(
+                row,
+                "BUY_CANDIDATE_REJECTED",
+                "REJECTED",
+                f"Order filled but DB save failed: {e}",
+                market,
+                {
+                    "quantity": filled,
+                    "price": real_entry_price,
+                    "order_result": order_result,
+                    "position_payload": payload,
+                    "sizing": sizing,
+                },
+            )
             return False
 
 

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
+import sqlite3
 from datetime import datetime, timezone
 import aiosqlite
 
 from config import DB_PATH, ACCOUNT_BALANCE
+
+log = logging.getLogger(__name__)
 
 
 def now_iso() -> str:
@@ -135,6 +139,30 @@ CREATE TABLE IF NOT EXISTS executions (
 )
 """
 
+CREATE_TRADE_JOURNAL = """
+CREATE TABLE IF NOT EXISTS trade_journal (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT,
+    symbol TEXT,
+    event_type TEXT NOT NULL,
+    decision TEXT,
+    reason TEXT,
+    source_module TEXT,
+    signal_score REAL,
+    weekly_score REAL,
+    market_regime TEXT,
+    price REAL,
+    quantity REAL,
+    stop_loss REAL,
+    take_profit_1 REAL,
+    take_profit_2 REAL,
+    risk_percent REAL,
+    realized_pnl REAL,
+    unrealized_pnl REAL,
+    raw_json TEXT
+)
+"""
+
 CREATE_APP_STATE = """
 CREATE TABLE IF NOT EXISTS app_state (
     key TEXT PRIMARY KEY,
@@ -161,6 +189,7 @@ async def init_db() -> None:
         await db.execute(CREATE_POSITIONS)
         await db.execute(CREATE_APP_STATE)
         await db.execute(CREATE_EXECUTIONS)
+        await db.execute(CREATE_TRADE_JOURNAL)
 
         await _ensure_columns(db, "signals", {
             "score": "REAL",
@@ -196,6 +225,9 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_daily_candidates_symbol ON daily_candidates(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_daily_candidates_score ON daily_candidates(weekly_score)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_trade_journal_timestamp ON trade_journal(timestamp)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_trade_journal_symbol ON trade_journal(symbol)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_trade_journal_event_type ON trade_journal(event_type)")
         await db.commit()
 
 
@@ -216,6 +248,122 @@ def _decode_json(value):
         return json.loads(value)
     except Exception:
         return [str(value)]
+
+
+def _journal_payload(data: dict | None) -> str:
+    if data is None:
+        return "{}"
+
+    try:
+        return json.dumps(data, ensure_ascii=False, default=str)
+    except Exception:
+        return json.dumps({"repr": repr(data)}, ensure_ascii=False)
+
+
+def _journal_row(event: dict) -> dict:
+    raw_payload = event.get("raw_json")
+
+    if raw_payload is None:
+        raw_payload = event.get("raw_payload")
+
+    return {
+        "timestamp": event.get("timestamp") or now_iso(),
+        "symbol": str(event.get("symbol") or "").strip().upper() or None,
+        "event_type": event.get("event_type"),
+        "decision": event.get("decision"),
+        "reason": event.get("reason"),
+        "source_module": event.get("source_module"),
+        "signal_score": event.get("signal_score", event.get("score")),
+        "weekly_score": event.get("weekly_score"),
+        "market_regime": event.get("market_regime"),
+        "price": event.get("price", event.get("entry_price", event.get("buy_price"))),
+        "quantity": event.get("quantity"),
+        "stop_loss": event.get("stop_loss"),
+        "take_profit_1": event.get("take_profit_1"),
+        "take_profit_2": event.get("take_profit_2"),
+        "risk_percent": event.get("risk_percent"),
+        "realized_pnl": event.get("realized_pnl"),
+        "unrealized_pnl": event.get("unrealized_pnl", event.get("profit_amount")),
+        "raw_json": _journal_payload(raw_payload if raw_payload is not None else event),
+    }
+
+
+def _trade_journal_insert_sql() -> str:
+    return """
+    INSERT INTO trade_journal (
+        timestamp, symbol, event_type, decision, reason, source_module,
+        signal_score, weekly_score, market_regime, price, quantity,
+        stop_loss, take_profit_1, take_profit_2, risk_percent,
+        realized_pnl, unrealized_pnl, raw_json
+    )
+    VALUES (
+        :timestamp, :symbol, :event_type, :decision, :reason, :source_module,
+        :signal_score, :weekly_score, :market_regime, :price, :quantity,
+        :stop_loss, :take_profit_1, :take_profit_2, :risk_percent,
+        :realized_pnl, :unrealized_pnl, :raw_json
+    )
+    """
+
+
+async def record_trade_journal_event(event: dict) -> None:
+    if not event.get("event_type"):
+        raise ValueError("trade journal event_type is required")
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_TRADE_JOURNAL)
+        await db.execute(_trade_journal_insert_sql(), _journal_row(event))
+        await db.commit()
+
+
+async def safe_record_trade_journal_event(event: dict) -> None:
+    try:
+        await record_trade_journal_event(event)
+    except Exception as exc:
+        log.warning("Trade journal insert failed: %s", exc)
+
+
+def safe_record_trade_journal_event_sync(event: dict) -> None:
+    try:
+        if not event.get("event_type"):
+            raise ValueError("trade journal event_type is required")
+
+        with sqlite3.connect(DB_PATH) as db:
+            db.execute(CREATE_TRADE_JOURNAL)
+            db.execute(_trade_journal_insert_sql(), _journal_row(event))
+            db.commit()
+
+    except Exception as exc:
+        log.warning("Trade journal sync insert failed: %s", exc)
+
+
+async def get_trade_journal(limit: int = 200, symbol: str | None = None) -> list[dict]:
+    limit = max(1, min(int(limit or 200), 1000))
+
+    if symbol:
+        sql = """
+        SELECT *
+        FROM trade_journal
+        WHERE symbol = ?
+        ORDER BY timestamp DESC, id DESC
+        LIMIT ?
+        """
+        params = (symbol.strip().upper(), limit)
+    else:
+        sql = """
+        SELECT *
+        FROM trade_journal
+        ORDER BY timestamp DESC, id DESC
+        LIMIT ?
+        """
+        params = (limit,)
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_TRADE_JOURNAL)
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
+
+    return [dict(row) for row in rows]
 
 
 def _row_to_dict(row) -> dict:
@@ -682,13 +830,31 @@ async def update_position(symbol: str, updates: dict) -> dict | None:
 
 
 async def close_position(symbol: str, reason: str = "Closed manually") -> dict | None:
-    return await update_position(symbol, {
+    updated = await update_position(symbol, {
         "status": "CLOSED",
         "action": "CLOSED",
         "reason": reason,
         "closed_at": now_iso(),
         "updated_at": now_iso(),
     })
+
+    if updated and not str(reason or "").upper().startswith("AUTO:"):
+        await safe_record_trade_journal_event({
+            "symbol": symbol,
+            "event_type": "MANUAL_CLOSE",
+            "decision": "CLOSED",
+            "reason": reason,
+            "source_module": "database.close_position",
+            "price": updated.get("current_price"),
+            "quantity": updated.get("quantity"),
+            "stop_loss": updated.get("stop_loss"),
+            "take_profit_1": updated.get("take_profit_1"),
+            "take_profit_2": updated.get("take_profit_2"),
+            "realized_pnl": updated.get("profit_amount"),
+            "raw_payload": updated,
+        })
+
+    return updated
 
 
 async def get_performance_summary() -> dict:
