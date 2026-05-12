@@ -27,10 +27,12 @@ class PortfolioRiskEngineTests(unittest.TestCase):
             "MAX_DAILY_DRAWDOWN_PERCENT": config.MAX_DAILY_DRAWDOWN_PERCENT,
             "MAX_ACCOUNT_UTILIZATION_PERCENT": config.MAX_ACCOUNT_UTILIZATION_PERCENT,
             "ACCOUNT_BALANCE": config.ACCOUNT_BALANCE,
+            "VIRTUAL_TRADING_CAPITAL_USD": config.VIRTUAL_TRADING_CAPITAL_USD,
         }
         config.DB_PATH = self.tmp.name
         database.DB_PATH = self.tmp.name
         config.ACCOUNT_BALANCE = 10000.0
+        config.VIRTUAL_TRADING_CAPITAL_USD = 5000.0
         config.MAX_TOTAL_EXPOSURE_PERCENT = 80.0
         config.MAX_SYMBOL_EXPOSURE_PERCENT = 25.0
         config.MAX_SECTOR_EXPOSURE_PERCENT = 45.0
@@ -58,8 +60,8 @@ class PortfolioRiskEngineTests(unittest.TestCase):
     def test_safe_snapshot_calculates_exposures(self):
         snapshot = portfolio_risk_engine.evaluate_risk_snapshot(
             positions=[
-                {"symbol": "AAPL", "quantity": 10, "buy_price": 100, "current_price": 110, "stop_loss": 95},
-                {"symbol": "JPM", "quantity": 5, "buy_price": 100, "current_price": 100, "stop_loss": 90},
+                {"symbol": "AAPL", "quantity": 5, "buy_price": 100, "current_price": 110, "stop_loss": 95},
+                {"symbol": "JPM", "quantity": 2.5, "buy_price": 100, "current_price": 100, "stop_loss": 90},
             ],
             account_summary=[{"tag": "NetLiquidation", "value": "10000"}],
             daily_realized_pnl=100,
@@ -68,15 +70,19 @@ class PortfolioRiskEngineTests(unittest.TestCase):
 
         self.assertEqual(snapshot["risk_state"], "SAFE")
         self.assertEqual(snapshot["new_buy_risk_status"], "ALLOWED")
+        self.assertEqual(snapshot["account_equity"], 5000.0)
+        self.assertEqual(snapshot["effective_equity"], 5000.0)
+        self.assertEqual(snapshot["virtual_trading_capital"], 5000.0)
+        self.assertAlmostEqual(snapshot["broker_net_liquidation"], 10000.0)
         self.assertAlmostEqual(snapshot["total_portfolio_exposure_percent"], 16.0)
         self.assertAlmostEqual(snapshot["largest_position_percent"], 11.0)
         self.assertEqual(snapshot["largest_position"]["symbol"], "AAPL")
-        self.assertEqual(snapshot["total_open_risk"], 200.0)
-        self.assertEqual(snapshot["daily_realized_pnl_percent"], 1.0)
+        self.assertEqual(snapshot["total_open_risk"], 100.0)
+        self.assertEqual(snapshot["daily_realized_pnl_percent"], 2.0)
 
     def test_blocks_new_buys_for_symbol_concentration(self):
         snapshot = portfolio_risk_engine.evaluate_risk_snapshot(
-            positions=[{"symbol": "AAPL", "quantity": 30, "buy_price": 100, "current_price": 100, "stop_loss": 90}],
+            positions=[{"symbol": "AAPL", "quantity": 15, "buy_price": 100, "current_price": 100, "stop_loss": 90}],
             account_summary=[{"tag": "NetLiquidation", "value": "10000"}],
         )
 
@@ -93,13 +99,13 @@ class PortfolioRiskEngineTests(unittest.TestCase):
 
         self.assertEqual(snapshot["risk_state"], "BLOCK_NEW_BUYS")
         self.assertTrue(snapshot["blocks_new_buys"])
-        self.assertAlmostEqual(snapshot["daily_drawdown_percent"], 6.0)
+        self.assertAlmostEqual(snapshot["daily_drawdown_percent"], 12.0)
 
     def test_sector_concentration_warns_before_blocking(self):
         snapshot = portfolio_risk_engine.evaluate_risk_snapshot(
             positions=[
-                {"symbol": "AAPL", "quantity": 20, "buy_price": 100, "current_price": 100, "stop_loss": 90},
-                {"symbol": "MSFT", "quantity": 18, "buy_price": 100, "current_price": 100, "stop_loss": 90},
+                {"symbol": "AAPL", "quantity": 12, "buy_price": 100, "current_price": 100, "stop_loss": 90},
+                {"symbol": "MSFT", "quantity": 9, "buy_price": 100, "current_price": 100, "stop_loss": 90},
             ],
             account_summary=[{"tag": "NetLiquidation", "value": "10000"}],
         )
@@ -107,6 +113,26 @@ class PortfolioRiskEngineTests(unittest.TestCase):
         self.assertEqual(snapshot["risk_state"], "WARNING")
         self.assertFalse(snapshot["blocks_new_buys"])
         self.assertTrue(any(alert["metric"] == "sector_exposure_percent" for alert in snapshot["alerts"]))
+
+    def test_virtual_capital_overrides_large_broker_account_for_exposure(self):
+        snapshot = portfolio_risk_engine.evaluate_risk_snapshot(
+            positions=[{"symbol": "AAPL", "quantity": 10, "buy_price": 100, "current_price": 100, "stop_loss": 95}],
+            account_summary=[
+                {"tag": "NetLiquidation", "value": "999000"},
+                {"tag": "TotalCashValue", "value": "998000"},
+                {"tag": "BuyingPower", "value": "1998000"},
+            ],
+            daily_realized_pnl=-250,
+        )
+
+        self.assertEqual(snapshot["effective_equity"], 5000.0)
+        self.assertEqual(snapshot["virtual_trading_capital"], 5000.0)
+        self.assertEqual(snapshot["broker_net_liquidation"], 999000.0)
+        self.assertEqual(snapshot["broker_cash"], 998000.0)
+        self.assertEqual(snapshot["broker_buying_power"], 1998000.0)
+        self.assertAlmostEqual(snapshot["total_portfolio_exposure_percent"], 20.0)
+        self.assertAlmostEqual(snapshot["account_utilization_percent"], 20.0)
+        self.assertAlmostEqual(snapshot["daily_drawdown_percent"], 5.0)
 
     def test_refresh_journals_block_and_recovery_events(self):
         with closing(sqlite3.connect(self.tmp.name)) as db:
@@ -118,7 +144,7 @@ class PortfolioRiskEngineTests(unittest.TestCase):
             )
             db.commit()
 
-        asyncio.run(database.add_position({"symbol": "AAPL", "buy_price": 100, "current_price": 100, "quantity": 30, "stop_loss": 90}))
+        asyncio.run(database.add_position({"symbol": "AAPL", "buy_price": 100, "current_price": 100, "quantity": 15, "stop_loss": 90}))
         blocked = asyncio.run(portfolio_risk_engine.refresh_portfolio_risk())
         self.assertTrue(blocked["blocks_new_buys"])
 

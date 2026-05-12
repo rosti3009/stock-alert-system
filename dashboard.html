@@ -177,12 +177,17 @@
       <div class="cards">
 
         <div class="card">
-          <h3>Total Equity</h3>
+          <h3>Virtual Trading Capital</h3>
           <div class="value blue" id="totalEquity">-</div>
         </div>
 
         <div class="card">
-          <h3>Cash Available</h3>
+          <h3>Broker Net Liquidation</h3>
+          <div class="value green" id="brokerNetLiquidation">-</div>
+        </div>
+
+        <div class="card">
+          <h3>Virtual Cash Available</h3>
           <div class="value" id="freeCapital">-</div>
         </div>
 
@@ -460,6 +465,7 @@ let topWeekly = [];
 let positions = [];
 let performance = {};
 let equityCurve = [];
+let portfolioRisk = {};
 let equityChart;
 let isLoading = false;
 
@@ -577,7 +583,8 @@ async function loadDashboard(){
       topWeekly,
       positions,
       performance,
-      equityCurve
+      equityCurve,
+      portfolioRisk
     ] = await Promise.all([
 
       fetchNoCache("/api/stocks"),
@@ -588,7 +595,9 @@ async function loadDashboard(){
 
       fetchNoCache("/api/performance"),
 
-      fetchNoCache("/api/equity-curve")
+      fetchNoCache("/api/equity-curve"),
+
+      fetchNoCache("/api/portfolio-risk")
 
     ]);
 
@@ -629,13 +638,11 @@ function updateCards(){
     p => (p.status || "OPEN") === "OPEN"
   );
 
-  const lastEquity = equityCurve.length
-    ? Number(
-        equityCurve[
-          equityCurve.length - 1
-        ].equity || 0
-      )
-    : 0;
+  const lastEquity = Number(
+    portfolioRisk.virtual_trading_capital
+    ?? portfolioRisk.effective_equity
+    ?? 5000
+  );
 
   const invested = open.reduce((sum,p)=>{
 
@@ -676,10 +683,10 @@ function updateCards(){
   const cashAvailable =
     lastEquity - invested;
 
-  const exposurePct =
-    lastEquity > 0
-      ? (exposureValue / lastEquity) * 100
-      : 0;
+  const exposurePct = Number(
+    portfolioRisk.total_portfolio_exposure_percent
+    ?? (lastEquity > 0 ? (exposureValue / lastEquity) * 100 : 0)
+  );
 
   const buySignals =
     stocks.filter(
@@ -700,6 +707,11 @@ function updateCards(){
     "totalEquity"
   ).textContent =
     money(lastEquity);
+
+  document.getElementById(
+    "brokerNetLiquidation"
+  ).textContent =
+    money(portfolioRisk.broker_net_liquidation);
 
   document.getElementById(
     "freeCapital"

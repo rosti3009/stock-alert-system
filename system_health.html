@@ -67,9 +67,10 @@
         <div class="card health-card"><h3>Market Buy Status</h3><div class="value" id="marketBuyStatus">-</div><div class="card-note" id="marketBuyStatusMeta">Read-only status; no orders can be placed here.</div></div>
         <div class="card health-card"><h3>Buy Blocked / Buy Allowed</h3><div class="value" id="buyStatus">-</div><div class="card-note">Read-only status; no orders can be placed here.</div></div>
         <div class="card health-card"><h3>Last TWS Heartbeat</h3><div class="value" id="lastHeartbeat">-</div><div class="card-note" id="heartbeatMeta">-</div></div>
-        <div class="card health-card"><h3>Account Net Liquidation</h3><div class="value" id="netLiquidation">-</div><div class="card-note" id="accountUpdated">-</div></div>
-        <div class="card health-card"><h3>Buying Power</h3><div class="value blue" id="buyingPower">-</div></div>
-        <div class="card health-card"><h3>Cash</h3><div class="value green" id="cashValue">-</div></div>
+        <div class="card health-card"><h3>Virtual Trading Capital</h3><div class="value blue" id="virtualCapital">-</div><div class="card-note">Risk calculations use this fixed capital base.</div></div>
+        <div class="card health-card"><h3>Broker Net Liquidation</h3><div class="value" id="netLiquidation">-</div><div class="card-note" id="accountUpdated">-</div></div>
+        <div class="card health-card"><h3>Broker Buying Power</h3><div class="value blue" id="buyingPower">-</div></div>
+        <div class="card health-card"><h3>Broker Cash</h3><div class="value green" id="cashValue">-</div></div>
         <div class="card health-card"><h3>Unrealized PnL</h3><div class="value" id="unrealizedPnl">-</div></div>
         <div class="card health-card"><h3>Realized PnL</h3><div class="value" id="realizedPnl">-</div></div>
         <div class="card health-card"><h3>Open Orders Count</h3><div class="value yellow" id="openOrdersCount">-</div><div class="card-note">Open order rows from TWS sync snapshot.</div></div>
@@ -411,8 +412,9 @@ function renderPortfolioRisk(risk) {
   const riskState = text(risk?.risk_state, "UNKNOWN");
   const buyStatus = text(risk?.new_buy_risk_status, "UNKNOWN");
 
+  setValue("virtualCapital", money(risk?.virtual_trading_capital ?? risk?.effective_equity), "blue");
   setValue("totalExposure", percent(totalExposure), riskClass(riskState));
-  document.getElementById("totalExposureMeta").textContent = `${money(risk?.total_market_value)} exposed · equity ${money(risk?.account_equity)}`;
+  document.getElementById("totalExposureMeta").textContent = `${money(risk?.total_market_value)} exposed · virtual capital ${money(risk?.effective_equity ?? risk?.account_equity)} · broker net liq ${money(risk?.broker_net_liquidation)}`;
 
   setValue("largestPosition", largestPosition.symbol ? `${largestPosition.symbol} ${percent(largestPosition.exposure_percent)}` : "-", numberValue(largestPosition.exposure_percent) > numberValue(risk?.thresholds?.max_symbol_exposure_percent) * 0.8 ? "yellow" : "green");
   document.getElementById("largestPositionMeta").textContent = largestPosition.symbol ? `${money(largestPosition.market_value)} · ${text(largestPosition.sector)}` : "No open positions.";
@@ -446,6 +448,7 @@ function renderPositionSizing(positionSizing) {
   setValue("recommendedPositionSize", money(positionSizing?.recommended_position_size_usd), blocked ? "red" : "green");
   document.getElementById("recommendedPositionMeta").textContent = `${text(positionSizing?.recommended_share_quantity, "0")} recommended share(s)`;
   setValue("maxRiskPerTrade", money(positionSizing?.max_risk_per_trade), "blue");
+  document.querySelector("#maxRiskPerTrade")?.closest(".card")?.querySelector(".card-note")?.replaceChildren(document.createTextNode(`Based on virtual capital ${money(positionSizing?.virtual_trading_capital ?? positionSizing?.effective_equity)}`));
   setValue("volatilityAdjustment", `${Math.round(numberValue(positionSizing?.volatility_adjustment) * 100)}%`, adjustmentClass(positionSizing?.volatility_adjustment));
   setValue("liquidityAdjustment", `${Math.round(numberValue(positionSizing?.liquidity_adjustment) * 100)}%`, adjustmentClass(positionSizing?.liquidity_adjustment));
   setValue("regimeAdjustment", `${Math.round(numberValue(positionSizing?.regime_adjustment) * 100)}%`, adjustmentClass(positionSizing?.regime_adjustment));

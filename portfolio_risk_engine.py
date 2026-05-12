@@ -90,11 +90,20 @@ def account_value(summary: list[dict], tag: str) -> float:
     return 0.0
 
 
+def effective_account_equity() -> float:
+    return max(0.0, safe_float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0), 5000.0))
+
+
 def infer_account_equity(summary: list[dict], realized_pnl: float = 0.0) -> float:
-    net_liquidation = account_value(summary, "NetLiquidation")
-    if net_liquidation > 0:
-        return net_liquidation
-    return max(0.0, safe_float(getattr(config, "ACCOUNT_BALANCE", 0.0)) + realized_pnl)
+    return effective_account_equity()
+
+
+def broker_account_values(summary: list[dict]) -> dict[str, float]:
+    return {
+        "broker_net_liquidation": round(account_value(summary, "NetLiquidation"), 2),
+        "broker_cash": round(account_value(summary, "TotalCashValue"), 2),
+        "broker_buying_power": round(account_value(summary, "BuyingPower"), 2),
+    }
 
 
 @dataclass(frozen=True)
@@ -196,6 +205,7 @@ def evaluate_risk_snapshot(
     checked_at: str | None = None,
 ) -> dict:
     account_summary = account_summary or []
+    broker_values = broker_account_values(account_summary)
     account_equity = infer_account_equity(account_summary, daily_realized_pnl)
     position_exposures = build_position_exposures(positions, account_equity)
     sector_exposures = aggregate_sector_exposure(position_exposures, account_equity)
@@ -211,13 +221,7 @@ def evaluate_risk_snapshot(
     largest_position = max(position_exposures, key=lambda item: item.exposure_percent, default=None)
     largest_sector = max(sector_exposures, key=lambda item: item["exposure_percent"], default=None)
 
-    buying_power = account_value(account_summary, "BuyingPower")
-    available_funds = account_value(account_summary, "AvailableFunds")
-    available_capital = available_funds if available_funds > 0 else buying_power
-    if account_equity > 0 and available_capital > 0:
-        account_utilization_percent = round(max(0.0, 100.0 - pct(available_capital, account_equity)), 4)
-    else:
-        account_utilization_percent = total_exposure_percent
+    account_utilization_percent = total_exposure_percent
 
     thresholds = {
         "max_total_exposure_percent": configured_threshold("MAX_TOTAL_EXPOSURE_PERCENT", 80.0),
@@ -290,6 +294,10 @@ def evaluate_risk_snapshot(
         "blocks_new_buys": blocks_new_buys,
         "block_reasons": [alert["message"] for alert in alerts if alert["blocks_new_buys"]],
         "account_equity": round(account_equity, 2),
+        "effective_equity": round(account_equity, 2),
+        "virtual_trading_capital": round(account_equity, 2),
+        "risk_calculation_basis": "virtual_trading_capital",
+        **broker_values,
         "total_market_value": round(total_market_value, 2),
         "total_portfolio_exposure_percent": total_exposure_percent,
         "exposure_by_symbol": [item.as_dict() for item in sorted(position_exposures, key=lambda item: item.market_value, reverse=True)],
@@ -382,6 +390,11 @@ async def get_exposure() -> dict:
     return {
         "checked_at": snapshot["checked_at"],
         "account_equity": snapshot["account_equity"],
+        "effective_equity": snapshot["effective_equity"],
+        "virtual_trading_capital": snapshot["virtual_trading_capital"],
+        "broker_net_liquidation": snapshot["broker_net_liquidation"],
+        "broker_cash": snapshot["broker_cash"],
+        "broker_buying_power": snapshot["broker_buying_power"],
         "total_portfolio_exposure_percent": snapshot["total_portfolio_exposure_percent"],
         "total_market_value": snapshot["total_market_value"],
         "exposure_by_symbol": snapshot["exposure_by_symbol"],
