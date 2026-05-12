@@ -980,6 +980,14 @@ async def api_reconciliation_status():
     )
 
 
+@app.get("/api/reconciliation-history")
+async def api_reconciliation_history(limit: int = 200, status: str | None = None):
+    return JSONResponse(
+        await account_sync.get_reconciliation_history(limit=limit, status=status),
+        headers=no_cache_headers(),
+    )
+
+
 @app.head("/")
 async def head_root():
     return Response(headers=no_cache_headers())
@@ -1036,6 +1044,12 @@ async def serve_positions_route():
 @app.get("/risk", response_class=HTMLResponse)
 async def serve_risk():
     return serve_html_file("risk.html", fallback_to_index=True)
+
+
+@app.get("/system-health", response_class=HTMLResponse)
+@app.get("/system_health", response_class=HTMLResponse)
+async def serve_system_health():
+    return serve_html_file("system_health.html", fallback_to_index=True)
 
 
 @app.get("/strategies", response_class=HTMLResponse)

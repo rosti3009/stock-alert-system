@@ -9,6 +9,12 @@ import aiosqlite
 
 import config
 import database
+from reconciliation_lifecycle import (
+    ensure_reconciliation_issue_schema,
+    fetch_reconciliation_counters,
+    fetch_reconciliation_issues,
+    sync_reconciliation_issue_lifecycle,
+)
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +131,7 @@ async def init_account_sync_db() -> None:
         await db.execute(CREATE_OPEN_ORDERS)
         await db.execute(CREATE_EXECUTION_HISTORY)
         await db.execute(CREATE_EQUITY_CURVE)
+        await ensure_reconciliation_issue_schema(db)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_account_summary_tag ON account_summary(tag)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_open_orders_symbol ON open_orders(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_execution_history_symbol ON execution_history(symbol)")
@@ -485,43 +492,71 @@ async def _load_execution_quantities(db: aiosqlite.Connection) -> dict[str, floa
 
 async def run_reconciliation_status_check() -> dict:
     await init_account_sync_db()
+    checked_at = now_iso()
 
     async with aiosqlite.connect(config.DB_PATH) as db:
         db_positions = await _load_open_position_quantities(db)
         execution_quantities = await _load_execution_quantities(db)
 
-    symbols = sorted(set(db_positions) | set(execution_quantities))
-    mismatches = []
+        symbols = sorted(set(db_positions) | set(execution_quantities))
+        current_issues = []
 
-    for symbol in symbols:
-        db_qty = safe_float(db_positions.get(symbol))
-        execution_qty = safe_float(execution_quantities.get(symbol))
-        if abs(db_qty - execution_qty) <= 0.0001:
-            continue
-        mismatch = {
-            "symbol": symbol,
-            "issue_type": "POSITION_EXECUTION_QUANTITY_MISMATCH",
-            "severity": "MEDIUM",
-            "db_quantity": db_qty,
-            "execution_quantity": execution_qty,
-            "details": "Open position quantity does not match net execution history quantity.",
-        }
-        mismatches.append(mismatch)
+        for symbol in symbols:
+            db_qty = safe_float(db_positions.get(symbol))
+            execution_qty = safe_float(execution_quantities.get(symbol))
+            if abs(db_qty - execution_qty) <= 0.0001:
+                continue
+            current_issues.append({
+                "symbol": symbol,
+                "issue_type": "POSITION_EXECUTION_QUANTITY_MISMATCH",
+                "severity": "MEDIUM",
+                "db_quantity": db_qty,
+                "tws_quantity": 0,
+                "execution_quantity": execution_qty,
+                "details": "Open position quantity does not match net execution history quantity.",
+            })
+
+        lifecycle = await sync_reconciliation_issue_lifecycle(
+            db,
+            current_issues,
+            managed_issue_types={"POSITION_EXECUTION_QUANTITY_MISMATCH"},
+        )
+        await db.commit()
+
+    for issue in lifecycle["new_issues"]:
         await database.safe_record_trade_journal_event({
-            "symbol": symbol,
+            "symbol": issue["symbol"],
             "event_type": "RECONCILIATION_MISMATCH",
             "decision": "REVIEW_REQUIRED",
-            "reason": mismatch["details"],
+            "reason": issue["details"],
             "source_module": "account_sync.run_reconciliation_status_check",
-            "quantity": db_qty,
-            "raw_payload": mismatch,
+            "quantity": issue["db_quantity"],
+            "raw_payload": issue,
         })
 
+    for issue in lifecycle["resolved_issues"]:
+        await database.safe_record_trade_journal_event({
+            "symbol": issue["symbol"],
+            "event_type": "RECONCILIATION_RESOLVED",
+            "decision": "RESOLVED",
+            "reason": "Reconciliation issue resolved because quantities match again.",
+            "source_module": "account_sync.run_reconciliation_status_check",
+            "quantity": issue.get("db_quantity"),
+            "raw_payload": issue,
+        })
+
+    open_issues = lifecycle["open_issues"]
+    counters = lifecycle["counters"]
     status = {
-        "ok": len(mismatches) == 0,
-        "mismatch_count": len(mismatches),
-        "mismatches": mismatches,
-        "checked_at": now_iso(),
+        "ok": len(open_issues) == 0,
+        "mismatch_count": len(open_issues),
+        "open_count": counters.get("open", 0),
+        "resolved_count": counters.get("resolved", 0),
+        "auto_fixed_count": counters.get("auto_fixed", 0),
+        "counters": counters,
+        "mismatches": open_issues,
+        "open_issues": open_issues,
+        "checked_at": checked_at,
     }
 
     await database.set_app_state(RECONCILIATION_STATUS_KEY, _json_payload(status))
@@ -529,10 +564,20 @@ async def run_reconciliation_status_check() -> dict:
 
 
 async def get_reconciliation_status() -> dict:
-    raw = await database.get_app_state(RECONCILIATION_STATUS_KEY)
-    if raw:
-        try:
-            return json.loads(raw)
-        except Exception:
-            pass
     return await run_reconciliation_status_check()
+
+
+async def get_reconciliation_history(limit: int = 200, status: str | None = None) -> dict:
+    await init_account_sync_db()
+    limit = max(1, min(int(limit or 200), 1000))
+
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        issues = await fetch_reconciliation_issues(db, status=status, limit=limit)
+        counters = await fetch_reconciliation_counters(db)
+
+    return {
+        "issues": issues,
+        "count": len(issues),
+        "counters": counters,
+        "checked_at": now_iso(),
+    }

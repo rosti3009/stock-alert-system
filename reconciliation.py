@@ -7,6 +7,12 @@ import aiosqlite
 
 import config
 import database
+from reconciliation_lifecycle import (
+    ensure_reconciliation_issue_schema,
+    fetch_reconciliation_counters,
+    fetch_reconciliation_issues,
+    sync_reconciliation_issue_lifecycle,
+)
 
 log = logging.getLogger(__name__)
 
@@ -18,26 +24,9 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-CREATE_RECONCILIATION_ISSUES = """
-CREATE TABLE IF NOT EXISTS reconciliation_issues (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    symbol TEXT,
-    issue_type TEXT,
-    severity TEXT,
-    db_quantity REAL,
-    tws_quantity REAL,
-    execution_quantity REAL,
-    details TEXT,
-    status TEXT DEFAULT 'OPEN',
-    created_at TEXT,
-    resolved_at TEXT
-)
-"""
-
-
 async def init_reconciliation_db() -> None:
     async with aiosqlite.connect(config.DB_PATH) as db:
-        await db.execute(CREATE_RECONCILIATION_ISSUES)
+        await ensure_reconciliation_issue_schema(db)
         await db.commit()
 
 
@@ -161,44 +150,6 @@ async def _load_execution_quantities(db: aiosqlite.Connection) -> dict[str, floa
             result[symbol] -= qty
 
     return result
-
-
-async def _insert_issue(
-    db: aiosqlite.Connection,
-    symbol: str,
-    issue_type: str,
-    severity: str,
-    db_quantity: float,
-    tws_quantity: float,
-    execution_quantity: float,
-    details: str,
-) -> None:
-    await db.execute(
-        """
-        INSERT INTO reconciliation_issues (
-            symbol,
-            issue_type,
-            severity,
-            db_quantity,
-            tws_quantity,
-            execution_quantity,
-            details,
-            status,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
-        """,
-        (
-            symbol,
-            issue_type,
-            severity,
-            db_quantity,
-            tws_quantity,
-            execution_quantity,
-            details,
-            now_iso(),
-        ),
-    )
 
 
 def _require_paper_adoption_allowed() -> None:
@@ -372,28 +323,19 @@ async def adopt_tws_positions_as_baseline() -> dict:
 
 async def run_reconciliation_once() -> dict:
     await init_reconciliation_db()
+    checked_at = now_iso()
 
     async with aiosqlite.connect(config.DB_PATH) as db:
         db_positions = await _load_db_positions(db)
         tws_positions = await _load_tws_positions(db)
         execution_quantities = await _load_execution_quantities(db)
 
-        await db.execute(
-            """
-            UPDATE reconciliation_issues
-            SET status = 'RESOLVED',
-                resolved_at = ?
-            WHERE status = 'OPEN'
-            """,
-            (now_iso(),),
-        )
-
         symbols = set()
         symbols.update(db_positions.keys())
         symbols.update(tws_positions.keys())
         symbols.update(execution_quantities.keys())
 
-        issues = []
+        current_issues = []
 
         for symbol in sorted(symbols):
             db_qty = float(db_positions.get(symbol, {}).get("quantity", 0) or 0)
@@ -402,7 +344,7 @@ async def run_reconciliation_once() -> dict:
 
             # DB says open, TWS has nothing
             if db_qty > 0 and tws_qty <= 0:
-                issue = {
+                current_issues.append({
                     "symbol": symbol,
                     "issue_type": "DB_OPEN_BUT_TWS_FLAT",
                     "severity": "HIGH",
@@ -410,12 +352,11 @@ async def run_reconciliation_once() -> dict:
                     "tws_quantity": tws_qty,
                     "execution_quantity": exec_qty,
                     "details": "DB has an OPEN position but TWS has no matching open position.",
-                }
-                issues.append(issue)
+                })
 
             # TWS has position, DB does not
             elif tws_qty > 0 and db_qty <= 0:
-                issue = {
+                current_issues.append({
                     "symbol": symbol,
                     "issue_type": "TWS_OPEN_BUT_DB_FLAT",
                     "severity": "HIGH",
@@ -423,12 +364,11 @@ async def run_reconciliation_once() -> dict:
                     "tws_quantity": tws_qty,
                     "execution_quantity": exec_qty,
                     "details": "TWS has an open position but DB does not have matching OPEN position.",
-                }
-                issues.append(issue)
+                })
 
             # both open but quantity mismatch
             elif db_qty > 0 and tws_qty > 0 and abs(db_qty - tws_qty) > 0.0001:
-                issue = {
+                current_issues.append({
                     "symbol": symbol,
                     "issue_type": "POSITION_QUANTITY_MISMATCH",
                     "severity": "MEDIUM",
@@ -436,12 +376,11 @@ async def run_reconciliation_once() -> dict:
                     "tws_quantity": tws_qty,
                     "execution_quantity": exec_qty,
                     "details": "DB position quantity does not match TWS quantity.",
-                }
-                issues.append(issue)
+                })
 
             # executions do not match TWS net position
             if exec_qty and tws_qty and abs(exec_qty - tws_qty) > 0.0001:
-                issue = {
+                current_issues.append({
                     "symbol": symbol,
                     "issue_type": "EXECUTION_TWS_MISMATCH",
                     "severity": "MEDIUM",
@@ -449,31 +388,75 @@ async def run_reconciliation_once() -> dict:
                     "tws_quantity": tws_qty,
                     "execution_quantity": exec_qty,
                     "details": "Net execution quantity does not match TWS open quantity.",
-                }
-                issues.append(issue)
+                })
 
-        for issue in issues:
-            await _insert_issue(
-                db,
-                issue["symbol"],
-                issue["issue_type"],
-                issue["severity"],
-                issue["db_quantity"],
-                issue["tws_quantity"],
-                issue["execution_quantity"],
-                issue["details"],
-            )
-
+        lifecycle = await sync_reconciliation_issue_lifecycle(
+            db,
+            current_issues,
+            managed_issue_types={
+                "DB_OPEN_BUT_TWS_FLAT",
+                "TWS_OPEN_BUT_DB_FLAT",
+                "POSITION_QUANTITY_MISMATCH",
+                "EXECUTION_TWS_MISMATCH",
+            },
+        )
         await db.commit()
 
+    for issue in lifecycle["new_issues"]:
+        await database.safe_record_trade_journal_event({
+            "symbol": issue["symbol"],
+            "event_type": "RECONCILIATION_MISMATCH",
+            "decision": "REVIEW_REQUIRED",
+            "reason": issue["details"],
+            "source_module": "reconciliation.run_reconciliation_once",
+            "quantity": issue["db_quantity"],
+            "raw_payload": issue,
+        })
+
+    for issue in lifecycle["resolved_issues"]:
+        await database.safe_record_trade_journal_event({
+            "symbol": issue["symbol"],
+            "event_type": "RECONCILIATION_RESOLVED",
+            "decision": "RESOLVED",
+            "reason": "Reconciliation issue resolved because quantities match again.",
+            "source_module": "reconciliation.run_reconciliation_once",
+            "quantity": issue.get("db_quantity"),
+            "raw_payload": issue,
+        })
+
+    open_issues = lifecycle["open_issues"]
+    counters = lifecycle["counters"]
+
     log.info(
-        "Reconciliation complete | issues=%s",
-        len(issues),
+        "Reconciliation complete | open=%s resolved=%s auto_fixed=%s",
+        counters.get("open", 0),
+        counters.get("resolved", 0),
+        counters.get("auto_fixed", 0),
     )
 
     return {
-        "ok": len(issues) == 0,
-        "issues_count": len(issues),
+        "ok": len(open_issues) == 0,
+        "issues_count": len(open_issues),
+        "open_count": counters.get("open", 0),
+        "resolved_count": counters.get("resolved", 0),
+        "auto_fixed_count": counters.get("auto_fixed", 0),
+        "counters": counters,
+        "issues": open_issues,
+        "open_issues": open_issues,
+        "checked_at": checked_at,
+    }
+
+
+async def get_reconciliation_history(limit: int = 200, status: str | None = None) -> dict:
+    limit = max(1, min(int(limit or 200), 1000))
+
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        issues = await fetch_reconciliation_issues(db, status=status, limit=limit)
+        counters = await fetch_reconciliation_counters(db)
+
+    return {
         "issues": issues,
+        "count": len(issues),
+        "counters": counters,
         "checked_at": now_iso(),
     }

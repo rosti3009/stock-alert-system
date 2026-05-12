@@ -4,6 +4,8 @@ import asyncio
 import os
 import tempfile
 
+import aiosqlite
+
 import account_sync
 import config
 import database
@@ -112,7 +114,9 @@ async def main() -> None:
         status = await account_sync.run_reconciliation_status_check()
         assert status["ok"] is False, status
         assert status["mismatch_count"] == 1, status
+        assert status["open_count"] == 1, status
         assert status["mismatches"][0]["symbol"] == "MSFT", status
+        assert status["mismatches"][0]["status"] == "OPEN", status
 
         journal = await database.get_trade_journal(limit=10, symbol="MSFT")
         assert len(journal) == 1, journal
@@ -121,6 +125,26 @@ async def main() -> None:
 
         cached = await account_sync.get_reconciliation_status()
         assert cached["mismatch_count"] == 1, cached
+
+        async with aiosqlite.connect(path) as db:
+            await db.execute(
+                "UPDATE execution_history SET quantity = 2 WHERE exec_id = 'E1'"
+            )
+            await db.commit()
+
+        resolved = await account_sync.run_reconciliation_status_check()
+        assert resolved["ok"] is True, resolved
+        assert resolved["mismatch_count"] == 0, resolved
+        assert resolved["open_count"] == 0, resolved
+        assert resolved["resolved_count"] == 1, resolved
+        assert resolved["mismatches"] == [], resolved
+
+        history = await account_sync.get_reconciliation_history()
+        assert history["counters"]["open"] == 0, history
+        assert history["counters"]["resolved"] == 1, history
+        assert history["counters"]["auto_fixed"] == 0, history
+        assert history["issues"][0]["status"] == "RESOLVED", history
+        assert history["issues"][0]["resolved_at"], history
 
         print("account sync smoke test passed")
 
