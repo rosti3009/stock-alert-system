@@ -3,6 +3,7 @@ from ib_insync import *
 import config
 import database
 from trading_safety import require_paper_auto_trading_allowed
+from recovery_manager import require_recovery_healthy_for_buy_sync
 
 
 class IBKRClient:
@@ -77,6 +78,10 @@ class IBKRClient:
     def place_limit_buy_order(self, symbol, quantity, limit_price):
         try:
             self._safety_check()
+            require_recovery_healthy_for_buy_sync(
+                symbol,
+                {"symbol": symbol, "quantity": quantity, "limit_price": limit_price},
+            )
         except RuntimeError as exc:
             database.safe_record_trade_journal_event_sync({
                 "symbol": symbol,

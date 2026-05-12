@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from ib_insync import IB, Stock, LimitOrder
 from trade_protection import validate_buy_before_order
 from trading_safety import require_paper_auto_trading_allowed
+from recovery_manager import require_recovery_healthy_for_buy, require_recovery_healthy_for_buy_sync
 
 import config
 import database
@@ -185,6 +186,10 @@ def execute_limit_buy_sync(
     limit_price: float,
 ) -> dict:
     require_paper_auto_trading_allowed("AUTO BUY")
+    require_recovery_healthy_for_buy_sync(
+        symbol,
+        {"symbol": symbol, "quantity": quantity, "limit_price": limit_price},
+    )
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -352,6 +357,12 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
             continue
 
         if signal == "BUY":
+            try:
+                await require_recovery_healthy_for_buy(symbol, row)
+            except RuntimeError as exc:
+                log.warning("AUTO BUY blocked for %s — %s", symbol, exc)
+                continue
+
             if not market_is_open:
                 log.info("AUTO BUY skipped for %s — US market closed", symbol)
                 await _journal_buy_decision(

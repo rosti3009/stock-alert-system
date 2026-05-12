@@ -174,9 +174,33 @@ async def sync_executions():
             inserted,
         )
 
+        result = {
+            "ok": True,
+            "inserted": inserted,
+            "synced_at": now_iso(),
+            "error": None,
+        }
+
+        from recovery_manager import mark_execution_sync_result
+
+        await mark_execution_sync_result(True, synced_at=result["synced_at"])
+        return result
+
     except Exception as e:
 
         log.warning(
             "Execution sync failed: %s",
             e,
         )
+
+        result = {
+            "ok": False,
+            "inserted": 0,
+            "synced_at": now_iso(),
+            "error": str(e),
+        }
+
+        from recovery_manager import mark_execution_sync_result
+
+        await mark_execution_sync_result(False, synced_at=result["synced_at"], error=str(e))
+        return result

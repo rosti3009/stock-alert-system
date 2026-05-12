@@ -285,9 +285,14 @@ async def run_reconciliation_once() -> dict:
         len(issues),
     )
 
-    return {
+    result = {
         "ok": len(issues) == 0,
         "issues_count": len(issues),
         "issues": issues,
         "checked_at": now_iso(),
     }
+
+    from recovery_manager import mark_reconciliation_result
+
+    await mark_reconciliation_result(result)
+    return result
