@@ -59,6 +59,12 @@
         <div class="card health-card"><h3>Current Market Session</h3><div class="value blue" id="marketSession">-</div><div class="card-note" id="sessionPermissions">-</div></div>
         <div class="card health-card"><h3>Next Session Transition</h3><div class="value" id="nextSessionTransition">-</div><div class="card-note" id="nextSessionState">-</div></div>
         <div class="card health-card"><h3>Market Clock</h3><div class="value purple" id="marketClock">-</div><div class="card-note" id="marketHours">-</div></div>
+        <div class="card health-card"><h3>Market Regime</h3><div class="value" id="marketRegime">-</div><div class="card-note" id="marketRegimeMeta">Read-only market intelligence.</div></div>
+        <div class="card health-card"><h3>Market Risk Level</h3><div class="value" id="marketRiskLevel">-</div><div class="card-note" id="marketRiskMeta">-</div></div>
+        <div class="card health-card"><h3>VIX State</h3><div class="value" id="vixState">-</div><div class="card-note" id="vixMeta">-</div></div>
+        <div class="card health-card"><h3>Recommended Exposure</h3><div class="value" id="recommendedExposure">-</div><div class="card-note" id="recommendedExposureMeta">-</div></div>
+        <div class="card health-card"><h3>Aggressive Entries Allowed</h3><div class="value" id="aggressiveEntriesAllowed">-</div><div class="card-note">Advisory only; does not rewrite strategy thresholds.</div></div>
+        <div class="card health-card"><h3>Market Buy Status</h3><div class="value" id="marketBuyStatus">-</div><div class="card-note" id="marketBuyStatusMeta">Read-only status; no orders can be placed here.</div></div>
         <div class="card health-card"><h3>Buy Blocked / Buy Allowed</h3><div class="value" id="buyStatus">-</div><div class="card-note">Read-only status; no orders can be placed here.</div></div>
         <div class="card health-card"><h3>Last TWS Heartbeat</h3><div class="value" id="lastHeartbeat">-</div><div class="card-note" id="heartbeatMeta">-</div></div>
         <div class="card health-card"><h3>Account Net Liquidation</h3><div class="value" id="netLiquidation">-</div><div class="card-note" id="accountUpdated">-</div></div>
@@ -165,7 +171,8 @@ const ENDPOINTS = {
   orderLifecycle: "/api/order-lifecycle?limit=25",
   orderLifecycleLatest: "/api/order-lifecycle-latest?limit=25",
   portfolioRisk: "/api/portfolio-risk",
-  executionQuality: "/api/execution-quality"
+  executionQuality: "/api/execution-quality",
+  marketRegime: "/api/market-regime"
 };
 
 async function fetchNoCache(url) {
@@ -351,9 +358,9 @@ function renderExecutions(executions) {
 
 function riskClass(state) {
   const normalized = String(state || "").toUpperCase();
-  if (["SAFE", "ALLOWED", "EXECUTION_SAFE", "OK"].includes(normalized)) return "green";
-  if (["WARNING", "EXECUTION_WARNING"].includes(normalized)) return "yellow";
-  if (["DANGER", "EXECUTION_DANGER", "EXECUTION_BLOCK_BUY", "BLOCK_NEW_BUYS", "BLOCKED", "LOW"].includes(normalized)) return "red";
+  if (["SAFE", "ALLOWED", "EXECUTION_SAFE", "OK", "LOW", "NORMAL"].includes(normalized)) return "green";
+  if (["WARNING", "EXECUTION_WARNING", "WATCH", "ELEVATED"].includes(normalized)) return "yellow";
+  if (["DANGER", "HIGH", "CRITICAL", "EXECUTION_DANGER", "EXECUTION_BLOCK_BUY", "BLOCK_NEW_BUYS", "BLOCKED"].includes(normalized)) return "red";
   return "muted";
 }
 
@@ -362,6 +369,31 @@ function percent(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return "-";
   return `${parsed.toFixed(2)}%`;
+}
+
+function renderMarketRegime(regime) {
+  const state = text(regime?.regime, "UNKNOWN");
+  const riskLevel = text(regime?.risk_level, "UNKNOWN");
+  const vixState = text(regime?.vix_state, "UNKNOWN");
+  const allowBuys = regime?.allow_new_buys === true;
+  const allowAggressive = regime?.allow_aggressive_entries === true;
+  const blockedReasons = safeArray(regime?.buy_block_reasons);
+
+  setValue("marketRegime", state.replaceAll("_", " "), riskClass(riskLevel));
+  document.getElementById("marketRegimeMeta").textContent = `Checked ${dateTime(regime?.checked_at)}`;
+
+  setValue("marketRiskLevel", riskLevel, riskClass(riskLevel));
+  document.getElementById("marketRiskMeta").textContent = safeArray(regime?.warnings).concat(safeArray(regime?.dangers)).join(" · ") || "No market regime warnings.";
+
+  setValue("vixState", vixState, riskClass(vixState));
+  document.getElementById("vixMeta").textContent = regime?.vix_level ? `VIX ${Number(regime.vix_level).toFixed(2)}` : "VIX unavailable";
+
+  setValue("recommendedExposure", percent(regime?.recommended_max_exposure), allowBuys ? riskClass(riskLevel) : "red");
+  document.getElementById("recommendedExposureMeta").textContent = `Position size factor ${text(regime?.recommended_position_size)}`;
+
+  setValue("aggressiveEntriesAllowed", allowAggressive ? "Allowed" : "Blocked", allowAggressive ? "green" : "yellow");
+  setValue("marketBuyStatus", allowBuys ? "BUY ALLOWED" : "BUY BLOCKED", allowBuys ? "green" : "red");
+  document.getElementById("marketBuyStatusMeta").textContent = blockedReasons.join(" · ") || "No market-regime BUY block active.";
 }
 
 function renderPortfolioRisk(risk) {
@@ -487,7 +519,7 @@ function renderError(error) {
 
 async function refreshHealth() {
   try {
-    const [recovery, session, account, openOrders, executions, reconciliation, journal, orderLifecycle, orderLifecycleLatest, portfolioRisk, executionQuality] = await Promise.all([
+    const [recovery, session, account, openOrders, executions, reconciliation, journal, orderLifecycle, orderLifecycleLatest, portfolioRisk, executionQuality, marketRegime] = await Promise.all([
       fetchNoCache(ENDPOINTS.recovery),
       fetchNoCache(ENDPOINTS.session),
       fetchNoCache(ENDPOINTS.account),
@@ -498,7 +530,8 @@ async function refreshHealth() {
       fetchNoCache(ENDPOINTS.orderLifecycle),
       fetchNoCache(ENDPOINTS.orderLifecycleLatest),
       fetchNoCache(ENDPOINTS.portfolioRisk),
-      fetchNoCache(ENDPOINTS.executionQuality)
+      fetchNoCache(ENDPOINTS.executionQuality),
+      fetchNoCache(ENDPOINTS.marketRegime)
     ]);
 
     renderRecovery(recovery);
@@ -511,6 +544,7 @@ async function refreshHealth() {
     renderOrderLifecycle(orderLifecycle, orderLifecycleLatest);
     renderPortfolioRisk(portfolioRisk);
     renderExecutionQuality(executionQuality);
+    renderMarketRegime(marketRegime);
     document.getElementById("updated").textContent = `Last refresh ${new Date().toLocaleTimeString()}`;
   } catch (error) {
     console.error("System health refresh failed", error);
