@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from ib_insync import IB
 
 import config
+import order_lifecycle
 from trade_protection import get_live_quote
 from trading_safety import require_paper_auto_trading_allowed
 
@@ -125,11 +126,39 @@ class OrderManager:
                                 ask,
                             )
 
+                            order_lifecycle.safe_record_order_lifecycle_event_sync({
+                                "symbol": symbol,
+                                "side": action,
+                                "quantity": getattr(trade.order, "totalQuantity", None),
+                                "price": getattr(trade.order, "lmtPrice", None),
+                                "order_id": getattr(trade.order, "orderId", None),
+                                "perm_id": getattr(trade.order, "permId", None),
+                                "client_id": int(config.IBKR_CLIENT_ID) + ORDER_MANAGER_CLIENT_ID_OFFSET,
+                                "source_module": "order_manager.cancel_stale_orders",
+                                "state": order_lifecycle.OrderState.CANCEL_REQUESTED,
+                                "reason": f"Invalid bid/ask protection triggered: bid={bid} ask={ask}",
+                                "raw_payload": {"status": status, "bid": bid, "ask": ask},
+                            })
+
                             self.ib.cancelOrder(
                                 trade.order
                             )
 
                             self.ib.sleep(1)
+
+                            order_lifecycle.safe_record_order_lifecycle_event_sync({
+                                "symbol": symbol,
+                                "side": action,
+                                "quantity": getattr(trade.order, "totalQuantity", None),
+                                "price": getattr(trade.order, "lmtPrice", None),
+                                "order_id": getattr(trade.order, "orderId", None),
+                                "perm_id": getattr(trade.order, "permId", None),
+                                "client_id": int(config.IBKR_CLIENT_ID) + ORDER_MANAGER_CLIENT_ID_OFFSET,
+                                "source_module": "order_manager.cancel_stale_orders",
+                                "state": order_lifecycle.map_ibkr_status_to_state(getattr(trade.orderStatus, "status", None)),
+                                "reason": f"TWS status after invalid bid/ask cancel request: {getattr(trade.orderStatus, 'status', None)}",
+                                "raw_payload": {"status": getattr(trade.orderStatus, "status", None), "bid": bid, "ask": ask},
+                            })
 
                             continue
 
@@ -171,11 +200,39 @@ class OrderManager:
                         age,
                     )
 
+                    order_lifecycle.safe_record_order_lifecycle_event_sync({
+                        "symbol": symbol,
+                        "side": action,
+                        "quantity": getattr(trade.order, "totalQuantity", None),
+                        "price": getattr(trade.order, "lmtPrice", None),
+                        "order_id": getattr(trade.order, "orderId", None),
+                        "perm_id": getattr(trade.order, "permId", None),
+                        "client_id": int(config.IBKR_CLIENT_ID) + ORDER_MANAGER_CLIENT_ID_OFFSET,
+                        "source_module": "order_manager.cancel_stale_orders",
+                        "state": order_lifecycle.OrderState.CANCEL_REQUESTED,
+                        "reason": f"Stale BUY order exceeded {STALE_MINUTES} minutes; age={age}",
+                        "raw_payload": {"status": status, "age": str(age)},
+                    })
+
                     self.ib.cancelOrder(
                         trade.order
                     )
 
                     self.ib.sleep(1)
+
+                    order_lifecycle.safe_record_order_lifecycle_event_sync({
+                        "symbol": symbol,
+                        "side": action,
+                        "quantity": getattr(trade.order, "totalQuantity", None),
+                        "price": getattr(trade.order, "lmtPrice", None),
+                        "order_id": getattr(trade.order, "orderId", None),
+                        "perm_id": getattr(trade.order, "permId", None),
+                        "client_id": int(config.IBKR_CLIENT_ID) + ORDER_MANAGER_CLIENT_ID_OFFSET,
+                        "source_module": "order_manager.cancel_stale_orders",
+                        "state": order_lifecycle.map_ibkr_status_to_state(getattr(trade.orderStatus, "status", None)),
+                        "reason": f"TWS status after stale-order cancel request: {getattr(trade.orderStatus, 'status', None)}",
+                        "raw_payload": {"status": getattr(trade.orderStatus, "status", None), "age": str(age)},
+                    })
 
                 except Exception as e:
                     log.exception(

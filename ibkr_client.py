@@ -2,6 +2,7 @@ from ib_insync import *
 
 import config
 import database
+import order_lifecycle
 from trading_safety import require_paper_auto_trading_allowed
 
 
@@ -75,9 +76,15 @@ class IBKRClient:
         require_paper_auto_trading_allowed("IBKR order")
 
     def place_limit_buy_order(self, symbol, quantity, limit_price):
+        symbol = str(symbol).strip().upper()
         try:
             self._safety_check()
         except RuntimeError as exc:
+            payload = {
+                "symbol": symbol,
+                "quantity": quantity,
+                "limit_price": limit_price,
+            }
             database.safe_record_trade_journal_event_sync({
                 "symbol": symbol,
                 "event_type": "BUY_BLOCKED_BY_SAFETY_GATE",
@@ -86,13 +93,32 @@ class IBKRClient:
                 "source_module": "ibkr_client",
                 "price": limit_price,
                 "quantity": quantity,
-                "raw_payload": {
-                    "symbol": symbol,
-                    "quantity": quantity,
-                    "limit_price": limit_price,
-                },
+                "raw_payload": payload,
+            })
+            order_lifecycle.safe_record_order_lifecycle_event_sync({
+                "symbol": symbol,
+                "side": "BUY",
+                "quantity": quantity,
+                "price": limit_price,
+                "client_id": self.client_id,
+                "source_module": "ibkr_client.place_limit_buy_order",
+                "state": order_lifecycle.OrderState.FAILED,
+                "reason": str(exc),
+                "raw_payload": payload,
             })
             raise
+
+        order_lifecycle.safe_record_order_lifecycle_event_sync({
+            "symbol": symbol,
+            "side": "BUY",
+            "quantity": quantity,
+            "price": limit_price,
+            "client_id": self.client_id,
+            "source_module": "ibkr_client.place_limit_buy_order",
+            "state": order_lifecycle.OrderState.CREATED,
+            "reason": "Limit BUY order created locally before TWS submission",
+            "raw_payload": {"symbol": symbol, "quantity": quantity, "limit_price": limit_price},
+        })
 
         contract = Stock(symbol, "SMART", "USD")
         self.ib.qualifyContracts(contract)
@@ -104,21 +130,67 @@ class IBKRClient:
             tif="DAY",
         )
 
-        trade = self.ib.placeOrder(contract, order)
+        try:
+            trade = self.ib.placeOrder(contract, order)
 
-        self.ib.sleep(3)
+            order_lifecycle.safe_record_order_lifecycle_event_sync({
+                "symbol": symbol,
+                "side": "BUY",
+                "quantity": quantity,
+                "price": limit_price,
+                "order_id": trade.order.orderId,
+                "perm_id": getattr(trade.order, "permId", None),
+                "client_id": self.client_id,
+                "source_module": "ibkr_client.place_limit_buy_order",
+                "state": order_lifecycle.OrderState.SUBMITTED,
+                "reason": "Limit BUY order submitted to TWS",
+                "raw_payload": {"order": getattr(trade.order, "__dict__", {})},
+            })
 
-        return {
-            "symbol": symbol,
-            "order_id": trade.order.orderId,
-            "action": trade.order.action,
-            "order_type": trade.order.orderType,
-            "limit_price": trade.order.lmtPrice,
-            "status": trade.orderStatus.status,
-            "filled": trade.orderStatus.filled,
-            "remaining": trade.orderStatus.remaining,
-            "avg_fill_price": trade.orderStatus.avgFillPrice,
-        }
+            self.ib.sleep(3)
+
+            result = {
+                "symbol": symbol,
+                "order_id": trade.order.orderId,
+                "perm_id": getattr(trade.order, "permId", None),
+                "action": trade.order.action,
+                "order_type": trade.order.orderType,
+                "limit_price": trade.order.lmtPrice,
+                "status": trade.orderStatus.status,
+                "filled": trade.orderStatus.filled,
+                "remaining": trade.orderStatus.remaining,
+                "avg_fill_price": trade.orderStatus.avgFillPrice,
+            }
+
+            order_lifecycle.safe_record_order_lifecycle_event_sync({
+                "symbol": symbol,
+                "side": "BUY",
+                "quantity": quantity,
+                "price": limit_price,
+                "order_id": result["order_id"],
+                "perm_id": result["perm_id"],
+                "client_id": self.client_id,
+                "source_module": "ibkr_client.place_limit_buy_order",
+                "state": order_lifecycle.map_ibkr_status_to_state(result["status"], result["filled"], result["remaining"]),
+                "reason": f"TWS order status after submission: {result['status']}",
+                "raw_payload": result,
+            })
+
+            return result
+
+        except Exception as exc:
+            order_lifecycle.safe_record_order_lifecycle_event_sync({
+                "symbol": symbol,
+                "side": "BUY",
+                "quantity": quantity,
+                "price": limit_price,
+                "client_id": self.client_id,
+                "source_module": "ibkr_client.place_limit_buy_order",
+                "state": order_lifecycle.OrderState.FAILED,
+                "reason": str(exc),
+                "raw_payload": {"symbol": symbol, "quantity": quantity, "limit_price": limit_price, "error": str(exc)},
+            })
+            raise
 
     def cancel_order(self, trade):
         self.ib.cancelOrder(trade.order)

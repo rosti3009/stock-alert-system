@@ -9,6 +9,7 @@ import aiosqlite
 from ib_insync import IB
 
 import config
+import order_lifecycle
 
 log = logging.getLogger(__name__)
 
@@ -124,10 +125,11 @@ async def sync_executions():
         ) as db:
 
             inserted = 0
+            lifecycle_rows = []
 
             for row in rows:
 
-                await db.execute(
+                cursor = await db.execute(
                     """
                     INSERT OR IGNORE INTO executions (
                         exec_id,
@@ -165,9 +167,26 @@ async def sync_executions():
                     ),
                 )
 
-                inserted += 1
+                if cursor.rowcount > 0:
+                    inserted += 1
+                    lifecycle_rows.append(row)
 
             await db.commit()
+
+        for row in lifecycle_rows:
+            await order_lifecycle.safe_record_order_lifecycle_event({
+                "symbol": row["symbol"],
+                "side": row["side"],
+                "quantity": row["quantity"],
+                "price": row["price"],
+                "order_id": row["order_id"],
+                "perm_id": row["perm_id"],
+                "client_id": int(config.IBKR_CLIENT_ID) + EXECUTION_CLIENT_ID_OFFSET,
+                "source_module": "execution_sync.sync_executions",
+                "state": order_lifecycle.OrderState.FILLED,
+                "reason": f"Execution sync observed fill exec_id={row['exec_id']}",
+                "raw_payload": row,
+            })
 
         log.info(
             "Execution sync complete | executions=%s",
