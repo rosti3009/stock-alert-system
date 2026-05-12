@@ -608,6 +608,27 @@ async def auto_open_position(
             )
             return False
 
+        if execution_quality.get("blocks_buy"):
+            reason = execution_quality.get("blocked_buy_reason") or "Execution quality blocked BUY"
+            log.warning("AUTO BUY blocked for %s — %s", symbol, reason)
+            await database.set_app_state(
+                f"execution_quality_state:{symbol}",
+                execution_quality.get("state"),
+            )
+            await _journal_buy_decision(
+                row,
+                "EXECUTION_BLOCK_BUY",
+                "BLOCKED",
+                reason,
+                market,
+                {
+                    "sizing": sizing,
+                    "execution_quality": execution_quality,
+                    "portfolio_risk": portfolio_risk,
+                },
+            )
+            return False
+
         if sizing.get("blocks_buy"):
             reason = "; ".join(sizing.get("block_reasons") or []) or "Position sizing blocked BUY"
             log.warning("AUTO BUY blocked for %s — %s", symbol, reason)
