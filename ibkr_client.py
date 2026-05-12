@@ -1,6 +1,8 @@
 from ib_insync import *
 
 import config
+import database
+from trading_safety import require_paper_auto_trading_allowed
 
 
 class IBKRClient:
@@ -70,17 +72,27 @@ class IBKRClient:
         return result
 
     def _safety_check(self):
-        if not config.IBKR_PAPER_TRADING:
-            raise RuntimeError("IBKR safety block: Paper trading is not enabled")
-
-        if config.IBKR_ENABLE_REAL_TRADING:
-            raise RuntimeError("IBKR safety block: Real trading is enabled")
-
-        if int(config.IBKR_PORT) != 7497:
-            raise RuntimeError("IBKR safety block: Not connected to Paper TWS port 7497")
+        require_paper_auto_trading_allowed("IBKR order")
 
     def place_limit_buy_order(self, symbol, quantity, limit_price):
-        self._safety_check()
+        try:
+            self._safety_check()
+        except RuntimeError as exc:
+            database.safe_record_trade_journal_event_sync({
+                "symbol": symbol,
+                "event_type": "BUY_BLOCKED_BY_SAFETY_GATE",
+                "decision": "BLOCKED",
+                "reason": str(exc),
+                "source_module": "ibkr_client",
+                "price": limit_price,
+                "quantity": quantity,
+                "raw_payload": {
+                    "symbol": symbol,
+                    "quantity": quantity,
+                    "limit_price": limit_price,
+                },
+            })
+            raise
 
         contract = Stock(symbol, "SMART", "USD")
         self.ib.qualifyContracts(contract)

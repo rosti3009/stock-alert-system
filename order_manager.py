@@ -8,6 +8,7 @@ from ib_insync import IB
 
 import config
 from trade_protection import get_live_quote
+from trading_safety import require_paper_auto_trading_allowed
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +30,8 @@ class OrderManager:
 
     def connect(self) -> bool:
         try:
+            require_paper_auto_trading_allowed("Order manager")
+
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
 

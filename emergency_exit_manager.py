@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from ib_insync import IB, MarketOrder
 
 import config
+import database
+from trading_safety import require_paper_auto_trading_allowed
 
 log = logging.getLogger(__name__)
 
@@ -28,6 +30,8 @@ class EmergencyExitManager:
 
     def connect(self) -> bool:
         try:
+            require_paper_auto_trading_allowed("Emergency exit")
+
             self.loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self.loop)
 
@@ -118,6 +122,22 @@ class EmergencyExitManager:
                         remaining,
                         age,
                     )
+
+                    database.safe_record_trade_journal_event_sync({
+                        "symbol": symbol,
+                        "event_type": "EMERGENCY_EXIT_TRIGGERED",
+                        "decision": "REPLACE_WITH_MARKET_SELL",
+                        "reason": f"SELL order stale for {age}",
+                        "source_module": "emergency_exit_manager",
+                        "quantity": remaining,
+                        "raw_payload": {
+                            "status": status,
+                            "remaining": remaining,
+                            "age": str(age),
+                            "order_id": getattr(order, "orderId", None),
+                            "perm_id": getattr(order, "permId", None),
+                        },
+                    })
 
                     self.ib.cancelOrder(order)
                     self.ib.sleep(1)
