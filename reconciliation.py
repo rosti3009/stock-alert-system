@@ -6,8 +6,12 @@ from datetime import datetime, timezone
 import aiosqlite
 
 import config
+import database
 
 log = logging.getLogger(__name__)
+
+PAPER_TWS_PORT = 7497
+BASELINE_SOURCE = "TWS_BASELINE_ADOPTED"
 
 
 def now_iso() -> str:
@@ -35,6 +39,14 @@ async def init_reconciliation_db() -> None:
     async with aiosqlite.connect(config.DB_PATH) as db:
         await db.execute(CREATE_RECONCILIATION_ISSUES)
         await db.commit()
+
+
+async def _table_exists(db: aiosqlite.Connection, table: str) -> bool:
+    async with db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ) as cursor:
+        return await cursor.fetchone() is not None
 
 
 async def _load_db_positions(db: aiosqlite.Connection) -> dict[str, dict]:
@@ -73,12 +85,16 @@ async def _load_db_positions(db: aiosqlite.Connection) -> dict[str, dict]:
 async def _load_tws_positions(db: aiosqlite.Connection) -> dict[str, dict]:
     db.row_factory = aiosqlite.Row
 
+    if not await _table_exists(db, "tws_positions"):
+        return {}
+
     cursor = await db.execute(
         """
         SELECT
             symbol,
             quantity,
             avg_cost,
+            market_price,
             market_value,
             unrealized_pnl,
             updated_at
@@ -100,6 +116,7 @@ async def _load_tws_positions(db: aiosqlite.Connection) -> dict[str, dict]:
             "symbol": symbol,
             "quantity": float(row["quantity"] or 0),
             "avg_cost": float(row["avg_cost"] or 0),
+            "market_price": float(row["market_price"] or 0),
             "market_value": float(row["market_value"] or 0),
             "unrealized_pnl": float(row["unrealized_pnl"] or 0),
             "updated_at": row["updated_at"],
@@ -182,6 +199,175 @@ async def _insert_issue(
             now_iso(),
         ),
     )
+
+
+def _require_paper_adoption_allowed() -> None:
+    if not config.IBKR_PAPER_TRADING:
+        raise RuntimeError("TWS baseline adoption blocked: IBKR_PAPER_TRADING is false")
+
+    if config.IBKR_ENABLE_REAL_TRADING:
+        raise RuntimeError("TWS baseline adoption blocked: LIVE trading is enabled")
+
+    if int(config.IBKR_PORT) != PAPER_TWS_PORT:
+        raise RuntimeError(
+            f"TWS baseline adoption blocked: IBKR port is not Paper port {PAPER_TWS_PORT}"
+        )
+
+    if str(config.TRADING_MODE or "").upper() == "LIVE":
+        raise RuntimeError("TWS baseline adoption blocked: TRADING_MODE is LIVE")
+
+
+async def _ensure_position_source_column(db: aiosqlite.Connection) -> None:
+    async with db.execute("PRAGMA table_info(positions)") as cursor:
+        existing = {row[1] for row in await cursor.fetchall()}
+
+    if "source" not in existing:
+        await db.execute("ALTER TABLE positions ADD COLUMN source TEXT")
+
+
+def _baseline_notes(position: dict) -> str:
+    return (
+        f"source={BASELINE_SOURCE} | "
+        f"avg_cost={position.get('avg_cost')} | "
+        f"market_price={position.get('market_price')} | "
+        f"market_value={position.get('market_value')} | "
+        f"tws_updated_at={position.get('updated_at')}"
+    )
+
+
+async def adopt_tws_positions_as_baseline() -> dict:
+    """Manually adopt existing paper TWS positions into local positions.
+
+    This function only reads the latest TWS mirror tables and writes local DB
+    baseline rows plus journal events. It never places, cancels, or closes
+    orders and is intended to be called only by the operator-triggered API.
+    """
+    _require_paper_adoption_allowed()
+    await database.init_db()
+
+    adopted_symbols: list[str] = []
+    skipped_symbols: list[str] = []
+    skipped_reasons: dict[str, str] = {}
+    adopted_payloads: list[dict] = []
+
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        await init_reconciliation_db()
+        await _ensure_position_source_column(db)
+
+        db_positions = await _load_db_positions(db)
+        tws_positions = await _load_tws_positions(db)
+
+        now = now_iso()
+
+        for symbol in sorted(tws_positions.keys()):
+            tws_position = tws_positions[symbol]
+            quantity = float(tws_position.get("quantity") or 0)
+
+            if quantity <= 0:
+                skipped_symbols.append(symbol)
+                skipped_reasons[symbol] = "TWS quantity is not positive"
+                continue
+
+            if symbol in db_positions:
+                skipped_symbols.append(symbol)
+                skipped_reasons[symbol] = "Position already exists as OPEN in local DB"
+                continue
+
+            avg_cost = float(tws_position.get("avg_cost") or 0)
+            market_price = float(tws_position.get("market_price") or 0)
+            buy_price = avg_cost if avg_cost > 0 else market_price
+
+            if buy_price <= 0:
+                skipped_symbols.append(symbol)
+                skipped_reasons[symbol] = "TWS position has no usable avg_cost or market_price"
+                continue
+
+            payload = {
+                "symbol": symbol,
+                "quantity": quantity,
+                "buy_price": buy_price,
+                "current_price": market_price if market_price > 0 else buy_price,
+                "avg_cost": avg_cost,
+                "market_price": market_price,
+                "market_value": tws_position.get("market_value"),
+                "unrealized_pnl": tws_position.get("unrealized_pnl"),
+                "tws_updated_at": tws_position.get("updated_at"),
+                "source": BASELINE_SOURCE,
+            }
+
+            await db.execute(
+                """
+                INSERT INTO positions (
+                    symbol, buy_price, quantity, buy_date, current_price,
+                    profit_amount, profit_percent, stop_loss, take_profit_1,
+                    take_profit_2, status, action, reason, notes, source,
+                    created_at, updated_at, closed_at
+                )
+                VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL,
+                    'OPEN', 'HOLD', ?, ?, ?, ?, ?, NULL)
+                ON CONFLICT(symbol) DO UPDATE SET
+                    buy_price = excluded.buy_price,
+                    quantity = excluded.quantity,
+                    buy_date = excluded.buy_date,
+                    current_price = excluded.current_price,
+                    profit_amount = NULL,
+                    profit_percent = NULL,
+                    stop_loss = NULL,
+                    take_profit_1 = NULL,
+                    take_profit_2 = NULL,
+                    status = 'OPEN',
+                    action = 'HOLD',
+                    reason = excluded.reason,
+                    notes = excluded.notes,
+                    source = excluded.source,
+                    updated_at = excluded.updated_at,
+                    closed_at = NULL
+                WHERE positions.status IS NULL OR positions.status != 'OPEN'
+                """,
+                (
+                    symbol,
+                    round(buy_price, 4),
+                    round(quantity, 6),
+                    now,
+                    round(market_price if market_price > 0 else buy_price, 4),
+                    "Adopted from existing TWS position",
+                    _baseline_notes(payload),
+                    BASELINE_SOURCE,
+                    now,
+                    now,
+                ),
+            )
+
+            adopted_symbols.append(symbol)
+            adopted_payloads.append(payload)
+
+        await db.commit()
+
+    for payload in adopted_payloads:
+        await database.safe_record_trade_journal_event({
+            "symbol": payload["symbol"],
+            "event_type": "POSITION_BASELINE_ADOPTED",
+            "decision": "ADOPTED",
+            "reason": "Adopted from existing TWS position",
+            "source_module": "reconciliation.adopt_tws_positions_as_baseline",
+            "price": payload["buy_price"],
+            "quantity": payload["quantity"],
+            "unrealized_pnl": payload.get("unrealized_pnl"),
+            "raw_payload": payload,
+        })
+
+    reconciliation = await run_reconciliation_once()
+
+    return {
+        "adopted_count": len(adopted_symbols),
+        "skipped_count": len(skipped_symbols),
+        "symbols_adopted": adopted_symbols,
+        "symbols_skipped": skipped_symbols,
+        "skipped_reasons": skipped_reasons,
+        "remaining_reconciliation_issues": reconciliation.get("issues", []),
+        "remaining_reconciliation_issues_count": reconciliation.get("issues_count", 0),
+        "checked_at": now_iso(),
+    }
 
 
 async def run_reconciliation_once() -> dict:

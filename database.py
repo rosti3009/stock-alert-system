@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS positions (
     action TEXT DEFAULT 'HOLD',
     reason TEXT,
     notes TEXT,
+    source TEXT,
     created_at TEXT,
     updated_at TEXT,
     closed_at TEXT
@@ -287,6 +288,7 @@ async def init_db() -> None:
             "profit_amount": "REAL",
             "profit_percent": "REAL",
             "closed_at": "TEXT",
+            "source": "TEXT",
         })
 
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_created_at ON signals(created_at)")

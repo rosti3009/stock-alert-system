@@ -918,6 +918,32 @@ async def api_reconciliation():
     )
 
 
+@app.post("/api/reconciliation/adopt-tws-positions")
+async def api_adopt_tws_positions():
+
+    from reconciliation import adopt_tws_positions_as_baseline
+
+    try:
+        result = await adopt_tws_positions_as_baseline()
+        return JSONResponse(
+            result,
+            headers=no_cache_headers(),
+        )
+
+    except RuntimeError as exc:
+        return JSONResponse(
+            {
+                "error": str(exc),
+                "adopted_count": 0,
+                "skipped_count": 0,
+                "symbols_adopted": [],
+                "symbols_skipped": [],
+            },
+            status_code=403,
+            headers=no_cache_headers(),
+        )
+
+
 # ==========================================
 # ACCOUNT SYNC API
 # ==========================================
