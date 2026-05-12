@@ -22,6 +22,8 @@ class PositionSizingEngineTests(unittest.TestCase):
             "bid": 99.95,
             "ask": 100.05,
         }
+        self.original_virtual_capital = config.VIRTUAL_TRADING_CAPITAL_USD
+        config.VIRTUAL_TRADING_CAPITAL_USD = 5000.0
         self.base_context = {
             "open_positions": [],
             "account_equity": 10_000.0,
@@ -37,6 +39,9 @@ class PositionSizingEngineTests(unittest.TestCase):
             },
         }
 
+    def tearDown(self):
+        config.VIRTUAL_TRADING_CAPITAL_USD = self.original_virtual_capital
+
     def build(self, row=None, **overrides):
         payload = dict(self.base_context)
         payload.update(overrides)
@@ -49,6 +54,17 @@ class PositionSizingEngineTests(unittest.TestCase):
         self.assertGreater(result["recommended_position_size_usd"], 0)
         self.assertEqual(result["volatility_adjustment"], 1.0)
         self.assertEqual(result["liquidity_adjustment"], 1.0)
+
+    def test_virtual_capital_overrides_large_broker_account_for_sizing(self):
+        result = self.build(account_equity=999_000.0)
+
+        self.assertEqual(result["account_equity"], 5000.0)
+        self.assertEqual(result["effective_equity"], 5000.0)
+        self.assertEqual(result["virtual_trading_capital"], 5000.0)
+        self.assertEqual(result["broker_account_equity"], 999000.0)
+        self.assertEqual(result["max_risk_per_trade"], 50.0)
+        self.assertLessEqual(result["recommended_position_size_usd"], 1000.0)
+        self.assertEqual(result["risk_calculation_basis"], "virtual_trading_capital")
 
     def test_high_volatility_reduces_size(self):
         row = {**self.base_row, "atr_percent": config.MAX_INTRADAY_VOLATILITY + 1, "atr": 0}

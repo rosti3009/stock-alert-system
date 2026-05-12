@@ -55,6 +55,10 @@ def threshold(name: str, default: float) -> float:
     return safe_float(getattr(config, name, default), default)
 
 
+def effective_account_equity() -> float:
+    return max(0.0, safe_float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0), 5000.0))
+
+
 def _entry_price(row: dict[str, Any]) -> float:
     for key in ("price", "entry_price", "current_price", "close"):
         value = safe_float(row.get(key))
@@ -140,7 +144,8 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
 
     row = context.row or {}
     symbol = str(row.get("symbol") or "").strip().upper()
-    account_equity = max(0.0, safe_float(context.account_equity))
+    broker_account_equity = max(0.0, safe_float(context.account_equity))
+    account_equity = effective_account_equity()
     price = _entry_price(row)
     atr = _atr_value(row, price)
     stop_loss = _stop_loss(row, price, atr) if price > 0 else 0.0
@@ -336,6 +341,10 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
         "position_size": round(recommended_position_size_usd, 2),
         "risk": round(recommended_share_quantity * risk_per_share, 2),
         "account_equity": round(account_equity, 2),
+        "effective_equity": round(account_equity, 2),
+        "virtual_trading_capital": round(account_equity, 2),
+        "broker_account_equity": round(broker_account_equity, 2),
+        "risk_calculation_basis": "virtual_trading_capital",
         "available": round(available, 2),
         "used": round(used, 2),
         "reserve": round(reserve, 2),
@@ -349,6 +358,10 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
         "total_adjustment": round(total_adjustment, 4),
         "inputs": {
             "account_equity": round(account_equity, 2),
+            "effective_equity": round(account_equity, 2),
+            "virtual_trading_capital": round(account_equity, 2),
+            "broker_account_equity": round(broker_account_equity, 2),
+            "risk_calculation_basis": "virtual_trading_capital",
             "portfolio_exposure_percent": portfolio_risk.get("total_portfolio_exposure_percent"),
             "open_risk_percent": portfolio_risk.get("total_open_risk_percent"),
             "current_drawdown_percent": round(current_drawdown, 4),
@@ -384,6 +397,10 @@ def summarize_position_sizing(evaluations: list[dict[str, Any]]) -> dict[str, An
             "recommended_position_size_usd": 0.0,
             "recommended_share_quantity": 0.0,
             "max_risk_per_trade": 0.0,
+            "account_equity": round(effective_account_equity(), 2),
+            "effective_equity": round(effective_account_equity(), 2),
+            "virtual_trading_capital": round(effective_account_equity(), 2),
+            "risk_calculation_basis": "virtual_trading_capital",
             "volatility_adjustment": 1.0,
             "liquidity_adjustment": 1.0,
             "regime_adjustment": 1.0,
@@ -401,6 +418,10 @@ def summarize_position_sizing(evaluations: list[dict[str, Any]]) -> dict[str, An
         "recommended_position_size_usd": round(sum(safe_float(item.get("recommended_position_size_usd")) for item in evaluations), 2),
         "recommended_share_quantity": round(sum(safe_float(item.get("recommended_share_quantity")) for item in evaluations), 6),
         "max_risk_per_trade": worst.get("max_risk_per_trade"),
+        "account_equity": worst.get("account_equity"),
+        "effective_equity": worst.get("effective_equity"),
+        "virtual_trading_capital": worst.get("virtual_trading_capital"),
+        "risk_calculation_basis": "virtual_trading_capital",
         "volatility_adjustment": worst.get("volatility_adjustment"),
         "liquidity_adjustment": worst.get("liquidity_adjustment"),
         "regime_adjustment": worst.get("regime_adjustment"),
@@ -452,7 +473,7 @@ async def build_position_sizing_for_row(row: dict[str, Any], size_factor: float 
     portfolio_risk = await portfolio_risk_engine.get_portfolio_risk()
     market_regime = await get_cached_market_regime()
     open_positions = await database.get_open_positions()
-    account_equity = safe_float(portfolio_risk.get("account_equity"), safe_float(getattr(config, "ACCOUNT_BALANCE", 0.0)))
+    account_equity = effective_account_equity()
     symbol = str((row or {}).get("symbol") or "").strip().upper()
     price = _entry_price(row or {})
     execution_quality = evaluate_execution_quality(row=row, limit_price=price, symbol=symbol)
@@ -472,7 +493,7 @@ async def get_position_sizing(rows: list[dict[str, Any]] | None = None) -> dict[
     portfolio_risk = await portfolio_risk_engine.get_portfolio_risk()
     market_regime = await get_cached_market_regime()
     open_positions = await database.get_open_positions()
-    account_equity = safe_float(portfolio_risk.get("account_equity"), safe_float(getattr(config, "ACCOUNT_BALANCE", 0.0)))
+    account_equity = effective_account_equity()
     evaluations: list[dict[str, Any]] = []
     execution_evaluations = []
     for row in rows:

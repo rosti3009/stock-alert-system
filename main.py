@@ -1546,10 +1546,7 @@ async def api_trading_status():
     # ACCOUNT CALCULATIONS
     # ==========================================
 
-    account_equity = (
-        float(config.ACCOUNT_BALANCE)
-        + float(realized_pnl)
-    )
+    account_equity = float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0))
 
     used_capital = sum(
         float(p.get("buy_price") or 0)
@@ -1740,6 +1737,10 @@ async def api_trading_status():
             # ==========================================
 
             "account_balance": float(config.ACCOUNT_BALANCE),
+
+            "virtual_trading_capital": float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0)),
+
+            "risk_calculation_basis": "virtual_trading_capital",
 
             "realized_pnl": round(
                 float(realized_pnl),

@@ -212,7 +212,7 @@ def _momentum_quality(candidates: list[dict]) -> dict:
 
 
 def _risk_concentration(positions: list[dict]) -> dict:
-    account_equity = safe_float(getattr(config, "ACCOUNT_BALANCE", 0.0), 1.0) or 1.0
+    account_equity = safe_float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0), 5000.0) or 1.0
     exposures: list[tuple[str, float]] = []
     for position in positions or []:
         symbol = str(position.get("symbol") or "").strip().upper()
