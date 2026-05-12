@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -383,7 +384,7 @@ def evaluate_recovery_status_sync() -> dict[str, Any]:
         "error": None,
     }
 
-    with sqlite3.connect(config.DB_PATH) as db:
+    with closing(sqlite3.connect(config.DB_PATH)) as db:
         if _sync_table_exists(db, "tws_heartbeat"):
             row = db.execute(
                 "SELECT connected, account, last_sync_at, error FROM tws_heartbeat WHERE id = 1"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 import aiosqlite
 
@@ -402,7 +403,7 @@ def safe_record_trade_journal_event_sync(event: dict) -> None:
         if not event.get("event_type"):
             raise ValueError("trade journal event_type is required")
 
-        with sqlite3.connect(DB_PATH) as db:
+        with closing(sqlite3.connect(DB_PATH)) as db:
             db.execute(CREATE_TRADE_JOURNAL)
             db.execute(_trade_journal_insert_sql(), _journal_row(event))
             db.commit()

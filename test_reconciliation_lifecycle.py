@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from contextlib import closing
 import asyncio
+import gc
 import os
+import time
 import sqlite3
 import tempfile
 import unittest
@@ -36,20 +39,27 @@ class ReconciliationLifecycleTests(unittest.TestCase):
         config.DB_PATH = self.tmp.name
         database.DB_PATH = self.tmp.name
         asyncio.run(database.init_db())
-        with sqlite3.connect(self.tmp.name) as db:
+        with closing(sqlite3.connect(self.tmp.name)) as db:
             db.execute(CREATE_TWS_POSITIONS)
             db.commit()
 
     def tearDown(self):
         config.DB_PATH = self.original_config_db_path
         database.DB_PATH = self.original_database_db_path
-        try:
-            os.unlink(self.tmp.name)
-        except FileNotFoundError:
-            pass
+        gc.collect()
+        for attempt in range(5):
+            try:
+                os.unlink(self.tmp.name)
+                break
+            except FileNotFoundError:
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.1)
 
     def set_tws_position(self, symbol: str, quantity: float) -> None:
-        with sqlite3.connect(self.tmp.name) as db:
+        with closing(sqlite3.connect(self.tmp.name)) as db:
             db.execute(
                 """
                 INSERT INTO tws_positions (symbol, quantity, avg_cost, market_price, updated_at)
@@ -63,7 +73,7 @@ class ReconciliationLifecycleTests(unittest.TestCase):
             db.commit()
 
     def fetch_issue_rows(self) -> list[sqlite3.Row]:
-        with sqlite3.connect(self.tmp.name) as db:
+        with closing(sqlite3.connect(self.tmp.name)) as db:
             db.row_factory = sqlite3.Row
             return db.execute(
                 """
