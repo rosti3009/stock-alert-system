@@ -13,6 +13,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 import config
 import database
 import account_sync
+import recovery_manager
 from auto_trader import process_auto_trading
 from market_regime import get_market_regime
 from data_fetcher import fetch_stock_data
@@ -850,6 +851,20 @@ async def lifespan(app: FastAPI):
         "Market data guard started — every 60 seconds"
     )
 
+    scheduler.add_job(
+        recovery_manager.run_recovery_check,
+        "interval",
+        seconds=config.RECOVERY_CHECK_INTERVAL_SECONDS,
+        id="recovery_manager",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    log.info(
+        "Recovery manager started — every %s seconds",
+        config.RECOVERY_CHECK_INTERVAL_SECONDS,
+    )
+
     scheduler.start()
 
     if config.RUN_SCAN_ON_STARTUP and not _latest:
@@ -865,6 +880,14 @@ app = FastAPI(title="Stock Alerts", lifespan=lifespan)
 # ==========================================
 # MARKET DATA GUARD API
 # ==========================================
+
+@app.get("/api/recovery-status")
+async def api_recovery_status():
+    return JSONResponse(
+        await recovery_manager.get_recovery_status(),
+        headers=no_cache_headers(),
+    )
+
 
 @app.get("/api/market-data-guard")
 async def api_market_data_guard():
