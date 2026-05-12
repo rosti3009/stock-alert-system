@@ -7,6 +7,10 @@ import aiosqlite
 
 import config
 import database
+from reconciliation_lifecycle import (
+    init_reconciliation_lifecycle_db,
+    reconcile_issue_lifecycle,
+)
 
 log = logging.getLogger(__name__)
 
@@ -36,9 +40,7 @@ CREATE TABLE IF NOT EXISTS reconciliation_issues (
 
 
 async def init_reconciliation_db() -> None:
-    async with aiosqlite.connect(config.DB_PATH) as db:
-        await db.execute(CREATE_RECONCILIATION_ISSUES)
-        await db.commit()
+    await init_reconciliation_lifecycle_db()
 
 
 async def _table_exists(db: aiosqlite.Connection, table: str) -> bool:
@@ -378,16 +380,6 @@ async def run_reconciliation_once() -> dict:
         tws_positions = await _load_tws_positions(db)
         execution_quantities = await _load_execution_quantities(db)
 
-        await db.execute(
-            """
-            UPDATE reconciliation_issues
-            SET status = 'RESOLVED',
-                resolved_at = ?
-            WHERE status = 'OPEN'
-            """,
-            (now_iso(),),
-        )
-
         symbols = set()
         symbols.update(db_positions.keys())
         symbols.update(tws_positions.keys())
@@ -452,28 +444,17 @@ async def run_reconciliation_once() -> dict:
                 }
                 issues.append(issue)
 
-        for issue in issues:
-            await _insert_issue(
-                db,
-                issue["symbol"],
-                issue["issue_type"],
-                issue["severity"],
-                issue["db_quantity"],
-                issue["tws_quantity"],
-                issue["execution_quantity"],
-                issue["details"],
-            )
-
-        await db.commit()
+        open_issues = await reconcile_issue_lifecycle(db, issues)
 
     log.info(
-        "Reconciliation complete | issues=%s",
+        "Reconciliation complete | current_issues=%s open_issues=%s",
         len(issues),
+        len(open_issues),
     )
 
     return {
-        "ok": len(issues) == 0,
-        "issues_count": len(issues),
-        "issues": issues,
+        "ok": len(open_issues) == 0,
+        "issues_count": len(open_issues),
+        "issues": open_issues,
         "checked_at": now_iso(),
     }
