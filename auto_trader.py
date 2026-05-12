@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from ib_insync import IB, Stock, LimitOrder
 from trade_protection import validate_buy_before_order
+from recovery_manager import require_buy_allowed
 from trading_safety import require_paper_auto_trading_allowed
 
 import config
@@ -185,6 +186,7 @@ def execute_limit_buy_sync(
     limit_price: float,
 ) -> dict:
     require_paper_auto_trading_allowed("AUTO BUY")
+    require_buy_allowed("auto_trader")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

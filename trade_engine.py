@@ -3,6 +3,7 @@ from __future__ import annotations
 import config
 import database
 from ibkr_client import IBKRClient
+from recovery_manager import require_buy_allowed
 from trading_safety import require_paper_auto_trading_allowed
 
 
@@ -18,6 +19,7 @@ class TradeEngine:
 
     def _validate_trading_permissions(self) -> None:
         require_paper_auto_trading_allowed("Trading")
+        require_buy_allowed("trade_engine")
 
     def _validate_order_risk(
         self,
