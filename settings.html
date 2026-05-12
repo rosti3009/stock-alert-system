@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Settings — Trading System</title>
+  <link rel="stylesheet" href="/layout.css">
+</head>
+
+<body>
+
+<div class="app-shell">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-title">TRADING SYSTEM</div>
+      <div class="brand-subtitle">Institutional Dashboard</div>
+    </div>
+
+    <nav class="side-nav">
+      <a href="/dashboard">📊 Dashboard</a>
+      <a href="/analytics">📈 Analytics</a>
+      <a href="/positions">💼 Positions</a>
+      <a href="/portfolio">📁 Portfolio</a>
+      <a href="/history">📜 History</a>
+      <a href="/risk">⚠ Risk</a>
+      <a href="/strategies">🧠 Strategies</a>
+      <a href="/settings" class="active">⚙ Settings</a>
+    </nav>
+  </aside>
+
+  <main class="main-area">
+
+    <div class="topbar">
+      <div>
+        <h1 class="page-title">System Settings</h1>
+        <div class="page-subtitle">API · Telegram · Auto Trader · Risk limits · System health</div>
+      </div>
+
+      <div class="status-row">
+        <div class="live-dot"></div>
+        <div>LIVE</div>
+        <div>|</div>
+        <div id="updated">Loading...</div>
+      </div>
+    </div>
+
+    <div class="container">
+
+      <div class="cards">
+        <div class="card"><h3>System Status</h3><div class="value green" id="systemStatus">-</div></div>
+        <div class="card"><h3>Scan Running</h3><div class="value yellow" id="scanRunning">-</div></div>
+        <div class="card"><h3>Latest Count</h3><div class="value blue" id="latestCount">-</div></div>
+        <div class="card"><h3>TOP Weekly</h3><div class="value purple" id="topWeekly">-</div></div>
+        <div class="card"><h3>Auto Trading</h3><div class="value green" id="autoTrading">-</div></div>
+        <div class="card"><h3>Mode</h3><div class="value yellow" id="mode">-</div></div>
+      </div>
+
+      <div class="charts">
+
+        <div class="box">
+          <h3>System Health</h3>
+          <table>
+            <tbody>
+              <tr><td>Status</td><td id="healthStatus">-</td></tr>
+              <tr><td>Database Path</td><td id="dbPath">-</td></tr>
+              <tr><td>Scan Running</td><td id="healthScan">-</td></tr>
+              <tr><td>Latest Candidates</td><td id="healthLatest">-</td></tr>
+              <tr><td>Top Weekly Count</td><td id="healthTop">-</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="box">
+          <h3>Risk Configuration View</h3>
+          <table>
+            <tbody>
+              <tr><td>Account Balance</td><td>$5,000 / לפי config</td></tr>
+              <tr><td>Risk Per Trade</td><td>2%</td></tr>
+              <tr><td>Max Position Size</td><td>20%</td></tr>
+              <tr><td>Cash Reserve</td><td>10%</td></tr>
+              <tr><td>Max Open Positions</td><td>10</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+      </div>
+
+      <div class="charts">
+
+        <div class="box">
+          <h3>Scanner Settings View</h3>
+          <table>
+            <tbody>
+              <tr><td>Scan Mode</td><td>Interval / Daily</td></tr>
+              <tr><td>Dynamic Symbols</td><td>Enabled</td></tr>
+              <tr><td>Minimum Price</td><td>$5</td></tr>
+              <tr><td>Minimum Avg Volume</td><td>500,000</td></tr>
+              <tr><td>Run Scan On Startup</td><td>Enabled</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="box">
+          <h3>External Services</h3>
+          <table>
+            <tbody>
+              <tr><td>Market Data API</td><td>Polygon / AlphaVantage</td></tr>
+              <tr><td>Telegram Alerts</td><td>SELL / Position alerts</td></tr>
+              <tr><td>Broker</td><td>Paper Trading</td></tr>
+              <tr><td>Database</td><td>SQLite</td></tr>
+              <tr><td>Frontend</td><td>Institutional HTML UI</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+      </div>
+
+      <div class="box">
+        <h3>System Actions</h3>
+        <div class="toolbar">
+          <button class="primary" onclick="reloadHealth()">Reload Health</button>
+          <button onclick="runScan()">Run Scan</button>
+          <button class="danger" disabled>Kill Switch — Coming Soon</button>
+        </div>
+      </div>
+
+      <div class="box muted">
+        ⚠️ כרגע עמוד ההגדרות הוא עמוד צפייה ובקרה. בשלב הבא אפשר להפוך אותו לעמוד עריכה שמעדכן config דרך API מאובטח.
+      </div>
+
+    </div>
+
+  </main>
+
+</div>
+
+<script>
+async function fetchNoCache(url, options = {}){
+  const separator = url.includes("?") ? "&" : "?";
+  const res = await fetch(url + separator + "ts=" + Date.now(), {
+    cache:"no-store",
+    ...options
+  });
+
+  if(!res.ok){
+    throw new Error(url + " HTTP " + res.status);
+  }
+
+  return await res.json();
+}
+
+function yesNo(v){
+  return v ? "YES" : "NO";
+}
+
+async function reloadHealth(){
+  try{
+    const h = await fetchNoCache("/health");
+
+    document.getElementById("systemStatus").textContent = h.status || "-";
+    document.getElementById("scanRunning").textContent = yesNo(h.scan_running);
+    document.getElementById("latestCount").textContent = h.latest_count ?? "-";
+    document.getElementById("topWeekly").textContent = h.top_weekly_count ?? "-";
+    document.getElementById("autoTrading").textContent = yesNo(h.auto_trading);
+    document.getElementById("mode").textContent = h.mode || "-";
+
+    document.getElementById("healthStatus").textContent = h.status || "-";
+    document.getElementById("dbPath").textContent = h.db_path || "-";
+    document.getElementById("healthScan").textContent = yesNo(h.scan_running);
+    document.getElementById("healthLatest").textContent = h.latest_count ?? "-";
+    document.getElementById("healthTop").textContent = h.top_weekly_count ?? "-";
+
+    document.getElementById("updated").textContent = "Updated " + new Date().toLocaleTimeString();
+
+  }catch(err){
+    console.error(err);
+    document.getElementById("updated").textContent = "Update failed";
+  }
+}
+
+async function runScan(){
+  try{
+    document.getElementById("updated").textContent = "Scan started...";
+    await fetchNoCache("/api/run-scan", {method:"POST"});
+    setTimeout(reloadHealth, 3000);
+  }catch(err){
+    console.error(err);
+    document.getElementById("updated").textContent = "Scan failed";
+  }
+}
+
+reloadHealth();
+setInterval(reloadHealth, 30000);
+</script>
+
+</body>
+</html>

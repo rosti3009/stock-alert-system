@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Analytics — Trading System</title>
+
+  <link rel="stylesheet" href="/layout.css">
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+
+<div class="app-shell">
+
+  <aside class="sidebar">
+
+    <div class="brand">
+      <div class="brand-title">TRADING SYSTEM</div>
+      <div class="brand-subtitle">Institutional Dashboard</div>
+    </div>
+
+    <nav class="side-nav">
+      <a href="/dashboard">📊 Dashboard</a>
+      <a href="/analytics" class="active">📈 Analytics</a>
+      <a href="/positions">💼 Positions</a>
+      <a href="/portfolio">📁 Portfolio</a>
+      <a href="/history">📜 History</a>
+      <a href="/risk">⚠ Risk</a>
+      <a href="/strategies">🧠 Strategies</a>
+      <a href="/settings">⚙ Settings</a>
+    </nav>
+
+  </aside>
+
+  <main class="main-area">
+
+    <div class="topbar">
+
+      <div>
+        <h1 class="page-title">Analytics Center</h1>
+
+        <div class="page-subtitle">
+          Performance · Equity Curve · Signal Quality · Portfolio Analytics
+        </div>
+      </div>
+
+      <div class="status-row">
+        <div class="live-dot"></div>
+        <div>LIVE</div>
+        <div>|</div>
+        <div>Analytics Engine Active</div>
+      </div>
+
+    </div>
+
+    <div class="container">
+
+      <div class="cards">
+        <div class="card"><h3>Net Profit</h3><div class="value" id="netProfit">-</div></div>
+        <div class="card"><h3>Gross Profit</h3><div class="value green" id="grossProfit">-</div></div>
+        <div class="card"><h3>Gross Loss</h3><div class="value red" id="grossLoss">-</div></div>
+        <div class="card"><h3>Win Rate</h3><div class="value blue" id="winRate">-</div></div>
+        <div class="card"><h3>Profit Factor</h3><div class="value yellow" id="profitFactor">-</div></div>
+        <div class="card"><h3>Total Trades</h3><div class="value purple" id="totalTrades">-</div></div>
+        <div class="card"><h3>Open Positions</h3><div class="value blue" id="openPositions">-</div></div>
+        <div class="card"><h3>Closed Positions</h3><div class="value muted" id="closedPositions">-</div></div>
+      </div>
+
+      <div class="charts">
+
+        <div class="box wide">
+          <h3>Equity Curve</h3>
+          <canvas id="equityChart"></canvas>
+        </div>
+
+        <div class="box chart-box">
+          <h3>Signal Distribution</h3>
+          <canvas id="signalsChart"></canvas>
+        </div>
+
+        <div class="box chart-box">
+          <h3>TOP 10 Score Quality</h3>
+          <canvas id="scoreChart"></canvas>
+        </div>
+
+        <div class="box chart-box">
+          <h3>RSI vs Score</h3>
+          <canvas id="rsiChart"></canvas>
+        </div>
+
+        <div class="box chart-box">
+          <h3>Closed Trades PnL</h3>
+          <canvas id="pnlChart"></canvas>
+        </div>
+
+      </div>
+
+      <h2 class="section-title">TOP 10 Analytics</h2>
+
+      <div class="box">
+        <div class="table-wrap">
+          <table>
+
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Symbol</th>
+                <th>Signal</th>
+                <th>Price</th>
+                <th>RSI</th>
+                <th>Trend</th>
+                <th>Score</th>
+                <th>Risk %</th>
+                <th>R/R</th>
+                <th>Volume Ratio</th>
+              </tr>
+            </thead>
+
+            <tbody id="topTable">
+              <tr>
+                <td colspan="10" class="loading">Loading...</td>
+              </tr>
+            </tbody>
+
+          </table>
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+
+</div>
+
+<script>
+let stocks = [];
+let topWeekly = [];
+let positions = [];
+let performance = {};
+let equityCurve = [];
+
+let equityChart, signalsChart, scoreChart, rsiChart, pnlChart;
+
+async function fetchNoCache(url){
+  const res = await fetch(url + "?ts=" + Date.now(), {cache:"no-store"});
+  if(!res.ok) throw new Error(url + " failed");
+  return await res.json();
+}
+
+function money(v){
+  const n = Number(v || 0);
+  return "$" + n.toFixed(2);
+}
+
+function pct(v){
+  const n = Number(v || 0);
+  return n.toFixed(2) + "%";
+}
+
+function num(v){
+  if(v === null || v === undefined || v === "") return "-";
+  const n = Number(v);
+  return Number.isNaN(n) ? v : n.toFixed(2);
+}
+
+function destroyCharts(){
+  [equityChart, signalsChart, scoreChart, rsiChart, pnlChart].forEach(c => {
+    if(c) c.destroy();
+  });
+}
+
+async function loadAnalytics(){
+
+  try{
+
+    [stocks, topWeekly, positions, performance, equityCurve] = await Promise.all([
+      fetchNoCache("/api/stocks"),
+      fetchNoCache("/api/top-weekly"),
+      fetchNoCache("/api/positions"),
+      fetchNoCache("/api/performance"),
+      fetchNoCache("/api/equity-curve")
+    ]);
+
+    if(!Array.isArray(stocks)) stocks = [];
+    if(!Array.isArray(topWeekly)) topWeekly = [];
+    if(!Array.isArray(positions)) positions = [];
+    if(!Array.isArray(equityCurve)) equityCurve = [];
+    if(!performance || typeof performance !== "object") performance = {};
+
+    updateCards();
+    drawCharts();
+    drawTopTable();
+
+  }catch(err){
+
+    console.error(err);
+    alert("שגיאה בטעינת Analytics");
+  }
+}
+
+function updateCards(){
+
+  const open = positions.filter(p => (p.status || "OPEN") === "OPEN");
+  const closed = positions.filter(p => p.status === "CLOSED");
+
+  const net = Number(performance.total_pnl || 0);
+  const grossProfit = Number(performance.gross_profit || 0);
+  const grossLoss = Number(performance.gross_loss || 0);
+
+  document.getElementById("netProfit").textContent = money(net);
+  document.getElementById("netProfit").className = "value " + (net >= 0 ? "green" : "red");
+
+  document.getElementById("grossProfit").textContent = money(grossProfit);
+  document.getElementById("grossLoss").textContent = money(grossLoss);
+
+  document.getElementById("winRate").textContent = pct(performance.win_rate || 0);
+
+  document.getElementById("profitFactor").textContent =
+    performance.profit_factor ?? 0;
+
+  document.getElementById("totalTrades").textContent =
+    performance.total_trades ?? closed.length;
+
+  document.getElementById("openPositions").textContent = open.length;
+  document.getElementById("closedPositions").textContent = closed.length;
+}
+
+function drawCharts(){
+
+  destroyCharts();
+
+  const buy = stocks.filter(r => r.signal === "BUY").length;
+  const sell = stocks.filter(r => r.signal === "SELL").length;
+  const neutral = stocks.filter(r => r.signal === "NEUTRAL").length;
+  const skipped = stocks.filter(r => r.signal === "SKIPPED").length;
+
+  const top = (topWeekly.length ? topWeekly : stocks)
+    .filter(r => r.symbol)
+    .sort((a,b)=>(b.weekly_score || b.score || 0) - (a.weekly_score || a.score || 0))
+    .slice(0,10);
+
+  const closed = positions.filter(p => p.status === "CLOSED");
+
+  equityChart = new Chart(document.getElementById("equityChart"), {
+    type:"line",
+    data:{
+      labels: equityCurve.map((r,i)=>r.label || "#" + i),
+      datasets:[{
+        label:"Equity",
+        data: equityCurve.map(r=>Number(r.equity || 0)),
+        tension:0.25,
+        fill:false
+      }]
+    },
+    options:{
+      maintainAspectRatio:false,
+      scales:{y:{beginAtZero:false}}
+    }
+  });
+
+  signalsChart = new Chart(document.getElementById("signalsChart"), {
+    type:"doughnut",
+    data:{
+      labels:["BUY","SELL","NEUTRAL","SKIPPED"],
+      datasets:[{
+        data:[buy,sell,neutral,skipped]
+      }]
+    },
+    options:{
+      maintainAspectRatio:false
+    }
+  });
+
+  scoreChart = new Chart(document.getElementById("scoreChart"), {
+    type:"bar",
+    data:{
+      labels:top.map(r=>r.symbol),
+      datasets:[{
+        label:"Score",
+        data:top.map(r=>Number(r.weekly_score || r.score || 0))
+      }]
+    },
+    options:{
+      maintainAspectRatio:false,
+      scales:{
+        y:{
+          beginAtZero:true,
+          max:100
+        }
+      }
+    }
+  });
+
+  rsiChart = new Chart(document.getElementById("rsiChart"), {
+    type:"line",
+    data:{
+      labels:top.map(r=>r.symbol),
+      datasets:[
+        {
+          label:"RSI",
+          data:top.map(r=>Number(r.rsi || 0)),
+          tension:0.25
+        },
+        {
+          label:"Score",
+          data:top.map(r=>Number(r.weekly_score || r.score || 0)),
+          tension:0.25
+        }
+      ]
+    },
+    options:{
+      maintainAspectRatio:false,
+      scales:{
+        y:{
+          beginAtZero:true,
+          max:100
+        }
+      }
+    }
+  });
+
+  pnlChart = new Chart(document.getElementById("pnlChart"), {
+    type:"bar",
+    data:{
+      labels:closed.map(p=>p.symbol || "-"),
+      datasets:[{
+        label:"PnL $",
+        data:closed.map(p=>Number(p.profit_amount || 0))
+      }]
+    },
+    options:{
+      maintainAspectRatio:false
+    }
+  });
+}
+
+function drawTopTable(){
+
+  const rows = (topWeekly.length ? topWeekly : stocks)
+    .filter(r => r.symbol)
+    .sort((a,b)=>(b.weekly_score || b.score || 0) - (a.weekly_score || a.score || 0))
+    .slice(0,10);
+
+  const tbody = document.getElementById("topTable");
+
+  if(!rows.length){
+
+    tbody.innerHTML = `
+      <tr>
+        <td colspan="10" class="loading">
+          אין נתונים להצגה
+        </td>
+      </tr>
+    `;
+
+    return;
+  }
+
+  tbody.innerHTML = rows.map((r,i)=>`
+    <tr>
+      <td>${i+1}</td>
+      <td><b>${r.symbol || "-"}</b></td>
+
+      <td class="${
+        r.signal === "BUY"
+          ? "green"
+          : r.signal === "SELL"
+            ? "red"
+            : "yellow"
+      }">
+        ${r.signal || "-"}
+      </td>
+
+      <td>${num(r.price)}</td>
+      <td>${num(r.rsi)}</td>
+      <td>${r.trend || "-"}</td>
+
+      <td class="yellow">
+        <b>${r.weekly_score || r.score || "-"}</b>
+      </td>
+
+      <td>${num(r.risk_percent)}</td>
+      <td>${num(r.rr_ratio)}</td>
+      <td>${num(r.volume_ratio)}</td>
+    </tr>
+  `).join("");
+}
+
+loadAnalytics();
+
+setInterval(loadAnalytics, 30000);
+</script>
+
+</body>
+</html>

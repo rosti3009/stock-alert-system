@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Scanner — Trading System</title>
+
+  <link rel="stylesheet" href="/layout.css">
+</head>
+
+<body>
+
+<div class="app-shell">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-title">TRADING SYSTEM</div>
+      <div class="brand-subtitle">Institutional Dashboard</div>
+    </div>
+
+    <nav class="side-nav">
+      <a href="/dashboard">📊 Dashboard</a>
+      <a href="/scanner" class="active">🔎 Scanner</a>
+      <a href="/analytics">📈 Analytics</a>
+      <a href="/positions">💼 Positions</a>
+      <a href="/portfolio">📁 Portfolio</a>
+      <a href="/history">📜 History</a>
+      <a href="/risk">⚠ Risk</a>
+      <a href="/strategies">🧠 Strategies</a>
+      <a href="/settings">⚙ Settings</a>
+    </nav>
+  </aside>
+
+  <main class="main-area">
+
+    <div class="topbar">
+      <div>
+        <h1 class="page-title">Scanner Center</h1>
+        <div class="page-subtitle">Live scanner · TOP setups · Signals · Ranking engine</div>
+      </div>
+
+      <div class="status-row">
+        <div class="live-dot"></div>
+        <div>LIVE</div>
+        <div>|</div>
+        <div id="updated">Loading...</div>
+      </div>
+    </div>
+
+    <div class="container">
+
+      <div id="errorBox" class="box red" style="display:none;margin-bottom:16px;"></div>
+
+      <div class="cards">
+        <div class="card"><h3>Total Rows</h3><div class="value blue" id="totalRows">-</div></div>
+        <div class="card"><h3>Scanned</h3><div class="value" id="scannedRows">-</div></div>
+        <div class="card"><h3>BUY Signals</h3><div class="value green" id="buyCount">-</div></div>
+        <div class="card"><h3>SELL Signals</h3><div class="value red" id="sellCount">-</div></div>
+        <div class="card"><h3>TOP Score</h3><div class="value yellow" id="topScore">-</div></div>
+        <div class="card"><h3>Best Symbol</h3><div class="value green" id="bestSymbol">-</div></div>
+      </div>
+
+      <div class="toolbar">
+        <div>
+          <button id="scanBtn" class="primary" onclick="runScan()">Run Scan</button>
+          <button onclick="rebuildTop()">Rebuild TOP</button>
+          <button onclick="loadScanner()">Refresh</button>
+        </div>
+
+        <div>
+          <select id="filterSelect" onchange="renderFullScanner()">
+            <option value="ACTIVE">Active Only</option>
+            <option value="ALL">All Rows</option>
+            <option value="BUY">BUY Only</option>
+            <option value="SELL">SELL Only</option>
+            <option value="NEUTRAL">NEUTRAL Only</option>
+            <option value="SKIPPED">SKIPPED Only</option>
+            <option value="ERROR">ERROR Only</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="box">
+        <h3>TOP Weekly Setups</h3>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Rank</th>
+                <th>Symbol</th>
+                <th>Signal</th>
+                <th>Weekly Score</th>
+                <th>Price</th>
+                <th>RSI</th>
+                <th>Trend</th>
+                <th>Volume Ratio</th>
+                <th>Risk %</th>
+                <th>R/R</th>
+                <th>Entry</th>
+                <th>Stop</th>
+                <th>TP1</th>
+                <th>TP2</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody id="topRows">
+              <tr><td colspan="15">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="box">
+        <h3>Full Scanner Feed</h3>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Symbol</th>
+                <th>Signal</th>
+                <th>Score</th>
+                <th>Price</th>
+                <th>RSI</th>
+                <th>Trend</th>
+                <th>MA20</th>
+                <th>MA50</th>
+                <th>MA200</th>
+                <th>Volume</th>
+                <th>Avg Volume</th>
+                <th>Volume Ratio</th>
+                <th>Risk %</th>
+                <th>R/R</th>
+                <th>Reason</th>
+              </tr>
+            </thead>
+            <tbody id="scannerRows">
+              <tr><td colspan="16">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="box muted">
+        ⚠️ Scanner data is system-generated technical analysis only. Not financial advice.
+      </div>
+
+    </div>
+
+  </main>
+</div>
+
+<script>
+let stocks = [];
+let topWeekly = [];
+let isLoading = false;
+
+async function fetchNoCache(url, options = {}){
+  const separator = url.includes("?") ? "&" : "?";
+  const res = await fetch(url + separator + "ts=" + Date.now(), {
+    cache:"no-store",
+    ...options
+  });
+
+  if(!res.ok){
+    throw new Error(url + " HTTP " + res.status);
+  }
+
+  return await res.json();
+}
+
+function money(v){
+  if(v === null || v === undefined || v === "") return "-";
+  return "$" + Number(v || 0).toFixed(2);
+}
+
+function num(v, digits = 2){
+  if(v === null || v === undefined || v === "") return "-";
+  const n = Number(v);
+  if(Number.isNaN(n)) return String(v);
+  return n.toFixed(digits);
+}
+
+function pct(v){
+  if(v === null || v === undefined || v === "") return "-";
+  return Number(v || 0).toFixed(2) + "%";
+}
+
+function signalClass(signal){
+  if(signal === "BUY") return "green";
+  if(signal === "SELL") return "red";
+  if(signal === "SKIPPED" || signal === "ERROR") return "muted";
+  return "yellow";
+}
+
+function reasonText(row){
+  if(Array.isArray(row.weekly_reasons) && row.weekly_reasons.length){
+    return row.weekly_reasons.join(" • ");
+  }
+
+  if(Array.isArray(row.reasons) && row.reasons.length){
+    return row.reasons.join(" • ");
+  }
+
+  return row.skip_reason || row.error || "-";
+}
+
+function showError(message){
+  const box = document.getElementById("errorBox");
+  box.textContent = message;
+  box.style.display = "block";
+}
+
+function clearError(){
+  document.getElementById("errorBox").style.display = "none";
+}
+
+async function loadScanner(){
+  if(isLoading) return;
+  isLoading = true;
+  clearError();
+
+  try{
+    [stocks, topWeekly] = await Promise.all([
+      fetchNoCache("/api/stocks"),
+      fetchNoCache("/api/top-weekly")
+    ]);
+
+    if(!Array.isArray(stocks)) stocks = [];
+    if(!Array.isArray(topWeekly)) topWeekly = [];
+
+    updateCards();
+    renderTopWeekly();
+    renderFullScanner();
+
+    document.getElementById("updated").textContent =
+      "Updated " + new Date().toLocaleTimeString();
+
+  }catch(err){
+    console.error(err);
+    showError("Scanner API error: " + err.message);
+    document.getElementById("updated").textContent = "Update failed";
+  }finally{
+    isLoading = false;
+  }
+}
+
+function updateCards(){
+  const active = stocks.filter(r => r.signal !== "SKIPPED" && r.signal !== "ERROR" && !r.error);
+  const buy = stocks.filter(r => r.signal === "BUY").length;
+  const sell = stocks.filter(r => r.signal === "SELL").length;
+
+  const top = (topWeekly.length ? topWeekly : stocks)
+    .filter(r => r.symbol)
+    .sort((a,b)=>Number(b.weekly_score || b.score || 0) - Number(a.weekly_score || a.score || 0))[0];
+
+  document.getElementById("totalRows").textContent = stocks.length;
+  document.getElementById("scannedRows").textContent = active.length;
+  document.getElementById("buyCount").textContent = buy;
+  document.getElementById("sellCount").textContent = sell;
+  document.getElementById("topScore").textContent = top ? Number(top.weekly_score || top.score || 0).toFixed(0) : "-";
+  document.getElementById("bestSymbol").textContent = top ? top.symbol : "-";
+}
+
+function renderTopWeekly(){
+  const tbody = document.getElementById("topRows");
+
+  const rows = (topWeekly.length ? topWeekly : [])
+    .filter(r => r.symbol)
+    .sort((a,b)=>Number(b.weekly_score || b.score || 0) - Number(a.weekly_score || a.score || 0))
+    .slice(0,10);
+
+  if(!rows.length){
+    tbody.innerHTML = `<tr><td colspan="15">אין TOP setups כרגע. הרץ סריקה או Rebuild TOP.</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = rows.map((r,i)=>`
+    <tr>
+      <td><b>#${r.weekly_rank || i + 1}</b></td>
+      <td><b>${r.symbol || "-"}</b></td>
+      <td class="${signalClass(r.signal)}"><b>${r.signal || "-"}</b></td>
+      <td class="yellow"><b>${num(r.weekly_score || r.score,0)}</b></td>
+      <td>${money(r.price)}</td>
+      <td>${num(r.rsi)}</td>
+      <td><span class="badge">${r.trend || "-"}</span></td>
+      <td>${num(r.volume_ratio)}</td>
+      <td>${pct(r.risk_percent)}</td>
+      <td>${num(r.rr_ratio)}</td>
+      <td>${money(r.entry_price)}</td>
+      <td>${money(r.stop_loss)}</td>
+      <td>${money(r.take_profit_1)}</td>
+      <td>${money(r.take_profit_2)}</td>
+      <td class="reason">${reasonText(r)}</td>
+    </tr>
+  `).join("");
+}
+
+function renderFullScanner(){
+  const tbody = document.getElementById("scannerRows");
+  const filter = document.getElementById("filterSelect").value;
+
+  let rows = [...stocks];
+
+  if(filter === "ACTIVE"){
+    rows = rows.filter(r => r.signal !== "SKIPPED" && r.signal !== "ERROR" && !r.error);
+  }else if(filter !== "ALL"){
+    rows = rows.filter(r => (r.signal || "NEUTRAL") === filter);
+  }
+
+  rows.sort((a,b)=>Number(b.weekly_score || b.score || 0) - Number(a.weekly_score || a.score || 0));
+
+  if(!rows.length){
+    tbody.innerHTML = `<tr><td colspan="16">אין נתונים להצגה לפי הפילטר הנוכחי</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = rows.map((r,i)=>`
+    <tr>
+      <td>${i + 1}</td>
+      <td><b>${r.symbol || "-"}</b></td>
+      <td class="${signalClass(r.signal)}"><b>${r.signal || "-"}</b></td>
+      <td class="yellow"><b>${num(r.weekly_score || r.score,0)}</b></td>
+      <td>${money(r.price)}</td>
+      <td>${num(r.rsi)}</td>
+      <td><span class="badge">${r.trend || "-"}</span></td>
+      <td>${money(r.ma20)}</td>
+      <td>${money(r.ma50)}</td>
+      <td>${money(r.ma200)}</td>
+      <td>${num(r.volume,0)}</td>
+      <td>${num(r.avg_volume,0)}</td>
+      <td>${num(r.volume_ratio)}</td>
+      <td>${pct(r.risk_percent)}</td>
+      <td>${num(r.rr_ratio)}</td>
+      <td class="reason">${reasonText(r)}</td>
+    </tr>
+  `).join("");
+}
+
+async function runScan(){
+  const btn = document.getElementById("scanBtn");
+  btn.disabled = true;
+  document.getElementById("updated").textContent = "Scan started...";
+
+  try{
+    const data = await fetchNoCache("/api/run-scan", {method:"POST"});
+    document.getElementById("updated").textContent = data.status || "scan started";
+    setTimeout(loadScanner, 5000);
+  }catch(err){
+    showError("Scan failed: " + err.message);
+  }finally{
+    setTimeout(()=>btn.disabled = false, 6000);
+  }
+}
+
+async function rebuildTop(){
+  try{
+    document.getElementById("updated").textContent = "Rebuilding TOP...";
+    await fetchNoCache("/api/rebuild-top-weekly");
+    await loadScanner();
+  }catch(err){
+    console.error(err);
+    showError("Rebuild failed: " + err.message);
+    document.getElementById("updated").textContent = "Rebuild failed";
+  }
+}
+
+loadScanner();
+setInterval(loadScanner, 30000);
+</script>
+
+</body>
+</html>

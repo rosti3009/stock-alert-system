@@ -1,0 +1,634 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Stock Alert System</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <style>
+    body{margin:0;font-family:Arial;background:#0f172a;color:#e5e7eb}
+    header{padding:22px 26px;background:#111827;border-bottom:1px solid #334155}
+    h1{margin:0;font-size:26px}.subtitle{color:#94a3b8;margin-top:7px}
+    .container{padding:22px}
+    .nav{display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap}
+    .nav button{background:#1e293b;color:#e5e7eb;border:1px solid #334155;padding:11px 16px;border-radius:12px;cursor:pointer;font-weight:bold}
+    .nav button.active{background:#2563eb}
+    .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:18px}
+    .card,.box{background:#1e293b;padding:16px;border-radius:16px;border:1px solid #334155}
+    .card h3{margin:0;color:#94a3b8;font-size:13px}.value{font-size:28px;font-weight:bold;margin-top:8px}
+    .buy{color:#22c55e;font-weight:bold}.sell{color:#ef4444;font-weight:bold}.neutral{color:#facc15;font-weight:bold}
+    .charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;margin-bottom:18px}
+    .chart-box{height:280px}
+    .wide-chart{grid-column:1/-1;height:320px}
+    canvas{max-height:260px}
+    table{width:100%;border-collapse:collapse;background:#1e293b;border-radius:14px;overflow:hidden}
+    th,td{padding:10px;border-bottom:1px solid #334155;text-align:center;font-size:13px;white-space:nowrap}
+    th{background:#111827;color:#cbd5e1;position:sticky;top:0}
+    .badge{padding:4px 8px;border-radius:999px;background:#334155}
+    .hidden{display:none}
+    .loading{color:#94a3b8;padding:20px}
+    a.symbol{color:#38bdf8;font-weight:bold;text-decoration:none}
+    .table-wrap{max-height:540px;overflow:auto;border-radius:14px;margin-bottom:22px}
+    .action-btn{background:#2563eb;color:white;border:none;padding:7px 10px;border-radius:8px;cursor:pointer;font-weight:bold;margin:2px}
+    .danger-btn{background:#dc2626;color:white;border:none;padding:7px 10px;border-radius:8px;cursor:pointer;font-weight:bold;margin:2px}
+    .analysis-btn{background:#0891b2;color:white;border:none;padding:7px 10px;border-radius:8px;cursor:pointer;font-weight:bold;margin:2px}
+    h2{margin-top:0}
+    .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:9999;align-items:center;justify-content:center;padding:20px}
+    .modal{width:min(980px,96vw);max-height:90vh;overflow:auto;background:#111827;border:1px solid #334155;border-radius:18px}
+    .modal-header{display:flex;justify-content:space-between;align-items:center;padding:18px 20px;border-bottom:1px solid #334155;background:#0f172a;position:sticky;top:0}
+    .modal-title{font-size:22px;font-weight:bold}
+    .close-btn{background:#334155;color:#fff;border:none;border-radius:10px;padding:8px 12px;cursor:pointer}
+    .modal-body{padding:20px}
+    .analysis-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-bottom:18px}
+    .metric{background:#1e293b;border:1px solid #334155;border-radius:14px;padding:12px}
+    .metric-title{font-size:12px;color:#94a3b8;margin-bottom:6px}
+    .metric-value{font-size:20px;font-weight:bold}
+    .analysis-section{background:#1e293b;border:1px solid #334155;border-radius:14px;padding:14px;margin-bottom:14px}
+    .reason-list{margin:0;padding-right:18px;line-height:1.9}
+    .summary-box{font-size:15px;line-height:1.8;color:#dbeafe}
+    .positive{color:#22c55e}.negative{color:#ef4444}.warning{color:#facc15}.info{color:#38bdf8}
+  </style>
+</head>
+
+<body>
+<header>
+  <h1>מערכת סיגנלים למסחר</h1>
+  <div class="subtitle">סקירה כללית · TOP 10 · כל המניות · תיק השקעות · היסטוריה · ניתוח טכני · ביצועים</div>
+</header>
+
+<div class="container">
+  <div class="nav">
+    <button id="btnDashboard" class="active" onclick="showTab('dashboard')">סקירה כללית</button>
+    <button id="btnTop" onclick="showTab('top')">TOP 10</button>
+    <button id="btnAll" onclick="showTab('all')">כל המניות</button>
+    <button id="btnPortfolio" onclick="showTab('positions')">תיק השקעות</button>
+    <button id="btnHistory" onclick="showTab('history')">היסטוריה</button>
+    <button class="action-btn" onclick="runScan()">הרץ סריקה חדשה</button>
+  </div>
+
+  <section id="dashboardTab">
+    <div class="cards">
+      <div class="card"><h3>הון כולל</h3><div class="value" id="totalEquity">-</div></div>
+      <div class="card"><h3>כסף מושקע</h3><div class="value" id="investedCapital">-</div></div>
+      <div class="card"><h3>כסף נזיל</h3><div class="value" id="freeCapital">-</div></div>
+      <div class="card"><h3>סה״כ מניות</h3><div class="value" id="total">-</div></div>
+      <div class="card"><h3>BUY</h3><div class="value buy" id="buyCount">-</div></div>
+      <div class="card"><h3>SELL</h3><div class="value sell" id="sellCount">-</div></div>
+      <div class="card"><h3>פוזיציות פתוחות</h3><div class="value" id="openPositions">-</div></div>
+      <div class="card"><h3>PnL סגור</h3><div class="value" id="totalPnl">-</div></div>
+      <div class="card"><h3>Win Rate</h3><div class="value" id="winRate">-</div></div>
+      <div class="card"><h3>Profit Factor</h3><div class="value" id="profitFactor">-</div></div>
+      <div class="card"><h3>עסקאות סגורות</h3><div class="value" id="totalTrades">-</div></div>
+    </div>
+
+    <div class="charts">
+      <div class="box chart-box wide-chart"><h3>Equity Curve — התפתחות החשבון</h3><canvas id="equityChart"></canvas></div>
+      <div class="box chart-box"><h3>התפלגות איתותים</h3><canvas id="signalsChart"></canvas></div>
+      <div class="box chart-box"><h3>TOP 10 לפי Score</h3><canvas id="scoreChart"></canvas></div>
+      <div class="box chart-box"><h3>RSI מול Score</h3><canvas id="rsiChart"></canvas></div>
+    </div>
+  </section>
+
+  <section id="topTab" class="hidden">
+    <h2>TOP 10 - מניות ייחודיות</h2>
+    <div class="table-wrap"><table><thead><tr>
+      <th>דירוג</th><th>סימול</th><th>איתות</th><th>מחיר</th><th>RSI</th><th>Trend</th><th>Score</th><th>Risk %</th><th>R/R</th><th>פעולה</th><th>ניתוח</th>
+    </tr></thead><tbody id="topTable"></tbody></table></div>
+  </section>
+
+  <section id="allTab" class="hidden">
+    <h2>כל המניות שנסרקו</h2>
+    <div class="table-wrap"><table><thead><tr>
+      <th>#</th><th>סימול</th><th>איתות</th><th>מחיר</th><th>RSI</th><th>Trend</th><th>Score</th><th>Volume</th><th>Avg Volume</th><th>פעולה</th><th>ניתוח</th>
+    </tr></thead><tbody id="allTable"></tbody></table></div>
+  </section>
+
+  <section id="positionsTab" class="hidden">
+    <h2>תיק השקעות / פוזיציות פתוחות</h2>
+    <div class="table-wrap"><table><thead><tr>
+      <th>#</th><th>סימול</th><th>סטטוס</th><th>כמות</th><th>מחיר כניסה</th><th>מחיר נוכחי</th><th>רווח $</th><th>רווח %</th><th>Stop</th><th>Target 1</th><th>Action</th><th>פעולה</th><th>ניתוח</th>
+    </tr></thead><tbody id="positionsTable"></tbody></table></div>
+  </section>
+
+  <section id="historyTab" class="hidden">
+    <h2>היסטוריה</h2>
+    <div class="cards">
+      <div class="card"><h3>סריקות אחרונות</h3><div class="value" id="scanRunsCount">-</div></div>
+      <div class="card"><h3>איתותים אחרונים</h3><div class="value" id="historyCount">-</div></div>
+      <div class="card"><h3>עסקאות סגורות</h3><div class="value" id="closedPositionsCount">-</div></div>
+    </div>
+
+    <h3>היסטוריית עסקאות סגורות</h3>
+    <div class="table-wrap"><table><thead><tr>
+      <th>#</th><th>סימול</th><th>מחיר כניסה</th><th>מחיר יציאה</th><th>כמות</th><th>רווח $</th><th>רווח %</th><th>Action</th><th>סיבת סגירה</th><th>נסגר בתאריך</th><th>ניתוח</th>
+    </tr></thead><tbody id="closedPositionsTable"></tbody></table></div>
+
+    <h3>סריקות אחרונות</h3>
+    <div class="table-wrap"><table><thead><tr>
+      <th>#</th><th>סטטוס</th><th>נסרקו</th><th>דולגו</th><th>שגיאות</th><th>BUY</th><th>SELL</th><th>זמן</th>
+    </tr></thead><tbody id="scanRunsTable"></tbody></table></div>
+
+    <h3>איתותים אחרונים</h3>
+    <div class="table-wrap"><table><thead><tr>
+      <th>#</th><th>סימול</th><th>איתות</th><th>מחיר</th><th>Score</th><th>זמן</th>
+    </tr></thead><tbody id="historyTable"></tbody></table></div>
+  </section>
+</div>
+
+<div id="analysisModal" class="modal-overlay" onclick="closeAnalysisModal(event)">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <div class="modal-title" id="modalTitle">ניתוח טכני</div>
+      <button class="close-btn" onclick="hideAnalysisModal()">סגור</button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<script>
+let stocks = [];
+let topWeekly = [];
+let positions = [];
+let historyRows = [];
+let scanRuns = [];
+let performance = {};
+let equityCurve = [];
+let signalsChart, scoreChart, rsiChart, equityChart;
+
+const routeByTab = {
+  dashboard: "/dashboard",
+  top: "/top",
+  all: "/all",
+  positions: "/positions",
+  history: "/history"
+};
+
+const tabByRoute = {
+  "/": "dashboard",
+  "/dashboard": "dashboard",
+  "/top": "top",
+  "/all": "all",
+  "/positions": "positions",
+  "/portfolio": "positions",
+  "/history": "history"
+};
+
+function getTabFromPath() {
+  return tabByRoute[window.location.pathname] || "dashboard";
+}
+
+async function fetchNoCache(url) {
+  const res = await fetch(url + "?ts=" + Date.now(), { cache: "no-store" });
+  return await res.json();
+}
+
+async function loadData() {
+  [stocks, topWeekly, positions, historyRows, scanRuns, performance, equityCurve] = await Promise.all([
+    fetchNoCache("/api/stocks"),
+    fetchNoCache("/api/top-weekly"),
+    fetchNoCache("/api/positions"),
+    fetchNoCache("/api/history"),
+    fetchNoCache("/api/scan-runs"),
+    fetchNoCache("/api/performance"),
+    fetchNoCache("/api/equity-curve")
+  ]);
+
+  if (!Array.isArray(stocks)) stocks = [];
+  if (!Array.isArray(topWeekly)) topWeekly = [];
+  if (!Array.isArray(positions)) positions = [];
+  if (!Array.isArray(historyRows)) historyRows = [];
+  if (!Array.isArray(scanRuns)) scanRuns = [];
+  if (!performance || typeof performance !== "object") performance = {};
+  if (!Array.isArray(equityCurve)) equityCurve = [];
+
+  updateCards();
+  drawCharts();
+  drawTopTable();
+  drawAllTable();
+  drawPositionsTable();
+  drawHistoryTables();
+}
+
+function uniqueBySymbol(rows) {
+  const seen = new Set();
+  return rows.filter(row => {
+    const symbol = row.symbol;
+    if (!symbol || seen.has(symbol)) return false;
+    seen.add(symbol);
+    return true;
+  });
+}
+
+function sortedByScore(rows) {
+  return [...rows].sort((a,b)=>(b.weekly_score||b.score||0)-(a.weekly_score||a.score||0));
+}
+
+function getUniqueTopRows(limit = 10) {
+  const sourceRows = topWeekly.length ? topWeekly : stocks;
+  return uniqueBySymbol(sortedByScore(sourceRows)).slice(0, limit);
+}
+
+function money(value) {
+  const n = Number(value || 0);
+  return "$" + n.toFixed(2);
+}
+
+function updateCards() {
+  const openPositions = positions.filter(p => (p.status || "OPEN") === "OPEN");
+  const closedPositions = positions.filter(p => p.status === "CLOSED");
+
+  document.getElementById("total").textContent = stocks.length;
+  document.getElementById("buyCount").textContent = stocks.filter(r => r.signal === "BUY").length;
+  document.getElementById("sellCount").textContent = stocks.filter(r => r.signal === "SELL").length;
+  document.getElementById("openPositions").textContent = openPositions.length;
+
+  const pnl = Number(performance.total_pnl || 0);
+  document.getElementById("totalPnl").textContent = money(pnl);
+  document.getElementById("totalPnl").className = pnl >= 0 ? "value buy" : "value sell";
+
+  document.getElementById("winRate").textContent = (performance.win_rate ?? 0) + "%";
+  document.getElementById("profitFactor").textContent = performance.profit_factor ?? 0;
+  document.getElementById("totalTrades").textContent = performance.total_trades ?? closedPositions.length;
+
+  const lastEquity = equityCurve.length ? Number(equityCurve[equityCurve.length - 1].equity || 0) : 0;
+  const invested = openPositions.reduce((sum, p) => {
+    const qty = Number(p.quantity || 0);
+    const price = Number(p.buy_price || p.entry_price || 0);
+    return sum + (qty * price);
+  }, 0);
+
+  const free = lastEquity - invested;
+
+  document.getElementById("totalEquity").textContent = money(lastEquity);
+  document.getElementById("investedCapital").textContent = money(invested);
+  document.getElementById("freeCapital").textContent = money(free);
+
+  document.getElementById("totalEquity").className = "value buy";
+  document.getElementById("investedCapital").className = "value info";
+  document.getElementById("freeCapital").className = free >= 0 ? "value buy" : "value sell";
+}
+
+function drawCharts() {
+  const buy = stocks.filter(r => r.signal === "BUY").length;
+  const sell = stocks.filter(r => r.signal === "SELL").length;
+  const neutral = stocks.filter(r => r.signal === "NEUTRAL").length;
+  const skipped = stocks.filter(r => r.signal === "SKIPPED").length;
+  const top = getUniqueTopRows(10);
+
+  if (equityChart) equityChart.destroy();
+  equityChart = new Chart(document.getElementById("equityChart"), {
+    type: "line",
+    data: {
+      labels: equityCurve.map((r, i) => r.label || `#${i}`),
+      datasets: [{ label: "Equity $", data: equityCurve.map(r => Number(r.equity || 0)), tension: 0.25, fill: false }]
+    },
+    options:{
+      maintainAspectRatio:false,
+      plugins:{ tooltip:{ callbacks:{ afterLabel:function(context){
+        const row = equityCurve[context.dataIndex] || {};
+        return ["PnL: $" + Number(row.pnl || 0).toFixed(2), "Closed: " + (row.closed_at || "-")];
+      }}}},
+      scales:{y:{beginAtZero:false}}
+    }
+  });
+
+  if (signalsChart) signalsChart.destroy();
+  signalsChart = new Chart(document.getElementById("signalsChart"), {
+    type: "doughnut",
+    data: { labels: ["BUY","SELL","NEUTRAL","SKIPPED"], datasets: [{ data: [buy,sell,neutral,skipped] }] },
+    options:{maintainAspectRatio:false}
+  });
+
+  if (scoreChart) scoreChart.destroy();
+  scoreChart = new Chart(document.getElementById("scoreChart"), {
+    type: "bar",
+    data: { labels: top.map(r=>r.symbol || "-"), datasets: [{ label:"Score", data: top.map(r=>r.weekly_score || r.score || 0) }] },
+    options:{maintainAspectRatio:false,scales:{y:{beginAtZero:true,max:100}}}
+  });
+
+  if (rsiChart) rsiChart.destroy();
+  rsiChart = new Chart(document.getElementById("rsiChart"), {
+    type: "line",
+    data: {
+      labels: top.map(r=>r.symbol || "-"),
+      datasets: [
+        { label:"RSI", data: top.map(r=>r.rsi || 0) },
+        { label:"Score", data: top.map(r=>r.weekly_score || r.score || 0) }
+      ]
+    },
+    options:{maintainAspectRatio:false,scales:{y:{beginAtZero:true,max:100}}}
+  });
+}
+
+function symbolLink(symbol) {
+  if (!symbol) return "-";
+  return `<a class="symbol" target="_blank" href="https://www.tradingview.com/chart/?symbol=NASDAQ:${symbol}">${symbol}</a>`;
+}
+
+function signalClass(signal) {
+  if (signal === "BUY") return "buy";
+  if (signal === "SELL") return "sell";
+  return "neutral";
+}
+
+function isInPortfolio(symbol) {
+  return positions.some(p => p.symbol === symbol && (p.status || "OPEN") === "OPEN");
+}
+
+function addButton(row) {
+  const symbol = row.symbol || "";
+  const price = row.price ?? "";
+  if (!symbol) return "-";
+  if (isInPortfolio(symbol)) return `<span class="badge">בתיק</span>`;
+  return `<button class="action-btn" onclick="addToPortfolio('${symbol}', '${price}')">➕ הוסף לתיק</button>`;
+}
+
+function analysisButton(row) {
+  const encoded = encodeURIComponent(JSON.stringify(row));
+  return `<button class="analysis-btn" onclick="showAnalysisFromEncoded('${encoded}')">📊 ניתוח</button>`;
+}
+
+function drawTopTable() {
+  const rows = getUniqueTopRows(10);
+  document.getElementById("topTable").innerHTML = rows.map((r,i)=>`
+    <tr><td>${i+1}</td><td>${symbolLink(r.symbol)}</td><td class="${signalClass(r.signal)}">${r.signal || "-"}</td><td>${r.price ?? "-"}</td><td>${r.rsi ?? "-"}</td><td><span class="badge">${r.trend || "-"}</span></td><td>${r.weekly_score || r.score || "-"}</td><td>${r.risk_percent ?? "-"}</td><td>${r.rr_ratio ?? "-"}</td><td>${addButton(r)}</td><td>${analysisButton(r)}</td></tr>
+  `).join("") || `<tr><td colspan="11" class="loading">אין TOP 10 כרגע</td></tr>`;
+}
+
+function drawAllTable() {
+  const rows = sortedByScore(stocks);
+  document.getElementById("allTable").innerHTML = rows.map((r,i)=>`
+    <tr><td>${i+1}</td><td>${symbolLink(r.symbol)}</td><td class="${signalClass(r.signal)}">${r.signal || "-"}</td><td>${r.price ?? "-"}</td><td>${r.rsi ?? "-"}</td><td><span class="badge">${r.trend || "-"}</span></td><td>${r.weekly_score || r.score || "-"}</td><td>${r.volume ?? "-"}</td><td>${r.avg_volume ?? "-"}</td><td>${addButton(r)}</td><td>${analysisButton(r)}</td></tr>
+  `).join("") || `<tr><td colspan="11" class="loading">אין מניות להצגה</td></tr>`;
+}
+
+function drawPositionsTable() {
+  const openOnly = positions.filter(p => (p.status || "OPEN") === "OPEN");
+
+  document.getElementById("positionsTable").innerHTML = openOnly.map((p,i)=>{
+    const stock = stocks.find(s => s.symbol === p.symbol) || {};
+    const merged = {...stock, ...p};
+    return `<tr>
+      <td>${i+1}</td><td>${symbolLink(p.symbol)}</td><td>${p.status || "-"}</td><td>${p.quantity ?? "-"}</td><td>${p.buy_price ?? p.entry_price ?? "-"}</td><td>${p.current_price ?? "-"}</td><td>${p.profit_amount ?? "-"}</td><td>${p.profit_percent ?? "-"}</td><td>${p.stop_loss ?? "-"}</td><td>${p.take_profit_1 ?? "-"}</td><td>${p.action || "-"}</td><td><button class="danger-btn" onclick="closePosition('${p.symbol}')">סגור</button></td><td>${analysisButton(merged)}</td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="13" class="loading">אין פוזיציות פתוחות כרגע</td></tr>`;
+}
+
+function drawHistoryTables() {
+  const closedPositions = positions.filter(p => p.status === "CLOSED");
+
+  document.getElementById("scanRunsCount").textContent = scanRuns.length;
+  document.getElementById("historyCount").textContent = historyRows.length;
+  document.getElementById("closedPositionsCount").textContent = closedPositions.length;
+
+  document.getElementById("closedPositionsTable").innerHTML = closedPositions.map((p, i) => {
+    const stock = stocks.find(s => s.symbol === p.symbol) || {};
+    const merged = {...stock, ...p};
+    return `<tr><td>${i + 1}</td><td>${symbolLink(p.symbol)}</td><td>${p.buy_price ?? p.entry_price ?? "-"}</td><td>${p.current_price ?? "-"}</td><td>${p.quantity ?? "-"}</td><td>${p.profit_amount ?? "-"}</td><td>${p.profit_percent ?? "-"}</td><td>${p.action || "-"}</td><td>${p.reason || "-"}</td><td>${p.closed_at || "-"}</td><td>${analysisButton(merged)}</td></tr>`;
+  }).join("") || `<tr><td colspan="11" class="loading">אין עסקאות סגורות להצגה</td></tr>`;
+
+  document.getElementById("scanRunsTable").innerHTML = scanRuns.map((r,i)=>`
+    <tr><td>${i+1}</td><td>${r.status || "-"}</td><td>${r.scanned_count ?? r.total_symbols ?? "-"}</td><td>${r.skipped_count ?? "-"}</td><td>${r.error_count ?? "-"}</td><td class="buy">${r.buy_signals ?? "-"}</td><td class="sell">${r.sell_signals ?? "-"}</td><td>${r.finished_at || r.started_at || "-"}</td></tr>
+  `).join("") || `<tr><td colspan="8" class="loading">אין סריקות להצגה</td></tr>`;
+
+  document.getElementById("historyTable").innerHTML = historyRows.map((r,i)=>`
+    <tr><td>${i+1}</td><td>${symbolLink(r.symbol)}</td><td class="${signalClass(r.signal_type || r.signal)}">${r.signal_type || r.signal || "-"}</td><td>${r.price ?? "-"}</td><td>${r.score ?? r.weekly_score ?? "-"}</td><td>${r.created_at || r.signal_time || "-"}</td></tr>
+  `).join("") || `<tr><td colspan="6" class="loading">אין איתותים להצגה</td></tr>`;
+}
+
+function fmt(v) {
+  if (v === null || v === undefined || v === "") return "-";
+  if (typeof v === "number") return Number.isInteger(v) ? v.toLocaleString() : v.toFixed(2);
+  return v;
+}
+
+function metric(title, value, cls="") {
+  return `<div class="metric"><div class="metric-title">${title}</div><div class="metric-value ${cls}">${fmt(value)}</div></div>`;
+}
+
+function listItems(items) {
+  if (!items || !items.length) return `<li>אין פירוט זמין</li>`;
+  return items.map(x => `<li>${x}</li>`).join("");
+}
+
+function technicalSummary(row) {
+  const signal = row.signal || row.signal_type || "NEUTRAL";
+  const rsi = Number(row.rsi);
+  const price = Number(row.price || row.current_price);
+  const ma20 = Number(row.ma20);
+  const ma50 = Number(row.ma50);
+  const ma200 = Number(row.ma200);
+  const volume = Number(row.volume);
+  const avgVolume = Number(row.avg_volume);
+  const score = Number(row.weekly_score || row.score || 0);
+  let lines = [];
+
+  if (signal === "BUY") lines.push(`<span class="positive">המערכת מזהה איתות BUY.</span> המניה עומדת בתנאי מגמה, מומנטום ונפח.`);
+  else if (signal === "SELL") lines.push(`<span class="negative">המערכת מזהה איתות SELL.</span> יש חולשה טכנית או שבירה של מבנה מגמה.`);
+  else lines.push(`<span class="warning">אין איתות קנייה פעיל.</span> המניה במעקב, אך התנאים לא מספיק חזקים.`);
+
+  if (!isNaN(score)) {
+    if (score >= 80) lines.push(`הציון הטכני גבוה מאוד: <span class="positive">${score}</span>.`);
+    else if (score >= 60) lines.push(`הציון הטכני סביר עד טוב: <span class="info">${score}</span>.`);
+    else lines.push(`הציון הטכני נמוך יחסית: <span class="warning">${score}</span>.`);
+  }
+
+  if (!isNaN(rsi)) {
+    if (rsi >= 52 && rsi <= 68) lines.push(`RSI בטווח מומנטום איכותי: <span class="positive">${rsi}</span>.`);
+    else if (rsi > 70) lines.push(`RSI גבוה מאוד: <span class="warning">${rsi}</span>, ייתכן מצב מתוח.`);
+    else if (rsi < 45) lines.push(`RSI חלש: <span class="negative">${rsi}</span>.`);
+    else lines.push(`RSI ניטרלי: ${rsi}.`);
+  }
+
+  if (!isNaN(price) && !isNaN(ma20) && !isNaN(ma50)) {
+    if (price > ma20 && ma20 > ma50) lines.push(`<span class="positive">מבנה ממוצעים חיובי:</span> מחיר מעל MA20 ו־MA20 מעל MA50.`);
+    else if (price < ma20 && ma20 < ma50) lines.push(`<span class="negative">מבנה ממוצעים שלילי:</span> מחיר מתחת MA20 ו־MA20 מתחת MA50.`);
+    else lines.push(`<span class="warning">מבנה ממוצעים מעורב.</span>`);
+  }
+
+  if (!isNaN(ma200) && !isNaN(price)) {
+    if (price > ma200) lines.push(`המחיר מעל MA200 — חיובי למגמה ארוכה.`);
+    else lines.push(`המחיר מתחת MA200 — חולשה בטווח ארוך.`);
+  }
+
+  if (!isNaN(volume) && !isNaN(avgVolume) && avgVolume > 0) {
+    const ratio = volume / avgVolume;
+    if (ratio >= 1.8) lines.push(`<span class="positive">נפח חריג חזק:</span> פי ${ratio.toFixed(2)} מהממוצע.`);
+    else if (ratio >= 1.3) lines.push(`<span class="positive">נפח מאשר:</span> פי ${ratio.toFixed(2)} מהממוצע.`);
+    else lines.push(`<span class="warning">נפח חלש:</span> פי ${ratio.toFixed(2)} מהממוצע.`);
+  }
+
+  return lines.join("<br>");
+}
+
+function showAnalysisFromEncoded(encoded) {
+  showAnalysis(JSON.parse(decodeURIComponent(encoded)));
+}
+
+function showAnalysis(row) {
+  const symbol = row.symbol || "-";
+  const signal = row.signal || row.signal_type || "NEUTRAL";
+
+  document.getElementById("modalTitle").innerHTML = `ניתוח טכני מתקדם — ${symbol} <span class="${signalClass(signal)}">(${signal})</span>`;
+
+  document.getElementById("modalBody").innerHTML = `
+    <div class="analysis-grid">
+      ${metric("מחיר", row.price ?? row.current_price)}
+      ${metric("Score", row.weekly_score ?? row.score)}
+      ${metric("RSI", row.rsi)}
+      ${metric("Trend", row.trend)}
+      ${metric("MA20", row.ma20)}
+      ${metric("MA50", row.ma50)}
+      ${metric("MA200", row.ma200)}
+      ${metric("Volume", row.volume)}
+      ${metric("Avg Volume", row.avg_volume)}
+      ${metric("Volume Ratio", row.volume_ratio)}
+      ${metric("ATR", row.atr)}
+      ${metric("ATR %", row.atr_percent)}
+      ${metric("Momentum 5D", row.momentum_5d)}
+      ${metric("Momentum 20D", row.momentum_20d)}
+      ${metric("Momentum 60D", row.momentum_60d)}
+      ${metric("Distance MA20", row.distance_ma20)}
+      ${metric("Distance MA50", row.distance_ma50)}
+      ${metric("Distance MA200", row.distance_ma200)}
+      ${metric("Risk %", row.risk_percent)}
+      ${metric("R/R", row.rr_ratio)}
+      ${metric("Stop Loss", row.stop_loss)}
+      ${metric("Target 1", row.take_profit_1)}
+      ${metric("Target 2", row.take_profit_2)}
+    </div>
+    <div class="analysis-section"><h3>סיכום טכני</h3><div class="summary-box">${technicalSummary(row)}</div></div>
+    <div class="analysis-section"><h3>סיבות לאיתות</h3><ul class="reason-list">${listItems(row.reasons || [])}</ul></div>
+    <div class="analysis-section"><h3>סיבות לדירוג</h3><ul class="reason-list">${listItems(row.weekly_reasons || [])}</ul></div>
+    <div class="analysis-section">
+      <h3>פעולות</h3>
+      <a class="symbol" target="_blank" href="https://www.tradingview.com/chart/?symbol=NASDAQ:${symbol}">פתח גרף TradingView</a>
+      &nbsp;&nbsp;
+      ${!isInPortfolio(symbol) ? `<button class="action-btn" onclick="addToPortfolio('${symbol}', '${row.price ?? row.current_price ?? ""}')">➕ הוסף לתיק</button>` : `<span class="badge">כבר בתיק</span>`}
+    </div>
+  `;
+
+  document.getElementById("analysisModal").style.display = "flex";
+}
+
+function hideAnalysisModal(){document.getElementById("analysisModal").style.display="none"}
+function closeAnalysisModal(event){if(event.target.id==="analysisModal") hideAnalysisModal()}
+
+async function addToPortfolio(symbol, price) {
+  if (!symbol) return alert("חסר סימול מניה");
+  if (isInPortfolio(symbol)) return alert("המניה כבר קיימת בתיק");
+
+  let entryPrice = price;
+  if (!entryPrice || entryPrice === "null" || entryPrice === "undefined" || entryPrice === "-") {
+    entryPrice = prompt("הכנס מחיר כניסה עבור " + symbol + ":");
+  } else {
+    const confirmedPrice = prompt("מחיר כניסה עבור " + symbol + ":", entryPrice);
+    if (confirmedPrice === null) return;
+    entryPrice = confirmedPrice;
+  }
+
+  const parsedEntry = Number(entryPrice);
+  if (!parsedEntry || parsedEntry <= 0) return alert("מחיר כניסה לא תקין");
+
+  const stock = stocks.find(s => s.symbol === symbol) || {};
+  const payload = {
+    symbol,
+    buy_price: parsedEntry,
+    entry_price: parsedEntry,
+    current_price: stock.price ?? parsedEntry,
+    stop_loss: stock.stop_loss ?? null,
+    take_profit_1: stock.take_profit_1 ?? null,
+    take_profit_2: stock.take_profit_2 ?? null,
+    status: "OPEN",
+    action: "MANUAL_ADD",
+    reason: "Added from dashboard"
+  };
+
+  try {
+    const res = await fetch("/api/positions", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(payload),
+      cache:"no-store"
+    });
+    const data = await res.json();
+    if (data.status === "ok") {
+      alert(symbol + " נוספה לתיק ✔");
+      await loadData();
+      hideAnalysisModal();
+      showTab("positions");
+    } else {
+      alert("שגיאה: " + (data.message || "לא ניתן להוסיף לתיק"));
+    }
+  } catch (err) {
+    console.error(err);
+    alert("שגיאה בהוספה לתיק");
+  }
+}
+
+async function closePosition(symbol) {
+  if (!symbol) return;
+  if (!confirm("לסגור את הפוזיציה של " + symbol + "?")) return;
+
+  try {
+    const res = await fetch(`/api/positions/${symbol}/close`, {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({reason:"Closed manually from dashboard"}),
+      cache:"no-store"
+    });
+    const data = await res.json();
+    if (data.status === "ok") {
+      alert("הפוזיציה נסגרה ✔");
+      await loadData();
+      showTab("history");
+    } else {
+      alert("שגיאה: " + (data.message || "לא ניתן לסגור פוזיציה"));
+    }
+  } catch (err) {
+    console.error(err);
+    alert("שגיאה בסגירת פוזיציה");
+  }
+}
+
+function showTab(tab, updateUrl = true) {
+  document.getElementById("dashboardTab").classList.toggle("hidden", tab !== "dashboard");
+  document.getElementById("topTab").classList.toggle("hidden", tab !== "top");
+  document.getElementById("allTab").classList.toggle("hidden", tab !== "all");
+  document.getElementById("positionsTab").classList.toggle("hidden", tab !== "positions");
+  document.getElementById("historyTab").classList.toggle("hidden", tab !== "history");
+
+  ["Dashboard","Top","All","Portfolio","History"].forEach(name => {
+    const btn = document.getElementById("btn" + name);
+    if (btn) btn.classList.remove("active");
+  });
+
+  const map = {dashboard:"btnDashboard",top:"btnTop",all:"btnAll",positions:"btnPortfolio",history:"btnHistory"};
+  document.getElementById(map[tab]).classList.add("active");
+
+  if (updateUrl) {
+    const newPath = routeByTab[tab] || "/dashboard";
+    if (window.location.pathname !== newPath) {
+      window.history.pushState({tab}, "", newPath);
+    }
+  }
+}
+
+async function runScan() {
+  await fetch("/api/run-scan?ts=" + Date.now(), { cache:"no-store" });
+  alert("סריקה התחילה. הנתונים יתעדכנו בעוד כמה דקות.");
+}
+
+window.addEventListener("popstate", () => {
+  showTab(getTabFromPath(), false);
+});
+
+loadData().then(() => {
+  showTab(getTabFromPath(), false);
+});
+
+setInterval(loadData, 30000);
+</script>
+</body>
+</html>

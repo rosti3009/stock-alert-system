@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Risk Center — Trading System</title>
+
+  <link rel="stylesheet" href="/layout.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+
+<div class="app-shell">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-title">TRADING SYSTEM</div>
+      <div class="brand-subtitle">Institutional Dashboard</div>
+    </div>
+
+    <nav class="side-nav">
+      <a href="/dashboard">📊 Dashboard</a>
+      <a href="/analytics">📈 Analytics</a>
+      <a href="/positions">💼 Positions</a>
+      <a href="/portfolio">📁 Portfolio</a>
+      <a href="/history">📜 History</a>
+      <a href="/risk" class="active">⚠ Risk</a>
+      <a href="/strategies">🧠 Strategies</a>
+      <a href="/settings">⚙ Settings</a>
+    </nav>
+  </aside>
+
+  <main class="main-area">
+
+    <div class="topbar">
+      <div>
+        <h1 class="page-title">Risk Management Center</h1>
+        <div class="page-subtitle">Exposure · Portfolio heat · Stop risk · Capital protection</div>
+      </div>
+
+      <div class="status-row">
+        <div class="live-dot"></div>
+        <div>LIVE</div>
+        <div>|</div>
+        <div id="updated">Loading...</div>
+      </div>
+    </div>
+
+    <div class="container">
+
+      <div class="cards">
+        <div class="card"><h3>Total Equity</h3><div class="value blue" id="totalEquity">-</div></div>
+        <div class="card"><h3>Total Exposure</h3><div class="value yellow" id="totalExposure">-</div></div>
+        <div class="card"><h3>Exposure %</h3><div class="value yellow" id="exposurePct">-</div></div>
+        <div class="card"><h3>Open Risk $</h3><div class="value red" id="openRisk">-</div></div>
+        <div class="card"><h3>Portfolio Heat</h3><div class="value" id="portfolioHeat">-</div></div>
+        <div class="card"><h3>Risk Alerts</h3><div class="value red" id="riskAlerts">-</div></div>
+      </div>
+
+      <div class="charts">
+        <div class="box chart-box">
+          <h3>Exposure By Symbol</h3>
+          <canvas id="exposureChart"></canvas>
+        </div>
+
+        <div class="box chart-box">
+          <h3>Risk By Symbol</h3>
+          <canvas id="riskChart"></canvas>
+        </div>
+      </div>
+
+      <div class="box">
+        <h3>Position Risk Table</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Quantity</th>
+                <th>Entry</th>
+                <th>Current</th>
+                <th>Market Value</th>
+                <th>Stop Loss</th>
+                <th>Risk $</th>
+                <th>Risk % Equity</th>
+                <th>Exposure %</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="riskRows">
+              <tr><td colspan="10">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+</div>
+
+<script>
+let positions = [];
+let equityCurve = [];
+let exposureChart;
+let riskChart;
+
+async function fetchNoCache(url){
+  const res = await fetch(url + "?ts=" + Date.now(), {cache:"no-store"});
+  if(!res.ok) throw new Error(url + " failed");
+  return await res.json();
+}
+
+function money(v){
+  if(v === null || v === undefined || v === "") return "-";
+  return "$" + Number(v || 0).toFixed(2);
+}
+
+function pct(v){
+  if(v === null || v === undefined || v === "") return "-";
+  return Number(v || 0).toFixed(2) + "%";
+}
+
+function riskClass(v){
+  const n = Number(v || 0);
+  if(n >= 6) return "red";
+  if(n >= 3) return "yellow";
+  return "green";
+}
+
+async function loadRisk(){
+  try{
+    [positions, equityCurve] = await Promise.all([
+      fetchNoCache("/api/positions"),
+      fetchNoCache("/api/equity-curve")
+    ]);
+
+    if(!Array.isArray(positions)) positions = [];
+    if(!Array.isArray(equityCurve)) equityCurve = [];
+
+    updateRiskCards();
+    drawRiskCharts();
+    drawRiskTable();
+
+    document.getElementById("updated").textContent = "Updated " + new Date().toLocaleTimeString();
+
+  }catch(err){
+    console.error(err);
+    document.getElementById("updated").textContent = "Update failed";
+  }
+}
+
+function getEquity(){
+  return equityCurve.length
+    ? Number(equityCurve[equityCurve.length - 1].equity || 0)
+    : 0;
+}
+
+function getOpenPositions(){
+  return positions.filter(p => (p.status || "OPEN") === "OPEN");
+}
+
+function calcRows(){
+  const equity = getEquity();
+  const open = getOpenPositions();
+
+  return open.map(p => {
+    const qty = Number(p.quantity || 0);
+    const entry = Number(p.buy_price || p.entry_price || 0);
+    const current = Number(p.current_price || entry || 0);
+    const stop = Number(p.stop_loss || 0);
+
+    const marketValue = qty * current;
+    const exposurePct = equity > 0 ? (marketValue / equity) * 100 : 0;
+
+    let riskDollar = 0;
+    if(stop > 0 && stop < current){
+      riskDollar = qty * (current - stop);
+    }
+
+    const riskPctEquity = equity > 0 ? (riskDollar / equity) * 100 : 0;
+
+    return {
+      symbol:p.symbol || "-",
+      quantity:qty,
+      entry,
+      current,
+      stop,
+      marketValue,
+      exposurePct,
+      riskDollar,
+      riskPctEquity,
+      status:p.status || "OPEN"
+    };
+  });
+}
+
+function updateRiskCards(){
+  const equity = getEquity();
+  const rows = calcRows();
+
+  const totalExposure = rows.reduce((sum,r)=>sum + r.marketValue,0);
+  const openRisk = rows.reduce((sum,r)=>sum + r.riskDollar,0);
+  const exposurePct = equity > 0 ? (totalExposure / equity) * 100 : 0;
+  const heat = equity > 0 ? (openRisk / equity) * 100 : 0;
+  const alerts = rows.filter(r => r.riskPctEquity >= 3 || r.exposurePct >= 25).length;
+
+  document.getElementById("totalEquity").textContent = money(equity);
+  document.getElementById("totalExposure").textContent = money(totalExposure);
+  document.getElementById("exposurePct").textContent = pct(exposurePct);
+  document.getElementById("openRisk").textContent = money(openRisk);
+
+  document.getElementById("portfolioHeat").textContent = pct(heat);
+  document.getElementById("portfolioHeat").className = "value " + riskClass(heat);
+
+  document.getElementById("riskAlerts").textContent = alerts;
+}
+
+function drawRiskCharts(){
+  const rows = calcRows();
+
+  if(exposureChart) exposureChart.destroy();
+  if(riskChart) riskChart.destroy();
+
+  exposureChart = new Chart(document.getElementById("exposureChart"), {
+    type:"doughnut",
+    data:{
+      labels:rows.map(r=>r.symbol),
+      datasets:[{data:rows.map(r=>r.marketValue)}]
+    },
+    options:{maintainAspectRatio:false}
+  });
+
+  riskChart = new Chart(document.getElementById("riskChart"), {
+    type:"bar",
+    data:{
+      labels:rows.map(r=>r.symbol),
+      datasets:[{label:"Risk $", data:rows.map(r=>r.riskDollar)}]
+    },
+    options:{maintainAspectRatio:false}
+  });
+}
+
+function drawRiskTable(){
+  const rows = calcRows();
+  const tbody = document.getElementById("riskRows");
+
+  if(!rows.length){
+    tbody.innerHTML = `<tr><td colspan="10">אין פוזיציות פתוחות כרגע</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td><b>${r.symbol}</b></td>
+      <td>${r.quantity.toFixed(4)}</td>
+      <td>${money(r.entry)}</td>
+      <td>${money(r.current)}</td>
+      <td>${money(r.marketValue)}</td>
+      <td>${money(r.stop)}</td>
+      <td class="${riskClass(r.riskPctEquity)}"><b>${money(r.riskDollar)}</b></td>
+      <td class="${riskClass(r.riskPctEquity)}"><b>${pct(r.riskPctEquity)}</b></td>
+      <td>${pct(r.exposurePct)}</td>
+      <td><span class="badge">${r.status}</span></td>
+    </tr>
+  `).join("");
+}
+
+loadRisk();
+setInterval(loadRisk, 30000);
+</script>
+
+</body>
+</html>

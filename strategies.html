@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Strategies Center — Trading System</title>
+
+  <link rel="stylesheet" href="/layout.css">
+</head>
+
+<body>
+
+<div class="app-shell">
+
+  <aside class="sidebar">
+
+    <div class="brand">
+      <div class="brand-title">TRADING SYSTEM</div>
+      <div class="brand-subtitle">Institutional Dashboard</div>
+    </div>
+
+    <nav class="side-nav">
+      <a href="/dashboard">📊 Dashboard</a>
+      <a href="/analytics">📈 Analytics</a>
+      <a href="/positions">💼 Positions</a>
+      <a href="/portfolio">📁 Portfolio</a>
+      <a href="/history">📜 History</a>
+      <a href="/risk">⚠ Risk</a>
+      <a href="/strategies" class="active">🧠 Strategies</a>
+      <a href="/settings">⚙ Settings</a>
+    </nav>
+
+  </aside>
+
+  <main class="main-area">
+
+    <div class="topbar">
+
+      <div>
+        <h1 class="page-title">Strategies Control Center</h1>
+
+        <div class="page-subtitle">
+          Scanner presets · Risk filters · Signal engines · Strategy management
+        </div>
+      </div>
+
+      <div class="status-row">
+        <div class="live-dot"></div>
+        <div>LIVE</div>
+        <div>|</div>
+        <div>Strategy Engine Active</div>
+      </div>
+
+    </div>
+
+    <div class="container">
+
+      <div class="cards">
+
+        <div class="card">
+          <h3>Active Strategies</h3>
+          <div class="value blue" id="activeStrategies">5</div>
+        </div>
+
+        <div class="card">
+          <h3>Scanner Mode</h3>
+          <div class="value yellow" id="scannerMode">Balanced</div>
+        </div>
+
+        <div class="card">
+          <h3>Risk Profile</h3>
+          <div class="value green" id="riskProfile">Moderate</div>
+        </div>
+
+        <div class="card">
+          <h3>Max Open Positions</h3>
+          <div class="value purple" id="maxPositions">10</div>
+        </div>
+
+      </div>
+
+      <div class="charts">
+
+        <div class="box">
+
+          <h3>Strategy Toggles</h3>
+
+          <div class="toolbar">
+
+            <label><input type="checkbox" checked> Momentum Strategy</label>
+            <label><input type="checkbox" checked> Breakout Strategy</label>
+            <label><input type="checkbox" checked> RSI Filter</label>
+            <label><input type="checkbox" checked> Volume Confirmation</label>
+            <label><input type="checkbox"> Mean Reversion</label>
+            <label><input type="checkbox" checked> Trend Filter</label>
+
+          </div>
+
+        </div>
+
+        <div class="box">
+
+          <h3>Scanner Presets</h3>
+
+          <div class="toolbar">
+
+            <button class="primary">Balanced</button>
+            <button>Aggressive</button>
+            <button>Conservative</button>
+            <button>Swing</button>
+            <button>Intraday</button>
+
+          </div>
+
+        </div>
+
+      </div>
+
+      <div class="charts">
+
+        <div class="box">
+
+          <h3>Risk Configuration</h3>
+
+          <table>
+
+            <tbody>
+
+              <tr>
+                <td>Max Portfolio Exposure</td>
+                <td><input type="number" value="80"></td>
+              </tr>
+
+              <tr>
+                <td>Max Position Size %</td>
+                <td><input type="number" value="15"></td>
+              </tr>
+
+              <tr>
+                <td>Max Daily Loss %</td>
+                <td><input type="number" value="5"></td>
+              </tr>
+
+              <tr>
+                <td>Max Open Positions</td>
+                <td><input type="number" value="10"></td>
+              </tr>
+
+              <tr>
+                <td>Minimum Weekly Score</td>
+                <td><input type="number" value="70"></td>
+              </tr>
+
+            </tbody>
+
+          </table>
+
+        </div>
+
+        <div class="box">
+
+          <h3>Score Weight Engine</h3>
+
+          <table>
+
+            <tbody>
+
+              <tr>
+                <td>RSI Weight</td>
+                <td><input type="number" value="20"></td>
+              </tr>
+
+              <tr>
+                <td>Volume Weight</td>
+                <td><input type="number" value="25"></td>
+              </tr>
+
+              <tr>
+                <td>Trend Weight</td>
+                <td><input type="number" value="25"></td>
+              </tr>
+
+              <tr>
+                <td>Volatility Weight</td>
+                <td><input type="number" value="15"></td>
+              </tr>
+
+              <tr>
+                <td>Relative Strength Weight</td>
+                <td><input type="number" value="15"></td>
+              </tr>
+
+            </tbody>
+
+          </table>
+
+        </div>
+
+      </div>
+
+      <div class="box">
+
+        <h3>Execution Controls</h3>
+
+        <div class="toolbar">
+
+          <button class="primary">Save Configuration</button>
+
+          <button>Reload Engine</button>
+
+          <button class="danger">Disable Auto Trader</button>
+
+        </div>
+
+      </div>
+
+      <div class="box muted">
+
+        ⚠️ Strategy center controls the signal engine, scanner behavior and risk filters.
+
+      </div>
+
+    </div>
+
+  </main>
+
+</div>
+
+</body>
+</html>

@@ -1,0 +1,1198 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <title>Dashboard — Trading System</title>
+
+  <link rel="stylesheet" href="/layout.css">
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <style>
+
+    .mini-grid{
+      display:grid;
+      grid-template-columns:1.4fr .8fr;
+      gap:16px;
+      margin-bottom:18px;
+    }
+
+    .mini-chart{
+      height:300px;
+    }
+
+    .compact-table{
+      max-height:360px;
+      overflow:auto;
+    }
+
+    .scan-status{
+      display:grid;
+      grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+      gap:12px;
+    }
+
+    .status-card{
+      background:#0b111b;
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:14px;
+    }
+
+    .status-label{
+      color:var(--muted);
+      font-size:12px;
+      margin-bottom:8px;
+    }
+
+    .status-value{
+      font-size:20px;
+      font-weight:800;
+    }
+
+    @media(max-width:1100px){
+
+      .mini-grid{
+        grid-template-columns:1fr;
+      }
+    }
+
+  </style>
+
+</head>
+
+<body>
+
+<div class="app-shell">
+
+  <aside class="sidebar">
+
+    <div class="brand">
+      <div class="brand-title">
+        TRADING SYSTEM
+      </div>
+
+      <div class="brand-subtitle">
+        Institutional Dashboard
+      </div>
+    </div>
+
+    <nav class="side-nav">
+
+      <a href="/dashboard" class="active">
+        📊 Dashboard
+      </a>
+
+      <a href="/market">
+        🌐 Market
+      </a>
+
+      <a href="/scanner">
+        🔎 Scanner
+      </a>
+
+      <a href="/analytics">
+        📈 Analytics
+      </a>
+
+      <a href="/positions">
+        💼 Positions
+      </a>
+
+      <a href="/portfolio">
+        📁 Portfolio
+      </a>
+
+      <a href="/history">
+        📜 History
+      </a>
+
+      <a href="/risk">
+        ⚠ Risk
+      </a>
+
+      <a href="/strategies">
+        🧠 Strategies
+      </a>
+
+      <a href="/settings">
+        ⚙ Settings
+      </a>
+
+    </nav>
+
+  </aside>
+
+  <main class="main-area">
+
+    <div class="topbar">
+
+      <div>
+
+        <h1 class="page-title">
+          Live Trading Dashboard
+        </h1>
+
+        <div class="page-subtitle">
+          Real-time monitoring · Equity · Positions · Signals · Scanner status
+        </div>
+
+      </div>
+
+      <div class="status-row">
+
+        <div class="live-dot"></div>
+
+        <div>
+          LIVE
+        </div>
+
+        <div>
+          |
+        </div>
+
+        <div id="updated">
+          Loading...
+        </div>
+
+      </div>
+
+    </div>
+
+    <div class="container">
+
+      <div
+        id="errorBox"
+        class="box red"
+        style="display:none;margin-bottom:16px;"
+      ></div>
+
+      <!-- ========================================= -->
+      <!-- MAIN CARDS -->
+      <!-- ========================================= -->
+
+      <div class="cards">
+
+        <div class="card">
+          <h3>Total Equity</h3>
+          <div class="value blue" id="totalEquity">-</div>
+        </div>
+
+        <div class="card">
+          <h3>Cash Available</h3>
+          <div class="value" id="freeCapital">-</div>
+        </div>
+
+        <div class="card">
+          <h3>Invested Capital</h3>
+          <div class="value yellow" id="investedCapital">-</div>
+        </div>
+
+        <div class="card">
+          <h3>Unrealized PnL</h3>
+          <div class="value" id="unrealizedPnl">-</div>
+        </div>
+
+        <div class="card">
+          <h3>Realized PnL</h3>
+          <div class="value" id="realizedPnl">-</div>
+        </div>
+
+        <div class="card">
+          <h3>Open Positions</h3>
+          <div class="value blue" id="openPositions">-</div>
+        </div>
+
+        <div class="card">
+          <h3>Exposure</h3>
+          <div class="value yellow" id="exposurePct">-</div>
+        </div>
+
+        <div class="card">
+          <h3>BUY Signals</h3>
+          <div class="value green" id="buySignals">-</div>
+        </div>
+
+        <div class="card">
+          <h3>SELL Signals</h3>
+          <div class="value red" id="sellSignals">-</div>
+        </div>
+
+        <div class="card">
+          <h3>Active Alerts</h3>
+          <div class="value yellow" id="activeAlerts">-</div>
+        </div>
+
+        <div class="card">
+          <h3>Global Risk</h3>
+          <div class="value" id="globalRiskStatus">-</div>
+        </div>
+
+        <div class="card">
+          <h3>Daily Drawdown</h3>
+          <div class="value" id="dailyDrawdown">-</div>
+        </div>
+
+        <div class="card">
+          <h3>Trading Status</h3>
+          <div class="value" id="tradingStatus">-</div>
+        </div>
+
+      </div>
+
+      <!-- ========================================= -->
+      <!-- TOOLBAR -->
+      <!-- ========================================= -->
+
+      <div class="toolbar">
+
+        <div>
+
+          <button
+            id="scanBtn"
+            class="primary"
+            onclick="runScan()"
+          >
+            Run Scan
+          </button>
+
+          <button onclick="loadDashboard()">
+            Refresh
+          </button>
+
+        </div>
+
+        <div class="muted">
+          Dashboard stays lightweight.
+          Deep metrics are in Analytics.
+        </div>
+
+      </div>
+
+      <!-- ========================================= -->
+      <!-- EQUITY + SCANNER -->
+      <!-- ========================================= -->
+
+      <div class="mini-grid">
+
+        <div class="box mini-chart">
+
+          <h3>
+            Equity Curve
+          </h3>
+
+          <canvas id="equityChart"></canvas>
+
+        </div>
+
+        <div class="box">
+
+          <h3>
+            Scanner Status
+          </h3>
+
+          <div class="scan-status">
+
+            <div class="status-card">
+              <div class="status-label">
+                Total Symbols
+              </div>
+
+              <div
+                class="status-value blue"
+                id="totalSymbols"
+              >
+                -
+              </div>
+            </div>
+
+            <div class="status-card">
+              <div class="status-label">
+                Scanned
+              </div>
+
+              <div
+                class="status-value"
+                id="scannedSymbols"
+              >
+                -
+              </div>
+            </div>
+
+            <div class="status-card">
+              <div class="status-label">
+                Top Score
+              </div>
+
+              <div
+                class="status-value yellow"
+                id="topScore"
+              >
+                -
+              </div>
+            </div>
+
+            <div class="status-card">
+              <div class="status-label">
+                Best Setup
+              </div>
+
+              <div
+                class="status-value green"
+                id="bestSymbol"
+              >
+                -
+              </div>
+            </div>
+
+          </div>
+
+        </div>
+
+      </div>
+
+      <!-- ========================================= -->
+      <!-- TABLES -->
+      <!-- ========================================= -->
+
+      <div class="mini-grid">
+
+        <div class="box">
+
+          <h3>
+            Open Positions Preview
+          </h3>
+
+          <div class="table-wrap compact-table">
+
+            <table>
+
+              <thead>
+
+                <tr>
+                  <th>Symbol</th>
+                  <th>Qty</th>
+                  <th>Entry</th>
+                  <th>Current</th>
+                  <th>PnL $</th>
+                  <th>PnL %</th>
+                  <th>Action</th>
+                </tr>
+
+              </thead>
+
+              <tbody id="positionsRows">
+
+                <tr>
+                  <td colspan="7">
+                    Loading...
+                  </td>
+                </tr>
+
+              </tbody>
+
+            </table>
+
+          </div>
+
+        </div>
+
+        <div class="box">
+
+          <h3>
+            Top Live Signals
+          </h3>
+
+          <div class="table-wrap compact-table">
+
+            <table>
+
+              <thead>
+
+                <tr>
+                  <th>Symbol</th>
+                  <th>Signal</th>
+                  <th>Score</th>
+                  <th>Price</th>
+                </tr>
+
+              </thead>
+
+              <tbody id="signalRows">
+
+                <tr>
+                  <td colspan="4">
+                    Loading...
+                  </td>
+                </tr>
+
+              </tbody>
+
+            </table>
+
+          </div>
+
+        </div>
+
+      </div>
+
+      <div class="box muted">
+
+        ⚠️ System signal only.
+        Not financial advice.
+        Main dashboard is for live monitoring only.
+
+      </div>
+
+    </div>
+
+  </main>
+
+</div>
+
+<script>
+
+let stocks = [];
+let topWeekly = [];
+let positions = [];
+let performance = {};
+let equityCurve = [];
+let equityChart;
+let isLoading = false;
+
+async function fetchNoCache(
+  url,
+  options = {}
+){
+
+  const separator =
+    url.includes("?")
+      ? "&"
+      : "?";
+
+  const res = await fetch(
+    url + separator + "ts=" + Date.now(),
+    {
+      cache:"no-store",
+      ...options
+    }
+  );
+
+  if(!res.ok){
+
+    throw new Error(
+      url + " HTTP " + res.status
+    );
+  }
+
+  return await res.json();
+}
+
+function money(v){
+
+  if(
+    v === null
+    || v === undefined
+    || v === ""
+  ){
+    return "-";
+  }
+
+  return "$"
+    + Number(v).toFixed(2);
+}
+
+function pct(v){
+
+  if(
+    v === null
+    || v === undefined
+    || v === ""
+  ){
+    return "-";
+  }
+
+  return Number(v).toFixed(2)
+    + "%";
+}
+
+function pnlClass(v){
+
+  return Number(v || 0) >= 0
+    ? "green"
+    : "red";
+}
+
+function showError(message){
+
+  const box =
+    document.getElementById(
+      "errorBox"
+    );
+
+  box.textContent = message;
+
+  box.style.display = "block";
+}
+
+function clearError(){
+
+  document.getElementById(
+    "errorBox"
+  ).style.display = "none";
+}
+
+function isAlertAction(action){
+
+  return [
+    "SELL_SIGNAL",
+    "STOP_LOSS_HIT",
+    "TAKE_PROFIT_1",
+    "TAKE_PROFIT_2",
+    "MOVE_STOP_TO_BREAKEVEN",
+    "TRAILING_STOP_UPDATED",
+    "WARNING",
+    "WATCH_PROFIT",
+    "ERROR"
+  ].includes(action);
+}
+
+async function loadDashboard(){
+
+  if(isLoading){
+    return;
+  }
+
+  isLoading = true;
+
+  clearError();
+
+  try{
+
+    [
+      stocks,
+      topWeekly,
+      positions,
+      performance,
+      equityCurve
+    ] = await Promise.all([
+
+      fetchNoCache("/api/stocks"),
+
+      fetchNoCache("/api/top-weekly"),
+
+      fetchNoCache("/api/positions"),
+
+      fetchNoCache("/api/performance"),
+
+      fetchNoCache("/api/equity-curve")
+
+    ]);
+
+    updateCards();
+
+    updateScannerStatus();
+
+    drawEquityChart();
+
+    drawPositionsPreview();
+
+    drawSignalsPreview();
+
+    document.getElementById(
+      "updated"
+    ).textContent =
+      "Updated "
+      + new Date().toLocaleTimeString();
+
+  }catch(err){
+
+    console.error(err);
+
+    showError(
+      "Dashboard API error: "
+      + err.message
+    );
+
+  }finally{
+
+    isLoading = false;
+  }
+}
+
+function updateCards(){
+
+  const open = positions.filter(
+    p => (p.status || "OPEN") === "OPEN"
+  );
+
+  const lastEquity = equityCurve.length
+    ? Number(
+        equityCurve[
+          equityCurve.length - 1
+        ].equity || 0
+      )
+    : 0;
+
+  const invested = open.reduce((sum,p)=>{
+
+    return sum
+      + Number(p.quantity || 0)
+      * Number(
+          p.buy_price
+          || p.entry_price
+          || 0
+        );
+
+  },0);
+
+  const exposureValue = open.reduce((sum,p)=>{
+
+    return sum
+      + Number(p.quantity || 0)
+      * Number(
+          p.current_price
+          || p.buy_price
+          || 0
+        );
+
+  },0);
+
+  const unrealized = open.reduce(
+    (sum,p)=>
+      sum + Number(
+        p.profit_amount || 0
+      ),
+    0
+  );
+
+  const realized = Number(
+    performance.total_pnl || 0
+  );
+
+  const cashAvailable =
+    lastEquity - invested;
+
+  const exposurePct =
+    lastEquity > 0
+      ? (exposureValue / lastEquity) * 100
+      : 0;
+
+  const buySignals =
+    stocks.filter(
+      r => r.signal === "BUY"
+    ).length;
+
+  const sellSignals =
+    stocks.filter(
+      r => r.signal === "SELL"
+    ).length;
+
+  const alerts =
+    open.filter(
+      p => isAlertAction(p.action)
+    ).length;
+
+  document.getElementById(
+    "totalEquity"
+  ).textContent =
+    money(lastEquity);
+
+  document.getElementById(
+    "freeCapital"
+  ).textContent =
+    money(cashAvailable);
+
+  document.getElementById(
+    "investedCapital"
+  ).textContent =
+    money(invested);
+
+  document.getElementById(
+    "unrealizedPnl"
+  ).textContent =
+    money(unrealized);
+
+  document.getElementById(
+    "unrealizedPnl"
+  ).className =
+    "value " + pnlClass(unrealized);
+
+  document.getElementById(
+    "realizedPnl"
+  ).textContent =
+    money(realized);
+
+  document.getElementById(
+    "realizedPnl"
+  ).className =
+    "value " + pnlClass(realized);
+
+  document.getElementById(
+    "openPositions"
+  ).textContent =
+    open.length;
+
+  document.getElementById(
+    "exposurePct"
+  ).textContent =
+    pct(exposurePct);
+
+  document.getElementById(
+    "buySignals"
+  ).textContent =
+    buySignals;
+
+  document.getElementById(
+    "sellSignals"
+  ).textContent =
+    sellSignals;
+
+  document.getElementById(
+    "activeAlerts"
+  ).textContent =
+    alerts;
+
+  // =========================================
+  // GLOBAL RISK
+  // =========================================
+
+  const totalPnl =
+    realized + unrealized;
+
+  let drawdown = 0;
+
+  if(lastEquity > 0){
+
+    drawdown =
+      (
+        Math.abs(
+          totalPnl < 0
+            ? totalPnl
+            : 0
+        ) / lastEquity
+      ) * 100;
+  }
+
+  const riskTriggered =
+    drawdown >= 5;
+
+  document.getElementById(
+    "globalRiskStatus"
+  ).textContent =
+    riskTriggered
+      ? "RISK BLOCKED"
+      : "SAFE";
+
+  document.getElementById(
+    "globalRiskStatus"
+  ).className =
+    "value "
+    + (
+        riskTriggered
+        ? "red"
+        : "green"
+      );
+
+  document.getElementById(
+    "dailyDrawdown"
+  ).textContent =
+    pct(drawdown);
+
+  document.getElementById(
+    "dailyDrawdown"
+  ).className =
+    "value "
+    + (
+        riskTriggered
+        ? "red"
+        : "green"
+      );
+
+  const canTrade =
+    !riskTriggered
+    && cashAvailable > 0;
+
+  document.getElementById(
+    "tradingStatus"
+  ).textContent =
+    canTrade
+      ? "ACTIVE"
+      : "BLOCKED";
+
+  document.getElementById(
+    "tradingStatus"
+  ).className =
+    "value "
+    + (
+        canTrade
+        ? "green"
+        : "red"
+      );
+}
+
+function updateScannerStatus(){
+
+  const activeRows = stocks.filter(
+    r =>
+      r.signal !== "SKIPPED"
+      && r.signal !== "ERROR"
+      && !r.error
+  );
+
+  const top =
+    (
+      topWeekly.length
+        ? topWeekly
+        : stocks
+    )
+    .filter(r => r.symbol)
+    .sort(
+      (a,b)=>
+        Number(
+          b.weekly_score
+          || b.score
+          || 0
+        )
+        -
+        Number(
+          a.weekly_score
+          || a.score
+          || 0
+        )
+    )[0];
+
+  document.getElementById(
+    "totalSymbols"
+  ).textContent =
+    stocks.length;
+
+  document.getElementById(
+    "scannedSymbols"
+  ).textContent =
+    activeRows.length;
+
+  document.getElementById(
+    "topScore"
+  ).textContent =
+    top
+      ? Number(
+          top.weekly_score
+          || top.score
+          || 0
+        ).toFixed(0)
+      : "-";
+
+  document.getElementById(
+    "bestSymbol"
+  ).textContent =
+    top
+      ? top.symbol
+      : "-";
+}
+
+function drawEquityChart(){
+
+  if(equityChart){
+    equityChart.destroy();
+  }
+
+  equityChart = new Chart(
+    document.getElementById(
+      "equityChart"
+    ),
+    {
+      type:"line",
+
+      data:{
+
+        labels:
+          equityCurve.map(
+            (r,i)=>
+              r.label || "#" + i
+          ),
+
+        datasets:[{
+
+          label:"Equity",
+
+          data:
+            equityCurve.map(
+              r => Number(
+                r.equity || 0
+              )
+            ),
+
+          tension:0.25,
+
+          fill:false
+
+        }]
+      },
+
+      options:{
+
+        maintainAspectRatio:false,
+
+        plugins:{
+          legend:{
+            display:false
+          }
+        },
+
+        scales:{
+          y:{
+            beginAtZero:false
+          }
+        }
+      }
+    }
+  );
+}
+
+function drawPositionsPreview(){
+
+  const tbody =
+    document.getElementById(
+      "positionsRows"
+    );
+
+  const open = positions
+    .filter(
+      p =>
+        (p.status || "OPEN")
+        === "OPEN"
+    )
+    .slice(0,8);
+
+  if(!open.length){
+
+    tbody.innerHTML =
+      `<tr>
+        <td colspan="7">
+          אין פוזיציות פתוחות כרגע
+        </td>
+      </tr>`;
+
+    return;
+  }
+
+  tbody.innerHTML = open.map(p => `
+
+    <tr>
+
+      <td>
+        <b>${p.symbol || "-"}</b>
+      </td>
+
+      <td>
+        ${Number(
+          p.quantity || 0
+        ).toFixed(4)}
+      </td>
+
+      <td>
+        ${money(
+          p.buy_price
+          || p.entry_price
+        )}
+      </td>
+
+      <td>
+        ${money(
+          p.current_price
+        )}
+      </td>
+
+      <td class="${
+        pnlClass(
+          p.profit_amount
+        )
+      }">
+
+        <b>
+          ${money(
+            p.profit_amount
+          )}
+        </b>
+
+      </td>
+
+      <td class="${
+        pnlClass(
+          p.profit_percent
+        )
+      }">
+
+        <b>
+          ${pct(
+            p.profit_percent
+          )}
+        </b>
+
+      </td>
+
+      <td>
+        <span class="badge">
+          ${p.action || "HOLD"}
+        </span>
+      </td>
+
+    </tr>
+
+  `).join("");
+}
+
+function drawSignalsPreview(){
+
+  const tbody =
+    document.getElementById(
+      "signalRows"
+    );
+
+  const rows =
+    (
+      topWeekly.length
+        ? topWeekly
+        : stocks
+    )
+    .filter(
+      r =>
+        r.symbol
+        && r.signal !== "SKIPPED"
+        && r.signal !== "ERROR"
+    )
+    .sort(
+      (a,b)=>
+        Number(
+          b.weekly_score
+          || b.score
+          || 0
+        )
+        -
+        Number(
+          a.weekly_score
+          || a.score
+          || 0
+        )
+    )
+    .slice(0,10);
+
+  if(!rows.length){
+
+    tbody.innerHTML =
+      `<tr>
+        <td colspan="4">
+          אין איתותים להצגה
+        </td>
+      </tr>`;
+
+    return;
+  }
+
+  tbody.innerHTML = rows.map(r => {
+
+    const signalClass =
+      r.signal === "BUY"
+        ? "green"
+        : r.signal === "SELL"
+        ? "red"
+        : "yellow";
+
+    return `
+
+      <tr>
+
+        <td>
+          <b>${r.symbol || "-"}</b>
+        </td>
+
+        <td class="${signalClass}">
+          ${r.signal || "-"}
+        </td>
+
+        <td class="yellow">
+          <b>
+            ${Number(
+              r.weekly_score
+              || r.score
+              || 0
+            ).toFixed(0)}
+          </b>
+        </td>
+
+        <td>
+          ${money(r.price)}
+        </td>
+
+      </tr>
+
+    `;
+
+  }).join("");
+}
+
+async function runScan(){
+
+  const btn =
+    document.getElementById(
+      "scanBtn"
+    );
+
+  btn.disabled = true;
+
+  document.getElementById(
+    "updated"
+  ).textContent =
+    "Scan started...";
+
+  try{
+
+    const data =
+      await fetchNoCache(
+        "/api/run-scan",
+        {
+          method:"POST"
+        }
+      );
+
+    document.getElementById(
+      "updated"
+    ).textContent =
+      data.status
+      || "scan started";
+
+    setTimeout(
+      loadDashboard,
+      5000
+    );
+
+  }catch(err){
+
+    showError(
+      "Scan failed: "
+      + err.message
+    );
+
+  }finally{
+
+    setTimeout(
+      ()=>btn.disabled = false,
+      6000
+    );
+  }
+}
+
+loadDashboard();
+
+setInterval(
+  loadDashboard,
+  30000
+);
+
+</script>
+
+</body>
+</html>

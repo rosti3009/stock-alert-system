@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>History — Trading System</title>
+
+  <link rel="stylesheet" href="/layout.css">
+</head>
+
+<body>
+
+<div class="app-shell">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-title">TRADING SYSTEM</div>
+      <div class="brand-subtitle">Institutional Dashboard</div>
+    </div>
+
+    <nav class="side-nav">
+      <a href="/dashboard">📊 Dashboard</a>
+      <a href="/analytics">📈 Analytics</a>
+      <a href="/positions">💼 Positions</a>
+      <a href="/portfolio">📁 Portfolio</a>
+      <a href="/history" class="active">📜 History</a>
+      <a href="/risk">⚠ Risk</a>
+      <a href="/strategies">🧠 Strategies</a>
+      <a href="/settings">⚙ Settings</a>
+    </nav>
+  </aside>
+
+  <main class="main-area">
+
+    <div class="topbar">
+      <div>
+        <h1 class="page-title">History / Journal Center</h1>
+        <div class="page-subtitle">Closed trades · Scan runs · Signal history</div>
+      </div>
+
+      <div class="status-row">
+        <div class="live-dot"></div>
+        <div>LIVE</div>
+        <div>|</div>
+        <div id="updated">Loading...</div>
+      </div>
+    </div>
+
+    <div class="container">
+
+      <div class="cards">
+        <div class="card"><h3>Closed Trades</h3><div class="value blue" id="closedCount">-</div></div>
+        <div class="card"><h3>Total PnL</h3><div class="value" id="totalPnl">-</div></div>
+        <div class="card"><h3>Win Rate</h3><div class="value green" id="winRate">-</div></div>
+        <div class="card"><h3>Profit Factor</h3><div class="value yellow" id="profitFactor">-</div></div>
+        <div class="card"><h3>Recent Signals</h3><div class="value purple" id="signalsCount">-</div></div>
+        <div class="card"><h3>Scan Runs</h3><div class="value blue" id="scanRunsCount">-</div></div>
+      </div>
+
+      <div class="box">
+        <h3>Closed Trades Journal</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Symbol</th>
+                <th>Entry</th>
+                <th>Exit / Current</th>
+                <th>Qty</th>
+                <th>PnL $</th>
+                <th>PnL %</th>
+                <th>Action</th>
+                <th>Reason</th>
+                <th>Closed At</th>
+              </tr>
+            </thead>
+            <tbody id="closedRows">
+              <tr><td colspan="10">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="box">
+        <h3>Recent Scan Runs</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Status</th>
+                <th>Total</th>
+                <th>Scanned</th>
+                <th>Skipped</th>
+                <th>Errors</th>
+                <th>BUY</th>
+                <th>SELL</th>
+                <th>Started</th>
+                <th>Finished</th>
+              </tr>
+            </thead>
+            <tbody id="scanRows">
+              <tr><td colspan="10">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="box">
+        <h3>Recent Signals</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Symbol</th>
+                <th>Signal</th>
+                <th>Price</th>
+                <th>Score</th>
+                <th>Trend</th>
+                <th>Created</th>
+              </tr>
+            </thead>
+            <tbody id="signalRows">
+              <tr><td colspan="7">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+</div>
+
+<script>
+let positions = [];
+let signals = [];
+let scanRuns = [];
+let performance = {};
+
+async function fetchNoCache(url){
+  const res = await fetch(url + "?ts=" + Date.now(), {cache:"no-store"});
+  if(!res.ok) throw new Error(url + " failed");
+  return await res.json();
+}
+
+function money(v){
+  if(v === null || v === undefined || v === "") return "-";
+  return "$" + Number(v || 0).toFixed(2);
+}
+
+function pct(v){
+  if(v === null || v === undefined || v === "") return "-";
+  return Number(v || 0).toFixed(2) + "%";
+}
+
+function pnlClass(v){
+  return Number(v || 0) >= 0 ? "green" : "red";
+}
+
+async function loadHistory(){
+  try{
+    [positions, signals, scanRuns, performance] = await Promise.all([
+      fetchNoCache("/api/positions"),
+      fetchNoCache("/api/history"),
+      fetchNoCache("/api/scan-runs"),
+      fetchNoCache("/api/performance")
+    ]);
+
+    if(!Array.isArray(positions)) positions = [];
+    if(!Array.isArray(signals)) signals = [];
+    if(!Array.isArray(scanRuns)) scanRuns = [];
+    if(!performance || typeof performance !== "object") performance = {};
+
+    renderCards();
+    renderClosedTrades();
+    renderScanRuns();
+    renderSignals();
+
+    document.getElementById("updated").textContent = "Updated " + new Date().toLocaleTimeString();
+
+  }catch(err){
+    console.error(err);
+    document.getElementById("updated").textContent = "Update failed";
+  }
+}
+
+function renderCards(){
+  const closed = positions.filter(p => p.status === "CLOSED");
+  const pnl = Number(performance.total_pnl || 0);
+
+  document.getElementById("closedCount").textContent = closed.length;
+  document.getElementById("totalPnl").textContent = money(pnl);
+  document.getElementById("totalPnl").className = "value " + pnlClass(pnl);
+  document.getElementById("winRate").textContent = pct(performance.win_rate || 0);
+  document.getElementById("profitFactor").textContent = performance.profit_factor ?? 0;
+  document.getElementById("signalsCount").textContent = signals.length;
+  document.getElementById("scanRunsCount").textContent = scanRuns.length;
+}
+
+function renderClosedTrades(){
+  const tbody = document.getElementById("closedRows");
+  const closed = positions.filter(p => p.status === "CLOSED");
+
+  if(!closed.length){
+    tbody.innerHTML = `<tr><td colspan="10">אין עסקאות סגורות להצגה</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = closed.map((p,i)=>`
+    <tr>
+      <td>${i+1}</td>
+      <td><b>${p.symbol || "-"}</b></td>
+      <td>${money(p.buy_price || p.entry_price)}</td>
+      <td>${money(p.current_price)}</td>
+      <td>${p.quantity ?? "-"}</td>
+      <td class="${pnlClass(p.profit_amount)}"><b>${money(p.profit_amount)}</b></td>
+      <td class="${pnlClass(p.profit_percent)}"><b>${pct(p.profit_percent)}</b></td>
+      <td><span class="badge">${p.action || "-"}</span></td>
+      <td class="reason">${p.reason || "-"}</td>
+      <td>${p.closed_at || "-"}</td>
+    </tr>
+  `).join("");
+}
+
+function renderScanRuns(){
+  const tbody = document.getElementById("scanRows");
+
+  if(!scanRuns.length){
+    tbody.innerHTML = `<tr><td colspan="10">אין סריקות להצגה</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = scanRuns.map((r,i)=>`
+    <tr>
+      <td>${i+1}</td>
+      <td><span class="badge">${r.status || "-"}</span></td>
+      <td>${r.total_symbols ?? "-"}</td>
+      <td>${r.scanned_count ?? "-"}</td>
+      <td>${r.skipped_count ?? "-"}</td>
+      <td class="red">${r.error_count ?? "-"}</td>
+      <td class="green">${r.buy_signals ?? "-"}</td>
+      <td class="red">${r.sell_signals ?? "-"}</td>
+      <td>${r.started_at || "-"}</td>
+      <td>${r.finished_at || "-"}</td>
+    </tr>
+  `).join("");
+}
+
+function renderSignals(){
+  const tbody = document.getElementById("signalRows");
+
+  if(!signals.length){
+    tbody.innerHTML = `<tr><td colspan="7">אין איתותים להצגה</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = signals.map((s,i)=>{
+    const sig = s.signal_type || s.signal || "-";
+    const sigCls = sig === "BUY" ? "green" : sig === "SELL" ? "red" : "yellow";
+
+    return `
+      <tr>
+        <td>${i+1}</td>
+        <td><b>${s.symbol || "-"}</b></td>
+        <td class="${sigCls}"><b>${sig}</b></td>
+        <td>${money(s.price)}</td>
+        <td>${s.score ?? s.weekly_score ?? "-"}</td>
+        <td>${s.trend || "-"}</td>
+        <td>${s.created_at || s.signal_time || "-"}</td>
+      </tr>
+    `;
+  }).join("");
+}
+
+loadHistory();
+setInterval(loadHistory, 30000);
+</script>
+
+</body>
+</html>

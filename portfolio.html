@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Portfolio — Trading System</title>
+
+  <link rel="stylesheet" href="/layout.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+
+<div class="app-shell">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-title">TRADING SYSTEM</div>
+      <div class="brand-subtitle">Institutional Dashboard</div>
+    </div>
+
+    <nav class="side-nav">
+  <a href="/dashboard">📊 Dashboard</a>
+  <a href="/market">🌐 Market</a>
+  <a href="/scanner">🔎 Scanner</a>
+  <a href="/analytics">📈 Analytics</a>
+  <a href="/positions">💼 Positions</a>
+  <a href="/portfolio" class="active">📁 Portfolio</a>
+  <a href="/history">📜 History</a>
+  <a href="/risk">⚠ Risk</a>
+  <a href="/strategies">🧠 Strategies</a>
+  <a href="/settings">⚙ Settings</a>
+</nav>
+  </aside>
+
+  <main class="main-area">
+
+    <div class="topbar">
+      <div>
+        <h1 class="page-title">Portfolio Center</h1>
+        <div class="page-subtitle">Holdings · Allocation · Exposure · Unrealized PnL</div>
+      </div>
+
+      <div class="status-row">
+        <div class="live-dot"></div>
+        <div>LIVE</div>
+        <div>|</div>
+        <div id="updated">Loading...</div>
+      </div>
+    </div>
+
+    <div class="container">
+
+      <div class="cards">
+        <div class="card"><h3>Open Holdings</h3><div class="value blue" id="openCount">-</div></div>
+        <div class="card"><h3>Market Value</h3><div class="value yellow" id="marketValue">-</div></div>
+        <div class="card"><h3>Cost Basis</h3><div class="value muted" id="costBasis">-</div></div>
+        <div class="card"><h3>Unrealized PnL</h3><div class="value" id="unrealizedPnl">-</div></div>
+        <div class="card"><h3>Best Holding</h3><div class="value green" id="bestHolding">-</div></div>
+        <div class="card"><h3>Worst Holding</h3><div class="value red" id="worstHolding">-</div></div>
+      </div>
+
+      <div class="charts">
+        <div class="box chart-box">
+          <h3>Allocation By Symbol</h3>
+          <canvas id="allocationChart"></canvas>
+        </div>
+
+        <div class="box chart-box">
+          <h3>PnL By Symbol</h3>
+          <canvas id="pnlChart"></canvas>
+        </div>
+      </div>
+
+      <div class="box">
+        <h3>Add / Update Position</h3>
+
+        <div class="toolbar">
+          <input id="symbol" placeholder="Symbol e.g. AAPL">
+          <input id="buyPrice" type="number" step="0.0001" placeholder="Buy Price">
+          <input id="quantity" type="number" step="0.0001" placeholder="Quantity">
+          <input id="stopLoss" type="number" step="0.0001" placeholder="Stop Loss optional">
+          <input id="tp1" type="number" step="0.0001" placeholder="TP1 optional">
+          <input id="tp2" type="number" step="0.0001" placeholder="TP2 optional">
+          <button class="primary" onclick="addPosition()">Save Position</button>
+        </div>
+
+        <div class="muted" id="statusText"></div>
+      </div>
+
+      <div class="box">
+        <h3>Portfolio Holdings</h3>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Status</th>
+                <th>Quantity</th>
+                <th>Avg Cost</th>
+                <th>Current</th>
+                <th>Cost Basis</th>
+                <th>Market Value</th>
+                <th>Allocation %</th>
+                <th>PnL $</th>
+                <th>PnL %</th>
+                <th>Stop</th>
+                <th>TP1</th>
+                <th>TP2</th>
+                <th>Action</th>
+                <th>Reason</th>
+                <th>Close</th>
+              </tr>
+            </thead>
+            <tbody id="portfolioRows">
+              <tr><td colspan="16">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+</div>
+
+<script>
+let positions = [];
+let allocationChart;
+let pnlChart;
+
+async function fetchNoCache(url, options = {}){
+  const separator = url.includes("?") ? "&" : "?";
+  const res = await fetch(url + separator + "ts=" + Date.now(), {
+    cache:"no-store",
+    ...options
+  });
+
+  if(!res.ok){
+    throw new Error(url + " HTTP " + res.status);
+  }
+
+  return await res.json();
+}
+
+function money(v){
+  if(v === null || v === undefined || v === "") return "-";
+  return "$" + Number(v || 0).toFixed(2);
+}
+
+function pct(v){
+  if(v === null || v === undefined || v === "") return "-";
+  const n = Number(v || 0);
+  const sign = n > 0 ? "+" : "";
+  return sign + n.toFixed(2) + "%";
+}
+
+function num(v, digits = 4){
+  if(v === null || v === undefined || v === "") return "-";
+  const n = Number(v);
+  if(Number.isNaN(n)) return String(v);
+  return n.toFixed(digits);
+}
+
+function pnlClass(v){
+  return Number(v || 0) >= 0 ? "green" : "red";
+}
+
+function getOpen(){
+  return positions.filter(p => (p.status || "OPEN") === "OPEN");
+}
+
+function calcRows(){
+  const open = getOpen();
+
+  const totalMarketValue = open.reduce((sum,p)=>{
+    const qty = Number(p.quantity || 0);
+    const current = Number(p.current_price || p.buy_price || 0);
+    return sum + qty * current;
+  },0);
+
+  return open.map(p=>{
+    const qty = Number(p.quantity || 0);
+    const buy = Number(p.buy_price || p.entry_price || 0);
+    const current = Number(p.current_price || buy || 0);
+    const cost = qty * buy;
+    const market = qty * current;
+    const pnl = Number(p.profit_amount || (market - cost));
+    const pnlPct = cost > 0 ? (pnl / cost) * 100 : Number(p.profit_percent || 0);
+    const allocation = totalMarketValue > 0 ? (market / totalMarketValue) * 100 : 0;
+
+    return {
+      ...p,
+      qty,
+      buy,
+      current,
+      cost,
+      market,
+      pnl,
+      pnlPct,
+      allocation
+    };
+  });
+}
+
+async function loadPortfolio(){
+  try{
+    positions = await fetchNoCache("/api/positions");
+    if(!Array.isArray(positions)) positions = [];
+
+    renderCards();
+    renderCharts();
+    renderTable();
+
+    document.getElementById("updated").textContent = "Updated " + new Date().toLocaleTimeString();
+
+  }catch(err){
+    console.error(err);
+    document.getElementById("updated").textContent = "Update failed";
+    document.getElementById("portfolioRows").innerHTML =
+      `<tr><td colspan="16">Error loading portfolio</td></tr>`;
+  }
+}
+
+function renderCards(){
+  const rows = calcRows();
+
+  const totalMarket = rows.reduce((sum,r)=>sum + r.market,0);
+  const totalCost = rows.reduce((sum,r)=>sum + r.cost,0);
+  const totalPnl = rows.reduce((sum,r)=>sum + r.pnl,0);
+
+  const sorted = [...rows].sort((a,b)=>b.pnlPct - a.pnlPct);
+  const best = sorted[0];
+  const worst = sorted[sorted.length - 1];
+
+  document.getElementById("openCount").textContent = rows.length;
+  document.getElementById("marketValue").textContent = money(totalMarket);
+  document.getElementById("costBasis").textContent = money(totalCost);
+
+  document.getElementById("unrealizedPnl").textContent = money(totalPnl);
+  document.getElementById("unrealizedPnl").className = "value " + pnlClass(totalPnl);
+
+  document.getElementById("bestHolding").textContent = best ? best.symbol : "-";
+  document.getElementById("worstHolding").textContent = worst ? worst.symbol : "-";
+}
+
+function renderCharts(){
+  const rows = calcRows();
+
+  if(allocationChart) allocationChart.destroy();
+  if(pnlChart) pnlChart.destroy();
+
+  allocationChart = new Chart(document.getElementById("allocationChart"), {
+    type:"doughnut",
+    data:{
+      labels:rows.map(r=>r.symbol),
+      datasets:[{data:rows.map(r=>r.market)}]
+    },
+    options:{maintainAspectRatio:false}
+  });
+
+  pnlChart = new Chart(document.getElementById("pnlChart"), {
+    type:"bar",
+    data:{
+      labels:rows.map(r=>r.symbol),
+      datasets:[{label:"PnL $", data:rows.map(r=>r.pnl)}]
+    },
+    options:{maintainAspectRatio:false}
+  });
+}
+
+function renderTable(){
+  const rows = calcRows();
+  const tbody = document.getElementById("portfolioRows");
+
+  if(!rows.length){
+    tbody.innerHTML = `<tr><td colspan="16">אין פוזיציות פתוחות כרגע</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td><b>${r.symbol || "-"}</b></td>
+      <td><span class="badge">${r.status || "OPEN"}</span></td>
+      <td>${num(r.qty)}</td>
+      <td>${money(r.buy)}</td>
+      <td>${money(r.current)}</td>
+      <td>${money(r.cost)}</td>
+      <td>${money(r.market)}</td>
+      <td>${pct(r.allocation)}</td>
+      <td class="${pnlClass(r.pnl)}"><b>${money(r.pnl)}</b></td>
+      <td class="${pnlClass(r.pnlPct)}"><b>${pct(r.pnlPct)}</b></td>
+      <td>${money(r.stop_loss)}</td>
+      <td>${money(r.take_profit_1)}</td>
+      <td>${money(r.take_profit_2)}</td>
+      <td><span class="badge">${r.action || "HOLD"}</span></td>
+      <td class="reason">${r.reason || "-"}</td>
+      <td>
+        <button class="danger" onclick="closePosition('${r.symbol}')">Close</button>
+      </td>
+    </tr>
+  `).join("");
+}
+
+async function addPosition(){
+  const symbol = document.getElementById("symbol").value.trim().toUpperCase();
+  const buyPrice = Number(document.getElementById("buyPrice").value);
+  const quantity = Number(document.getElementById("quantity").value || 0);
+
+  if(!symbol){
+    document.getElementById("statusText").textContent = "Missing symbol";
+    return;
+  }
+
+  if(!buyPrice || buyPrice <= 0){
+    document.getElementById("statusText").textContent = "Buy price is invalid";
+    return;
+  }
+
+  if(!quantity || quantity <= 0){
+    document.getElementById("statusText").textContent = "Quantity is invalid";
+    return;
+  }
+
+  const payload = {
+    symbol,
+    buy_price: buyPrice,
+    entry_price: buyPrice,
+    quantity
+  };
+
+  const stop = document.getElementById("stopLoss").value;
+  const tp1 = document.getElementById("tp1").value;
+  const tp2 = document.getElementById("tp2").value;
+
+  if(stop) payload.stop_loss = Number(stop);
+  if(tp1) payload.take_profit_1 = Number(tp1);
+  if(tp2) payload.take_profit_2 = Number(tp2);
+
+  document.getElementById("statusText").textContent = "Saving...";
+
+  try{
+    const res = await fetch("/api/positions", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(payload),
+      cache:"no-store"
+    });
+
+    const data = await res.json();
+
+    if(data.status !== "ok"){
+      document.getElementById("statusText").textContent = data.message || "Error";
+      return;
+    }
+
+    document.getElementById("statusText").textContent = "Saved";
+
+    document.getElementById("symbol").value = "";
+    document.getElementById("buyPrice").value = "";
+    document.getElementById("quantity").value = "";
+    document.getElementById("stopLoss").value = "";
+    document.getElementById("tp1").value = "";
+    document.getElementById("tp2").value = "";
+
+    await loadPortfolio();
+
+  }catch(err){
+    console.error(err);
+    document.getElementById("statusText").textContent = "Error saving position";
+  }
+}
+
+async function closePosition(symbol){
+  if(!symbol) return;
+  if(!confirm("לסגור את הפוזיציה של " + symbol + "?")) return;
+
+  try{
+    await fetch(`/api/positions/${symbol}/close`, {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({reason:"Closed manually from portfolio center"}),
+      cache:"no-store"
+    });
+
+    await loadPortfolio();
+
+  }catch(err){
+    console.error(err);
+    alert("שגיאה בסגירת פוזיציה");
+  }
+}
+
+loadPortfolio();
+setInterval(loadPortfolio, 30000);
+</script>
+
+</body>
+</html>
