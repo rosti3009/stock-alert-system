@@ -9,6 +9,7 @@ import aiosqlite
 
 import config
 import database
+from circuit_breaker import record_ibkr_error
 
 log = logging.getLogger(__name__)
 
@@ -358,6 +359,10 @@ async def run_account_sync_once() -> dict:
         snapshot = await asyncio.to_thread(fetch_account_snapshot_sync)
     except Exception as exc:
         log.warning("Account sync failed: %s", exc)
+        try:
+            await record_ibkr_error(str(exc), source="account_sync.run_account_sync_once")
+        except Exception:
+            pass
         snapshot = {
             "connected": False,
             "account": None,

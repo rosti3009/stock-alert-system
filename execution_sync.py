@@ -9,7 +9,9 @@ import aiosqlite
 from ib_insync import IB
 
 import config
+import database
 import order_lifecycle
+from circuit_breaker import record_ibkr_error
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +65,8 @@ def fetch_executions_sync():
 
         ib.sleep(1)
 
-        executions = ib.executions()
+        fills = ib.fills()
+        executions = fills or ib.executions()
 
         rows = []
 
@@ -71,6 +74,7 @@ def fetch_executions_sync():
 
             exec_data = item.execution
             contract = item.contract
+            commission_report = getattr(item, "commissionReport", None)
 
             rows.append(
                 {
@@ -84,12 +88,13 @@ def fetch_executions_sync():
                     "account": safe_str(exec_data.acctNumber),
                     "exchange": safe_str(exec_data.exchange),
                     "time": safe_str(exec_data.time),
-                    "commission": 0.0,
-                    "realized_pnl": 0.0,
+                    "commission": safe_float(getattr(commission_report, "commission", 0.0)),
+                    "realized_pnl": safe_float(getattr(commission_report, "realizedPNL", 0.0)),
                     "raw_json": json.dumps(
                         {
                             "execution": exec_data.__dict__,
                             "contract": contract.__dict__,
+                            "commission_report": getattr(commission_report, "__dict__", {}),
                         },
                         default=str,
                         ensure_ascii=False,
@@ -188,10 +193,21 @@ async def sync_executions():
                 "raw_payload": row,
             })
 
+        result = {
+            "ok": True,
+            "fetched_count": len(rows),
+            "inserted_count": inserted,
+            "duplicate_count": max(0, len(rows) - inserted),
+            "synced_at": now_iso(),
+        }
+
         log.info(
-            "Execution sync complete | executions=%s",
-            inserted,
+            "Execution sync complete | fetched=%s inserted=%s duplicates=%s",
+            result["fetched_count"],
+            result["inserted_count"],
+            result["duplicate_count"],
         )
+        return result
 
     except Exception as e:
 
@@ -199,3 +215,42 @@ async def sync_executions():
             "Execution sync failed: %s",
             e,
         )
+        try:
+            await record_ibkr_error(str(e), source="execution_sync.sync_executions")
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "error": str(e),
+            "fetched_count": 0,
+            "inserted_count": 0,
+            "duplicate_count": 0,
+            "synced_at": now_iso(),
+        }
+
+async def get_executions(limit: int = 200, symbol: str | None = None) -> list[dict]:
+    limit = max(1, min(int(limit or 200), 1000))
+    await database.init_db()
+    params: tuple
+    if symbol:
+        where = "WHERE symbol = ?"
+        params = (symbol.strip().upper(), limit)
+    else:
+        where = ""
+        params = (limit,)
+
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"""
+            SELECT exec_id, symbol, side, quantity, price, order_id, perm_id,
+                   account, exchange, time, commission, realized_pnl, created_at
+            FROM executions
+            {where}
+            ORDER BY COALESCE(time, created_at) DESC
+            LIMIT ?
+            """,
+            params,
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [dict(row) for row in rows]

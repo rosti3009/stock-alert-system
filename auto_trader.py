@@ -412,6 +412,18 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
     if not AUTO_TRADING_ENABLED:
         return
 
+    from circuit_breaker import get_circuit_breaker_state
+    from startup_recovery import startup_recovery_passed
+
+    circuit = await get_circuit_breaker_state()
+    if circuit.get("tripped"):
+        log.warning("AUTO TRADER blocked by circuit breaker: %s", circuit.get("reason"))
+        return
+
+    if not await startup_recovery_passed():
+        log.warning("AUTO TRADER blocked: startup recovery has not passed")
+        return
+
     if not PAPER_TRADING_ENABLED:
         log.warning("Real trading is disabled. PAPER_TRADING_ENABLED must stay True.")
         return

@@ -1,0 +1,172 @@
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timezone
+
+import account_sync
+import database
+import execution_sync
+from circuit_breaker import (
+    get_circuit_breaker_state,
+    reset_ibkr_error_count,
+    trip_circuit_breaker,
+    validate_buying_power,
+    validate_drawdown,
+    validate_equity,
+)
+from reconciliation import adopt_tws_positions_as_baseline, close_db_positions_flat_in_tws, run_reconciliation_once
+from tws_mirror import run_tws_mirror_once
+
+log = logging.getLogger(__name__)
+
+STARTUP_RECOVERY_STATUS_KEY = "startup_recovery_status"
+STARTUP_RECOVERY_PASSED_KEY = "startup_recovery_passed"
+CRITICAL_RECONCILIATION_SEVERITIES = {"HIGH", "CRITICAL"}
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _json_payload(data: dict) -> str:
+    return json.dumps(data, ensure_ascii=False, default=str)
+
+
+def _account_value(rows: list[dict], tag: str) -> float | None:
+    for row in rows:
+        if row.get("tag") == tag:
+            try:
+                return float(row.get("value"))
+            except Exception:
+                return None
+    return None
+
+
+def _critical_issues(reconciliation: dict) -> list[dict]:
+    return [
+        issue for issue in reconciliation.get("issues", [])
+        if str(issue.get("severity", "")).upper() in CRITICAL_RECONCILIATION_SEVERITIES
+    ]
+
+
+async def save_startup_recovery_status(status: dict) -> None:
+    await database.set_app_state(STARTUP_RECOVERY_STATUS_KEY, _json_payload(status))
+    await database.set_app_state(STARTUP_RECOVERY_PASSED_KEY, "true" if status.get("ok") else "false")
+
+
+async def get_startup_recovery_status() -> dict:
+    raw = await database.get_app_state(STARTUP_RECOVERY_STATUS_KEY)
+    if raw:
+        try:
+            status = json.loads(raw)
+            status["circuit_breaker"] = await get_circuit_breaker_state()
+            return status
+        except Exception:
+            pass
+    return {
+        "ok": False,
+        "state": "NOT_RUN",
+        "reason": "Startup recovery has not run",
+        "steps": [],
+        "checked_at": None,
+        "circuit_breaker": await get_circuit_breaker_state(),
+    }
+
+
+async def startup_recovery_passed() -> bool:
+    return str(await database.get_app_state(STARTUP_RECOVERY_PASSED_KEY, "false")).lower() == "true"
+
+
+async def run_startup_recovery() -> dict:
+    """Run the blocking startup recovery sequence required before auto trading."""
+    await database.init_db()
+    steps: list[dict] = []
+
+    async def step(name: str, fn):
+        started = now_iso()
+        try:
+            result = await fn()
+            item = {"name": name, "ok": True, "started_at": started, "finished_at": now_iso(), "result": result}
+            steps.append(item)
+            return result
+        except Exception as exc:
+            item = {"name": name, "ok": False, "started_at": started, "finished_at": now_iso(), "error": str(exc)}
+            steps.append(item)
+            raise
+
+    status = {"ok": False, "state": "RUNNING", "reason": None, "steps": steps, "checked_at": now_iso()}
+    await save_startup_recovery_status(status)
+
+    try:
+        tws_snapshot = await step("connect_tws_sync_positions_open_orders", run_tws_mirror_once)
+        if not tws_snapshot.get("connected"):
+            raise RuntimeError(f"TWS connection failed: {tws_snapshot.get('error')}")
+
+        account_snapshot = await step("sync_account_open_orders_executions", account_sync.run_account_sync_once)
+        if not account_snapshot.get("connected"):
+            raise RuntimeError(f"Account sync failed: {account_snapshot.get('error')}")
+
+        execution_result = await step("sync_executions_and_commissions", execution_sync.sync_executions)
+        await step("adopt_missing_tws_positions", adopt_tws_positions_as_baseline)
+        await step("close_stale_db_positions", lambda: close_db_positions_flat_in_tws(dry_run=False))
+        reconciliation = await step("reconcile_db", run_reconciliation_once)
+
+        buying_power = (account_snapshot.get("equity") or {}).get("buying_power")
+        if buying_power is None:
+            buying_power = _account_value(account_snapshot.get("account_summary", []), "BuyingPower")
+        equity = (account_snapshot.get("equity") or {}).get("net_liquidation")
+        if equity is None:
+            equity = _account_value(account_snapshot.get("account_summary", []), "NetLiquidation")
+
+        await step("validate_buying_power", lambda: validate_buying_power(buying_power, source="startup_recovery"))
+        await step("validate_equity", lambda: validate_equity(equity, source="startup_recovery"))
+        await step("validate_drawdown", lambda: validate_drawdown(source="startup_recovery"))
+
+        critical = _critical_issues(reconciliation)
+        if critical:
+            await trip_circuit_breaker(
+                f"Critical reconciliation mismatches: {len(critical)}",
+                source="startup_recovery",
+                details={"critical_issues": critical},
+            )
+            raise RuntimeError(f"Critical reconciliation mismatches: {len(critical)}")
+
+        circuit = await get_circuit_breaker_state()
+        if circuit.get("tripped"):
+            raise RuntimeError(circuit.get("reason") or "Circuit breaker is tripped")
+
+        await reset_ibkr_error_count()
+        status = {
+            "ok": True,
+            "state": "PASSED",
+            "reason": None,
+            "steps": steps,
+            "execution_sync": execution_result,
+            "reconciliation": reconciliation,
+            "buying_power": buying_power,
+            "equity": equity,
+            "checked_at": now_iso(),
+            "circuit_breaker": circuit,
+        }
+        await save_startup_recovery_status(status)
+        log.info("Startup recovery passed; auto trading may run")
+        return status
+
+    except Exception as exc:
+        circuit = await trip_circuit_breaker(
+            str(exc),
+            source="startup_recovery",
+            details={"steps": steps},
+        )
+        status = {
+            "ok": False,
+            "state": "FAILED",
+            "reason": str(exc),
+            "steps": steps,
+            "checked_at": now_iso(),
+            "circuit_breaker": circuit,
+        }
+        await save_startup_recovery_status(status)
+        log.warning("Startup recovery failed: %s", exc)
+        return status
