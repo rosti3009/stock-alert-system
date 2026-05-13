@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
 
+from reason_summarizer import summarize_reason_list
+
 import config
 
 
@@ -280,6 +282,10 @@ def summarize_execution_quality(evaluations: list[dict[str, Any]]) -> dict[str, 
             "state": ExecutionQualityState.EXECUTION_SAFE.value,
             "evaluations": [],
             "blocked_buy_reason": None,
+            "blocked_buy_reason_summary": summarize_reason_list([], default_text="No execution-quality BUY block active."),
+            "raw_blocked_buy_reasons": [],
+            "raw_reasons": [],
+            "full_details": {"blocked_buy_reasons": []},
             "spread_risk": "UNKNOWN",
             "liquidity_status": "UNKNOWN",
             "slippage_estimate": None,
@@ -287,6 +293,12 @@ def summarize_execution_quality(evaluations: list[dict[str, Any]]) -> dict[str, 
 
     worst = max(evaluations, key=lambda item: severity.get(item.get("state"), 0))
     blocked_reasons = [item.get("blocked_buy_reason") for item in evaluations if item.get("blocked_buy_reason")]
+    blocked_symbols = [item.get("symbol") for item in evaluations if item.get("blocked_buy_reason")]
+    reason_summary = summarize_reason_list(
+        blocked_reasons,
+        symbols=blocked_symbols,
+        default_text="No execution-quality BUY block active.",
+    )
     slippages = [
         item.get("metrics", {}).get("estimated_slippage_percent")
         for item in evaluations
@@ -297,7 +309,11 @@ def summarize_execution_quality(evaluations: list[dict[str, Any]]) -> dict[str, 
         "checked_at": _now_iso(),
         "state": worst.get("state"),
         "evaluations": evaluations,
-        "blocked_buy_reason": "; ".join(blocked_reasons) or None,
+        "blocked_buy_reason": reason_summary["text"] if blocked_reasons else None,
+        "blocked_buy_reason_summary": reason_summary,
+        "raw_blocked_buy_reasons": blocked_reasons,
+        "raw_reasons": blocked_reasons,
+        "full_details": {"blocked_buy_reasons": blocked_reasons},
         "spread_risk": "DANGER" if any("dangerous_spread" in item.get("block_categories", []) for item in evaluations) else ("WARNING" if any("spread" in str(message).lower() for item in evaluations for message in item.get("warnings", [])) else "OK"),
         "liquidity_status": "LOW" if any("low_liquidity" in item.get("block_categories", []) for item in evaluations) else "OK",
         "slippage_estimate": max(slippages) if slippages else None,

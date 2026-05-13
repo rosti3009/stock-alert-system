@@ -13,6 +13,7 @@ import portfolio_risk_engine
 import sector_intelligence
 from execution_quality import evaluate_execution_quality, summarize_execution_quality
 from market_regime_engine import get_cached_market_regime
+from reason_summarizer import summarize_reason_list
 
 
 class PositionSizingState(StrEnum):
@@ -414,9 +415,26 @@ def summarize_position_sizing(evaluations: list[dict[str, Any]]) -> dict[str, An
             "concentration_adjustment": 1.0,
             "blocks_buy": False,
             "block_reasons": [],
+            "block_reason_summary": summarize_reason_list([], default_text="No position-sizing BUY block active."),
+            "dashboard_block_reason": None,
+            "raw_block_reasons": [],
+            "raw_reasons": [],
+            "full_details": {"block_reasons": []},
         }
 
     worst = max(evaluations, key=lambda item: severity.get(item.get("state"), 0))
+    raw_block_reasons = [reason for item in evaluations for reason in item.get("block_reasons", [])]
+    unique_block_reasons = list(dict.fromkeys(raw_block_reasons))
+    raw_block_symbols = [
+        item.get("symbol")
+        for item in evaluations
+        for reason in item.get("block_reasons", [])
+    ]
+    block_reason_summary = summarize_reason_list(
+        raw_block_reasons,
+        symbols=raw_block_symbols,
+        default_text="No position-sizing BUY block active.",
+    )
     return {
         "checked_at": now_iso(),
         "state": worst.get("state"),
@@ -434,7 +452,12 @@ def summarize_position_sizing(evaluations: list[dict[str, Any]]) -> dict[str, An
         "execution_adjustment": worst.get("execution_adjustment"),
         "concentration_adjustment": worst.get("concentration_adjustment"),
         "blocks_buy": any(item.get("blocks_buy") for item in evaluations),
-        "block_reasons": list(dict.fromkeys(reason for item in evaluations for reason in item.get("block_reasons", []))),
+        "block_reasons": unique_block_reasons,
+        "block_reason_summary": block_reason_summary,
+        "dashboard_block_reason": block_reason_summary["text"] if raw_block_reasons else None,
+        "raw_block_reasons": raw_block_reasons,
+        "raw_reasons": raw_block_reasons,
+        "full_details": {"block_reasons": raw_block_reasons},
     }
 
 

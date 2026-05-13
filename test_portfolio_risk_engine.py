@@ -157,6 +157,29 @@ class PortfolioRiskEngineTests(unittest.TestCase):
         self.assertIn("RISK_BLOCK_BUY", event_types)
         self.assertIn("RISK_RECOVERED", event_types)
 
+    def test_portfolio_risk_alert_summary_is_short_and_preserves_raw_details(self):
+        snapshot = portfolio_risk_engine.evaluate_risk_snapshot(
+            positions=[{"symbol": "AAPL", "quantity": 25, "buy_price": 100, "current_price": 100, "stop_loss": 90}],
+            account_summary=[{"tag": "NetLiquidation", "value": "10000"}],
+            daily_realized_pnl=-600,
+        )
+
+        self.assertLessEqual(len(snapshot["block_reason_summary"]["text"]), 250)
+        self.assertTrue(snapshot["raw_block_reasons"])
+        self.assertEqual(snapshot["full_details"]["block_reasons"], snapshot["raw_block_reasons"])
+        self.assertTrue(snapshot["block_reason_summary"]["top_categories"])
+
+    def test_portfolio_duplicate_alert_reasons_are_grouped(self):
+        summary = portfolio_risk_engine.summarize_reason_list([
+            "Daily realized drawdown exceeds the configured limit.",
+            "Daily realized drawdown exceeds the configured limit.",
+            "Account utilization exceeds the configured danger limit.",
+        ])
+
+        self.assertIn("Drawdown: 2 symbols", summary["text"])
+        self.assertIn("Capital: 1 symbol", summary["text"])
+        self.assertLessEqual(len(summary["text"]), 250)
+
 
 if __name__ == "__main__":
     unittest.main()
