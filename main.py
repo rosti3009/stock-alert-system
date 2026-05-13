@@ -18,6 +18,7 @@ import session_manager
 import order_lifecycle
 import portfolio_risk_engine
 import position_sizing_engine
+import position_exit_priority_engine
 from execution_quality import evaluate_execution_quality, summarize_execution_quality
 from auto_trader import process_auto_trading
 from market_regime_engine import get_cached_market_regime, get_market_regime_history, refresh_market_regime
@@ -1098,6 +1099,32 @@ async def api_execution_quality_symbol(symbol: str):
     )
 
 
+
+
+
+
+@app.get("/api/position-exit-priority")
+async def api_position_exit_priority():
+    return JSONResponse(
+        await position_exit_priority_engine.get_position_exit_priority(_latest),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/position-exit-priority/{symbol}")
+async def api_position_exit_priority_symbol(symbol: str):
+    normalized = str(symbol or "").strip().upper()
+    row = _latest.get(normalized, {"symbol": normalized})
+    evaluation = await position_exit_priority_engine.get_position_exit_priority_for_symbol(normalized, row)
+
+    if evaluation is None:
+        return JSONResponse(
+            {"symbol": normalized, "error": "Open position not found", "read_only": True},
+            status_code=404,
+            headers=no_cache_headers(),
+        )
+
+    return JSONResponse(evaluation, headers=no_cache_headers())
 
 
 @app.get("/api/position-sizing")

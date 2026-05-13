@@ -80,6 +80,10 @@
         <div class="card health-card"><h3>Daily Drawdown</h3><div class="value" id="dailyDrawdown">-</div><div class="card-note" id="dailyDrawdownMeta">-</div></div>
         <div class="card health-card"><h3>Risk State</h3><div class="value" id="riskState">-</div><div class="card-note" id="riskStateMeta">-</div></div>
         <div class="card health-card"><h3>New Buy Risk Status</h3><div class="value" id="newBuyRiskStatus">-</div><div class="card-note" id="newBuyRiskMeta">Risk engine blocks only dangerous new BUY exposure.</div></div>
+        <div class="card health-card"><h3>Worst Positions</h3><div class="value" id="worstPositionsCount">-</div><div class="card-note" id="worstPositionsMeta">Read-only exit priority ranking.</div></div>
+        <div class="card health-card"><h3>Exit Candidates</h3><div class="value" id="exitCandidatesCount">-</div><div class="card-note" id="exitCandidatesMeta">No automatic selling or broker actions.</div></div>
+        <div class="card health-card"><h3>High Risk Holdings</h3><div class="value" id="highRiskHoldingsCount">-</div><div class="card-note" id="highRiskHoldingsMeta">Review-only position risk intelligence.</div></div>
+        <div class="card health-card"><h3>Capital Lock Alerts</h3><div class="value" id="capitalLockAlerts">-</div><div class="card-note" id="capitalLockMeta">Capital trapped in REDUCE/HIGH_RISK/EXIT_CANDIDATE states.</div></div>
         <div class="card health-card"><h3>Position Sizing State</h3><div class="value" id="positionSizingState">-</div><div class="card-note" id="positionSizingMeta">Read-only sizing gate; no order placement.</div></div>
         <div class="card health-card"><h3>Recommended Position Size</h3><div class="value" id="recommendedPositionSize">-</div><div class="card-note" id="recommendedPositionMeta">Aggregate BUY recommendation from cached scan rows.</div></div>
         <div class="card health-card"><h3>Max Risk Per Trade</h3><div class="value" id="maxRiskPerTrade">-</div><div class="card-note">Configured capital-at-risk ceiling.</div></div>
@@ -95,6 +99,29 @@
         <div class="card health-card"><h3>Reconciliation Issues Count</h3><div class="value" id="reconciliationCount">-</div><div class="card-note" id="reconciliationMeta">-</div></div>
         <div class="card health-card"><h3>Latest Journal Events</h3><div class="value purple" id="journalEventsCount">-</div><div class="card-note" id="latestJournalEvent">-</div></div>
         <div class="card health-card"><h3>Order Lifecycle Events</h3><div class="value blue" id="orderLifecycleCount">-</div><div class="card-note" id="latestOrderLifecycleEvent">-</div></div>
+      </div>
+
+
+      <div class="health-grid">
+        <div class="box">
+          <h3>Worst Positions</h3>
+          <div class="table-wrap health-table-wrap">
+            <table>
+              <thead><tr><th>Symbol</th><th>State</th><th>Score</th><th>PnL</th><th>Capital Locked</th><th>Primary Reason</th></tr></thead>
+              <tbody id="worstPositionsRows"><tr><td colspan="6">Loading...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="box">
+          <h3>Exit Candidates & High Risk Holdings</h3>
+          <div class="table-wrap health-table-wrap">
+            <table>
+              <thead><tr><th>Symbol</th><th>State</th><th>Risk Contribution</th><th>Flags</th><th>Secondary Reason</th></tr></thead>
+              <tbody id="highRiskPositionsRows"><tr><td colspan="5">Loading...</td></tr></tbody>
+            </table>
+          </div>
+        </div>
       </div>
 
       <div class="health-grid">
@@ -181,7 +208,8 @@ const ENDPOINTS = {
   portfolioRisk: "/api/portfolio-risk",
   executionQuality: "/api/execution-quality",
   positionSizing: "/api/position-sizing",
-  marketRegime: "/api/market-regime"
+  marketRegime: "/api/market-regime",
+  positionExitPriority: "/api/position-exit-priority"
 };
 
 async function fetchNoCache(url) {
@@ -542,6 +570,54 @@ function renderOrderLifecycle(events, latestStates) {
   document.getElementById("orderLifecycleLatestRows").innerHTML = latestRows || `<tr><td colspan="7">No latest lifecycle states.</td></tr>`;
 }
 
+
+function priorityClass(state) {
+  const normalized = String(state || "").toUpperCase();
+  if (normalized === "KEEP") return "green";
+  if (normalized === "REVIEW" || normalized === "REDUCE") return "yellow";
+  if (normalized === "HIGH_RISK" || normalized === "EXIT_CANDIDATE") return "red";
+  return "muted";
+}
+
+function renderPositionExitPriority(priority) {
+  const worst = safeArray(priority?.worst_positions);
+  const exits = safeArray(priority?.exit_candidates);
+  const highRisk = safeArray(priority?.high_risk_positions);
+  const trapped = numberValue(priority?.capital_trapped);
+
+  setValue("worstPositionsCount", worst.length, worst.length ? priorityClass(worst[0]?.priority_state) : "green");
+  document.getElementById("worstPositionsMeta").textContent = worst[0] ? `${text(worst[0].symbol)} score ${text(worst[0].exit_priority_score)} · ${text(worst[0].primary_reason)}` : "No open positions require review.";
+  setValue("exitCandidatesCount", exits.length, exits.length ? "red" : "green");
+  document.getElementById("exitCandidatesMeta").textContent = exits.length ? exits.map(item => item.symbol).join(", ") : "No exit candidates detected.";
+  setValue("highRiskHoldingsCount", highRisk.length, highRisk.length ? "red" : "green");
+  document.getElementById("highRiskHoldingsMeta").textContent = highRisk.length ? highRisk.map(item => `${item.symbol} ${item.exit_priority_score}`).join(" · ") : "No high-risk holdings detected.";
+  setValue("capitalLockAlerts", money(trapped), trapped > 0 ? "yellow" : "green");
+  document.getElementById("capitalLockMeta").textContent = `${percent(priority?.capital_trapped_percent)} of virtual capital · recommendation-only/no SELL orders`;
+
+  const worstRows = worst.slice(0, 10).map(item => `
+    <tr>
+      <td>${escapeHtml(text(item.symbol))}</td>
+      <td><span class="badge ${priorityClass(item.priority_state)}">${escapeHtml(text(item.priority_state))}</span></td>
+      <td>${escapeHtml(text(item.exit_priority_score))}</td>
+      <td class="${numberValue(item.unrealized_pnl) >= 0 ? "green" : "red"}">${escapeHtml(signedMoney(item.unrealized_pnl))}</td>
+      <td>${escapeHtml(money(item.capital_locked))}</td>
+      <td class="reason">${escapeHtml(text(item.primary_reason))}</td>
+    </tr>
+  `).join("");
+  document.getElementById("worstPositionsRows").innerHTML = worstRows || `<tr><td colspan="6">No worst-position alerts.</td></tr>`;
+
+  const highRiskRows = highRisk.slice(0, 10).map(item => `
+    <tr>
+      <td>${escapeHtml(text(item.symbol))}</td>
+      <td><span class="badge ${priorityClass(item.priority_state)}">${escapeHtml(text(item.priority_state))}</span></td>
+      <td>${escapeHtml(percent(item.portfolio_risk_contribution))}</td>
+      <td class="reason">${escapeHtml(safeArray(item.risk_flags).join(", "))}</td>
+      <td class="reason">${escapeHtml(text(item.secondary_reason || item.primary_reason))}</td>
+    </tr>
+  `).join("");
+  document.getElementById("highRiskPositionsRows").innerHTML = highRiskRows || `<tr><td colspan="5">No exit candidates or high-risk holdings.</td></tr>`;
+}
+
 function renderError(error) {
   setValue("recoveryState", "ERROR", "red");
   document.getElementById("overallState").textContent = "ERROR";
@@ -552,7 +628,7 @@ function renderError(error) {
 
 async function refreshHealth() {
   try {
-    const [recovery, session, account, openOrders, executions, reconciliation, journal, orderLifecycle, orderLifecycleLatest, portfolioRisk, executionQuality, positionSizing, marketRegime] = await Promise.all([
+    const [recovery, session, account, openOrders, executions, reconciliation, journal, orderLifecycle, orderLifecycleLatest, portfolioRisk, executionQuality, positionSizing, marketRegime, positionExitPriority] = await Promise.all([
       fetchNoCache(ENDPOINTS.recovery),
       fetchNoCache(ENDPOINTS.session),
       fetchNoCache(ENDPOINTS.account),
@@ -565,7 +641,8 @@ async function refreshHealth() {
       fetchNoCache(ENDPOINTS.portfolioRisk),
       fetchNoCache(ENDPOINTS.executionQuality),
       fetchNoCache(ENDPOINTS.positionSizing),
-      fetchNoCache(ENDPOINTS.marketRegime)
+      fetchNoCache(ENDPOINTS.marketRegime),
+      fetchNoCache(ENDPOINTS.positionExitPriority)
     ]);
 
     renderRecovery(recovery);
@@ -580,6 +657,7 @@ async function refreshHealth() {
     renderExecutionQuality(executionQuality);
     renderPositionSizing(positionSizing);
     renderMarketRegime(marketRegime);
+    renderPositionExitPriority(positionExitPriority);
     document.getElementById("updated").textContent = `Last refresh ${new Date().toLocaleTimeString()}`;
   } catch (error) {
     console.error("System health refresh failed", error);
