@@ -177,7 +177,7 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
         "low_liquidity_reduction": threshold("LOW_LIQUIDITY_REDUCTION", 0.5),
         "micro_size_threshold": threshold("MICRO_SIZE_THRESHOLD", 0.2),
         "min_average_volume": threshold("MIN_AVERAGE_VOLUME", 500000.0),
-        "min_relative_volume": threshold("MIN_RELATIVE_VOLUME", 0.75),
+        "min_relative_volume": threshold("MIN_RELATIVE_VOLUME", 1.0),
         "max_spread_percent": threshold("MAX_SPREAD_PERCENT", 3.0),
         "max_intraday_volatility": threshold("MAX_INTRADAY_VOLATILITY", 6.0),
         "max_daily_drawdown_percent": threshold("MAX_DAILY_DRAWDOWN_PERCENT", 5.0),

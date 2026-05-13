@@ -26,6 +26,7 @@ class ExecutionQualityTests(unittest.TestCase):
             "MAX_SPREAD_DOLLARS": config.MAX_SPREAD_DOLLARS,
             "MIN_RELATIVE_VOLUME": config.MIN_RELATIVE_VOLUME,
             "MIN_AVERAGE_VOLUME": config.MIN_AVERAGE_VOLUME,
+            "MIN_DOLLAR_VOLUME": config.MIN_DOLLAR_VOLUME,
             "MAX_SLIPPAGE_ESTIMATE": config.MAX_SLIPPAGE_ESTIMATE,
             "MAX_INTRADAY_VOLATILITY": config.MAX_INTRADAY_VOLATILITY,
             "MAX_CANDLE_EXPANSION_PERCENT": config.MAX_CANDLE_EXPANSION_PERCENT,
@@ -35,8 +36,9 @@ class ExecutionQualityTests(unittest.TestCase):
         database.DB_PATH = self.tmp.name
         config.MAX_SPREAD_PERCENT = 3.0
         config.MAX_SPREAD_DOLLARS = 0.50
-        config.MIN_RELATIVE_VOLUME = 0.75
         config.MIN_AVERAGE_VOLUME = 500000.0
+        config.MIN_DOLLAR_VOLUME = 5_000_000.0
+        config.MIN_RELATIVE_VOLUME = 1.0
         config.MAX_SLIPPAGE_ESTIMATE = 2.0
         config.MAX_INTRADAY_VOLATILITY = 6.0
         config.MAX_CANDLE_EXPANSION_PERCENT = 250.0
@@ -180,6 +182,65 @@ class ExecutionQualityTests(unittest.TestCase):
         self.assertEqual(result["state"], "EXECUTION_BLOCK_BUY")
         self.assertIn("low_liquidity", result["block_categories"])
         self.assertIn("Low average volume", result["blocked_buy_reason"])
+        self.assertIn("Low dollar volume", result["blocked_buy_reason"])
+        self.assertIn("Low relative volume", result["blocked_buy_reason"])
+        self.assertEqual(result["metrics"]["dollar_volume"], 2_000_000.0)
+        self.assertIn("Low average volume", "; ".join(result["metrics"]["liquidity_block_reasons"]))
+
+    def test_missing_average_volume_blocks_buy(self):
+        result = execution_quality.evaluate_execution_quality(
+            row={"symbol": "MISS", "volume_ratio": 1.5, "price": 20.0},
+            limit_price=20.0,
+        )
+
+        self.assertEqual(result["state"], "EXECUTION_BLOCK_BUY")
+        self.assertFalse(result["allowed"])
+        self.assertIn("low_liquidity", result["block_categories"])
+        self.assertIn("Missing average volume", result["blocked_buy_reason"])
+        self.assertIsNone(result["metrics"]["average_volume"])
+        self.assertIsNone(result["metrics"]["dollar_volume"])
+        self.assertEqual(result["liquidity"]["decision"], "block")
+        self.assertIn("Missing average volume", result["liquidity"]["block_reasons"])
+
+    def test_blocks_buy_when_dollar_volume_below_threshold(self):
+        result = execution_quality.evaluate_execution_quality(
+            row={"symbol": "CHEAP", "average_volume": 600_000, "relative_volume": 1.2, "current_price": 5.0},
+            limit_price=5.0,
+        )
+
+        self.assertEqual(result["state"], "EXECUTION_BLOCK_BUY")
+        self.assertIn("Low dollar volume", result["blocked_buy_reason"])
+        self.assertEqual(result["metrics"]["average_volume"], 600_000.0)
+        self.assertEqual(result["metrics"]["current_price"], 5.0)
+        self.assertEqual(result["metrics"]["dollar_volume"], 3_000_000.0)
+        self.assertEqual(result["liquidity"]["dollar_volume"], 3_000_000.0)
+
+    def test_relative_volume_only_blocks_when_available(self):
+        missing_relative = execution_quality.evaluate_execution_quality(
+            row={"symbol": "NOREL", "average_volume": 600_000, "current_price": 10.0},
+            limit_price=10.0,
+        )
+        low_relative = execution_quality.evaluate_execution_quality(
+            row={"symbol": "LOWREL", "average_volume": 600_000, "relative_volume": 0.99, "current_price": 10.0},
+            limit_price=10.0,
+        )
+
+        self.assertEqual(missing_relative["state"], "EXECUTION_SAFE")
+        self.assertTrue(missing_relative["allowed"])
+        self.assertEqual(low_relative["state"], "EXECUTION_BLOCK_BUY")
+        self.assertIn("Low relative volume", low_relative["blocked_buy_reason"])
+
+    def test_liquidity_block_reason_is_logged(self):
+        with self.assertLogs(execution_quality.log, level="INFO") as captured:
+            execution_quality.evaluate_execution_quality(
+                row={"symbol": "LOG", "average_volume": 100_000, "relative_volume": 0.5, "current_price": 10.0},
+                limit_price=10.0,
+            )
+
+        liquidity_logs = [line for line in captured.output if "liquidity decision" in line]
+        self.assertTrue(liquidity_logs)
+        self.assertIn("decision=block", liquidity_logs[0])
+        self.assertIn("Low average volume", liquidity_logs[0])
 
     def test_blocks_buy_for_halt_risk_quote(self):
         result = execution_quality.evaluate_execution_quality(

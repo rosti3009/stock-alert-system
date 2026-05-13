@@ -45,6 +45,14 @@ def _round(value: float | None, digits: int = 4) -> float | None:
     return round(value, digits) if value is not None else None
 
 
+def _first_float(*values: Any) -> float | None:
+    for value in values:
+        parsed = _safe_float(value, None)
+        if parsed is not None:
+            return parsed
+    return None
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -198,8 +206,9 @@ def evaluate_execution_quality(
     thresholds = {
         "max_spread_percent": _threshold("MAX_SPREAD_PERCENT", 3.0),
         "max_spread_dollars": _threshold("MAX_SPREAD_DOLLARS", 0.50),
-        "min_relative_volume": _threshold("MIN_RELATIVE_VOLUME", 0.75),
         "min_average_volume": _threshold("MIN_AVERAGE_VOLUME", 500000.0),
+        "min_dollar_volume": _threshold("MIN_DOLLAR_VOLUME", 5000000.0),
+        "min_relative_volume": _threshold("MIN_RELATIVE_VOLUME", 1.0),
         "max_slippage_estimate": _threshold("MAX_SLIPPAGE_ESTIMATE", 2.0),
         "max_intraday_volatility": _threshold("MAX_INTRADAY_VOLATILITY", 6.0),
         "max_candle_expansion_percent": _threshold("MAX_CANDLE_EXPANSION_PERCENT", 250.0),
@@ -217,9 +226,10 @@ def evaluate_execution_quality(
         if mid > 0:
             spread_percent = (spread_dollars / mid) * 100
 
-    avg_volume = _safe_float(row.get("avg_volume") or row.get("average_volume"), None)
-    volume = _safe_float(row.get("volume") or row.get("current_volume"), None)
-    relative_volume = _safe_float(row.get("relative_volume") or row.get("volume_ratio"), None)
+    avg_volume = _first_float(row.get("average_volume"), row.get("avg_volume"))
+    volume = _first_float(row.get("current_volume"), row.get("volume"))
+    relative_volume = _first_float(row.get("relative_volume"), row.get("volume_ratio"))
+    dollar_volume = avg_volume * reference_price if avg_volume is not None and reference_price > 0 else None
     if relative_volume is None and avg_volume and avg_volume > 0 and volume is not None:
         relative_volume = volume / avg_volume
 
@@ -267,10 +277,27 @@ def evaluate_execution_quality(
     elif quote:
         add_danger("Halt-risk quote: missing bid/ask", "halt_risk")
 
-    if avg_volume is not None and avg_volume < thresholds["min_average_volume"]:
-        add_danger(f"Low average volume {avg_volume:.0f}", "low_liquidity")
+    if avg_volume is None:
+        add_danger("Missing average volume", "low_liquidity")
+    elif avg_volume < thresholds["min_average_volume"]:
+        add_danger(
+            f"Low average volume {avg_volume:.0f} below minimum {thresholds['min_average_volume']:.0f}",
+            "low_liquidity",
+        )
+
+    if dollar_volume is None:
+        add_danger("Missing dollar volume: average volume or current price unavailable", "low_liquidity")
+    elif dollar_volume < thresholds["min_dollar_volume"]:
+        add_danger(
+            f"Low dollar volume ${dollar_volume:.0f} below minimum ${thresholds['min_dollar_volume']:.0f}",
+            "low_liquidity",
+        )
+
     if relative_volume is not None and relative_volume < thresholds["min_relative_volume"]:
-        add_danger(f"Low relative volume {relative_volume:.2f}x", "low_liquidity")
+        add_danger(
+            f"Low relative volume {relative_volume:.2f}x below minimum {thresholds['min_relative_volume']:.2f}x",
+            "low_liquidity",
+        )
 
     if estimated_slippage is not None and estimated_slippage > max_slippage_estimate:
         add_danger(f"Extreme slippage estimate {estimated_slippage:.2f}%", "extreme_slippage")
@@ -296,23 +323,52 @@ def evaluate_execution_quality(
         state = ExecutionQualityState.EXECUTION_SAFE
 
     decision = "allow" if state != ExecutionQualityState.EXECUTION_BLOCK_BUY else "block"
+    symbol_value = _symbol(row, quote, symbol)
+    liquidity_block_reasons = [
+        reason for reason, category in zip(block_reasons, block_categories)
+        if category == "low_liquidity"
+    ]
+    liquidity_decision = "block" if liquidity_block_reasons else "allow"
     log.info(
         "Execution quality slippage decision | symbol=%s estimated_slippage=%s threshold=%s price_tier=%s decision=%s",
-        _symbol(row, quote, symbol),
+        symbol_value,
         _round(estimated_slippage),
         _round(max_slippage_estimate),
         price_tier,
         decision,
     )
+    log.info(
+        "Execution quality liquidity decision | symbol=%s average_volume=%s dollar_volume=%s relative_volume=%s thresholds=%s decision=%s block_reason=%s",
+        symbol_value,
+        _round(avg_volume, 0),
+        _round(dollar_volume, 0),
+        _round(relative_volume),
+        {
+            "min_average_volume": thresholds["min_average_volume"],
+            "min_dollar_volume": thresholds["min_dollar_volume"],
+            "min_relative_volume": thresholds["min_relative_volume"],
+        },
+        liquidity_decision,
+        "; ".join(dict.fromkeys(liquidity_block_reasons)) or None,
+    )
 
     return {
-        "symbol": _symbol(row, quote, symbol),
+        "symbol": symbol_value,
         "checked_at": _now_iso(),
         "state": state.value,
         "allowed": state != ExecutionQualityState.EXECUTION_BLOCK_BUY,
         "blocks_buy": state == ExecutionQualityState.EXECUTION_BLOCK_BUY,
         "blocked_buy_reason": "; ".join(dict.fromkeys(block_reasons)) or None,
+        "block_reasons": list(dict.fromkeys(block_reasons)),
         "block_categories": list(dict.fromkeys(block_categories)),
+        "liquidity": {
+            "average_volume": _round(avg_volume, 0),
+            "current_price": _round(reference_price),
+            "dollar_volume": _round(dollar_volume, 0),
+            "relative_volume": _round(relative_volume),
+            "block_reasons": list(dict.fromkeys(liquidity_block_reasons)),
+            "decision": liquidity_decision,
+        },
         "warnings": warnings,
         "dangers": dangers,
         "metrics": {
@@ -322,8 +378,11 @@ def evaluate_execution_quality(
             "spread_percent": _round(spread_percent),
             "spread_dollars": _round(spread_dollars),
             "average_volume": _round(avg_volume, 0),
+            "current_price": _round(reference_price),
+            "dollar_volume": _round(dollar_volume, 0),
             "volume": _round(volume, 0),
             "relative_volume": _round(relative_volume),
+            "liquidity_block_reasons": list(dict.fromkeys(liquidity_block_reasons)),
             "intraday_volatility_percent": _round(intraday_volatility),
             "candle_expansion_percent": _round(candle_expansion),
             "spread_widening_ratio": _round(spread_widening),
