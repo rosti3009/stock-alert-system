@@ -9,6 +9,7 @@ import aiosqlite
 from ib_insync import IB
 
 import config
+from circuit_breaker import record_ibkr_error
 
 log = logging.getLogger(__name__)
 
@@ -426,6 +427,10 @@ async def run_tws_mirror_once() -> dict:
 
     except Exception as e:
         log.warning("TWS MIRROR FAILED: %s", e)
+        try:
+            await record_ibkr_error(str(e), source="tws_mirror.run_tws_mirror_once")
+        except Exception:
+            pass
 
         snapshot = {
             "connected": False,

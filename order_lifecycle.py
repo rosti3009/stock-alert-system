@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -12,6 +13,7 @@ import aiosqlite
 
 import config
 import database
+from circuit_breaker import record_order_reject
 
 log = logging.getLogger(__name__)
 
@@ -240,6 +242,15 @@ async def record_order_lifecycle_event(event: dict[str, Any]) -> dict[str, Any]:
         await db.commit()
 
     await journal_lifecycle_transition(row)
+    if normalize_state(row.get("state")) == OrderState.REJECTED:
+        try:
+            await record_order_reject(
+                row.get("reason") or "IBKR order rejected",
+                source=row.get("source_module") or "order_lifecycle",
+                details=row,
+            )
+        except Exception as exc:
+            log.warning("Circuit breaker order reject hook failed: %s", exc)
     return row
 
 
@@ -258,6 +269,15 @@ def record_order_lifecycle_event_sync(event: dict[str, Any]) -> dict[str, Any]:
         db.commit()
 
     journal_lifecycle_transition_sync(row)
+    if normalize_state(row.get("state")) == OrderState.REJECTED:
+        try:
+            asyncio.run(record_order_reject(
+                row.get("reason") or "IBKR order rejected",
+                source=row.get("source_module") or "order_lifecycle",
+                details=row,
+            ))
+        except Exception as exc:
+            log.warning("Circuit breaker sync order reject hook failed: %s", exc)
     return row
 
 

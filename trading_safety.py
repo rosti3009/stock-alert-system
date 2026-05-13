@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import config
+import database
 
 PAPER_TWS_PORT = 7497
 
@@ -29,3 +30,31 @@ def require_paper_auto_trading_allowed(action: str = "Trading") -> None:
         raise RuntimeError(
             f"{action} blocked: IBKR port is not Paper port {PAPER_TWS_PORT}"
         )
+
+    require_circuit_breaker_clear(action)
+
+
+def _circuit_breaker_is_tripped_sync() -> tuple[bool, str | None]:
+    import json
+    import sqlite3
+
+    try:
+        with sqlite3.connect(database.DB_PATH) as db:
+            row = db.execute(
+                "SELECT value FROM app_state WHERE key = ?",
+                ("circuit_breaker_state",),
+            ).fetchone()
+        if not row:
+            return False, None
+        state = json.loads(row[0])
+        return bool(state.get("tripped")), state.get("reason")
+    except Exception as exc:
+        if "no such table: app_state" in str(exc):
+            return False, None
+        return True, f"Circuit breaker state check failed: {exc}"
+
+
+def require_circuit_breaker_clear(action: str = "Trading") -> None:
+    tripped, reason = _circuit_breaker_is_tripped_sync()
+    if tripped:
+        raise RuntimeError(f"{action} blocked: circuit breaker tripped: {reason}")

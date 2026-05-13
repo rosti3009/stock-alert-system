@@ -17,6 +17,8 @@ import recovery_manager
 import session_manager
 import order_lifecycle
 import portfolio_risk_engine
+import startup_recovery
+from circuit_breaker import get_circuit_breaker_state, reset_circuit_breaker
 import position_sizing_engine
 import position_exit_priority_engine
 import sector_intelligence
@@ -693,6 +695,13 @@ async def restore_latest_from_db() -> None:
 async def lifespan(app: FastAPI):
     await database.init_db()
     await restore_latest_from_db()
+    startup_status = await startup_recovery.run_startup_recovery()
+
+    if not startup_status.get("ok"):
+        log.warning(
+            "Startup recovery failed; scan scheduler may run but auto trading remains disabled: %s",
+            startup_status.get("reason"),
+        )
 
     if config.SCAN_MODE == "daily":
         scheduler.add_job(
@@ -1174,8 +1183,10 @@ async def api_open_orders():
 
 @app.get("/api/executions")
 async def api_executions(limit: int = 200, symbol: str | None = None):
+    from execution_sync import get_executions
+
     return JSONResponse(
-        await account_sync.get_executions(limit=limit, symbol=symbol),
+        await get_executions(limit=limit, symbol=symbol),
         headers=no_cache_headers(),
     )
 
@@ -1327,6 +1338,40 @@ async def api_order_lifecycle_symbol(symbol: str, limit: int = 200):
 async def api_order_lifecycle_latest(limit: int = 200):
     return JSONResponse(
         await order_lifecycle.get_latest_order_lifecycle_states(limit=limit),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/startup-recovery/status")
+async def api_startup_recovery_status():
+    return JSONResponse(
+        await startup_recovery.get_startup_recovery_status(),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/reconciliation/status")
+async def api_reconciliation_status_v2():
+    from reconciliation_lifecycle import get_reconciliation_status
+
+    return JSONResponse(
+        await get_reconciliation_status(),
+        headers=no_cache_headers(),
+    )
+
+
+@app.post("/api/circuit-breaker/reset")
+async def api_circuit_breaker_reset(reason: str = Body("Manual API reset", embed=True)):
+    return JSONResponse(
+        await reset_circuit_breaker(reason=reason),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/circuit-breaker/status")
+async def api_circuit_breaker_status():
+    return JSONResponse(
+        await get_circuit_breaker_state(),
         headers=no_cache_headers(),
     )
 
