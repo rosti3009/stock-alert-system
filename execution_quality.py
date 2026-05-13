@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -8,6 +9,9 @@ from typing import Any
 from reason_summarizer import summarize_reason_list
 
 import config
+
+
+log = logging.getLogger(__name__)
 
 
 class ExecutionQualityState(StrEnum):
@@ -136,6 +140,51 @@ def _estimated_slippage_percent(spread_percent: float | None, row: dict[str, Any
     return half_spread + min(max(atr_percent, 0.0) * 0.10, 1.0) + max(price_drift, 0.0)
 
 
+def _slippage_price_tier(reference_price: float) -> tuple[str, float | None]:
+    if reference_price <= 0:
+        return "unknown", None
+    if reference_price < 10:
+        return "under_10", 2.5
+    if reference_price <= 50:
+        return "10_to_50", 1.5
+    return "above_50", 1.0
+
+
+def _slippage_threshold(reference_price: float, default_threshold: float) -> tuple[float, str]:
+    price_tier, tier_threshold = _slippage_price_tier(reference_price)
+    if tier_threshold is None:
+        return default_threshold, price_tier
+    return tier_threshold, price_tier
+
+
+def _is_halted_or_inactive(row: dict[str, Any], quote: dict[str, Any]) -> bool:
+    halted_values = (
+        row.get("halted"),
+        row.get("is_halted"),
+        row.get("trading_halted"),
+        quote.get("halted"),
+        quote.get("is_halted"),
+        quote.get("trading_halted"),
+    )
+    if any(value is True or str(value).strip().lower() in {"true", "1", "yes", "y", "halted"} for value in halted_values if value is not None):
+        return True
+
+    active_values = (row.get("active"), row.get("is_active"), quote.get("active"), quote.get("is_active"))
+    if any(value is False or str(value).strip().lower() in {"false", "0", "no", "n", "inactive"} for value in active_values if value is not None):
+        return True
+
+    status_values = (
+        row.get("status"),
+        row.get("trading_status"),
+        row.get("market_status"),
+        quote.get("status"),
+        quote.get("trading_status"),
+        quote.get("market_status"),
+    )
+    inactive_statuses = {"halted", "inactive", "suspended", "delisted", "not_trading", "not trading"}
+    return any(str(value).strip().lower() in inactive_statuses for value in status_values if value is not None)
+
+
 def evaluate_execution_quality(
     row: dict[str, Any] | None = None,
     quote: dict[str, Any] | None = None,
@@ -151,7 +200,7 @@ def evaluate_execution_quality(
         "max_spread_dollars": _threshold("MAX_SPREAD_DOLLARS", 0.50),
         "min_relative_volume": _threshold("MIN_RELATIVE_VOLUME", 0.75),
         "min_average_volume": _threshold("MIN_AVERAGE_VOLUME", 500000.0),
-        "max_slippage_estimate": _threshold("MAX_SLIPPAGE_ESTIMATE", 1.0),
+        "max_slippage_estimate": _threshold("MAX_SLIPPAGE_ESTIMATE", 2.0),
         "max_intraday_volatility": _threshold("MAX_INTRADAY_VOLATILITY", 6.0),
         "max_candle_expansion_percent": _threshold("MAX_CANDLE_EXPANSION_PERCENT", 250.0),
     }
@@ -185,6 +234,8 @@ def evaluate_execution_quality(
         spread_widening = spread_percent / average_spread_percent
 
     estimated_slippage = _estimated_slippage_percent(spread_percent, row, reference_price, limit_price)
+    max_slippage_estimate, price_tier = _slippage_threshold(reference_price, thresholds["max_slippage_estimate"])
+    thresholds["max_slippage_estimate"] = max_slippage_estimate
 
     warnings: list[str] = []
     dangers: list[str] = []
@@ -199,6 +250,9 @@ def evaluate_execution_quality(
         if category in BLOCKING_CATEGORIES:
             block_reasons.append(message)
             block_categories.append(str(category))
+
+    if _is_halted_or_inactive(row, quote):
+        add_danger("Halt-risk symbol: halted or inactive", "halt_risk")
 
     if bid is not None and ask is not None:
         if bid <= 0 or ask <= 0 or ask < bid:
@@ -218,7 +272,7 @@ def evaluate_execution_quality(
     if relative_volume is not None and relative_volume < thresholds["min_relative_volume"]:
         add_danger(f"Low relative volume {relative_volume:.2f}x", "low_liquidity")
 
-    if estimated_slippage is not None and estimated_slippage > thresholds["max_slippage_estimate"]:
+    if estimated_slippage is not None and estimated_slippage > max_slippage_estimate:
         add_danger(f"Extreme slippage estimate {estimated_slippage:.2f}%", "extreme_slippage")
 
     if intraday_volatility is not None and intraday_volatility > thresholds["max_intraday_volatility"]:
@@ -240,6 +294,16 @@ def evaluate_execution_quality(
         state = ExecutionQualityState.EXECUTION_WARNING
     else:
         state = ExecutionQualityState.EXECUTION_SAFE
+
+    decision = "allow" if state != ExecutionQualityState.EXECUTION_BLOCK_BUY else "block"
+    log.info(
+        "Execution quality slippage decision | symbol=%s estimated_slippage=%s threshold=%s price_tier=%s decision=%s",
+        _symbol(row, quote, symbol),
+        _round(estimated_slippage),
+        _round(max_slippage_estimate),
+        price_tier,
+        decision,
+    )
 
     return {
         "symbol": _symbol(row, quote, symbol),
@@ -264,6 +328,9 @@ def evaluate_execution_quality(
             "candle_expansion_percent": _round(candle_expansion),
             "spread_widening_ratio": _round(spread_widening),
             "estimated_slippage_percent": _round(estimated_slippage),
+            "max_slippage_estimate": _round(max_slippage_estimate),
+            "slippage_price_tier": price_tier,
+            "execution_decision": decision,
         },
         "thresholds": thresholds,
     }
