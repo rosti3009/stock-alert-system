@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Any
 
 import database
+import sector_intelligence
 from execution_quality import evaluate_execution_quality
 from market_regime_engine import get_cached_market_regime
 from portfolio_risk_engine import (
@@ -399,6 +400,7 @@ def evaluate_position_exit_priority(
     equity = account_equity if account_equity is not None else effective_account_equity()
     sector_totals = sector_totals or {}
     market_regime = market_regime or {}
+    classification = sector_intelligence.classify_symbol(symbol)
 
     unrealized_pnl = (current_price - buy_price) * quantity if quantity > 0 and buy_price > 0 else safe_float(position.get("profit_amount"))
     profit_percent = safe_float(position.get("profit_percent"), None)
@@ -437,6 +439,10 @@ def evaluate_position_exit_priority(
         "market_value": round(market_value, 2),
         "exposure_percent": pct(market_value, equity),
         "sector": get_sector(symbol),
+        "industry": classification.get("industry"),
+        "theme": classification.get("theme"),
+        "correlation_cluster": classification.get("correlation_cluster"),
+        "sector_intelligence": classification,
         "quantity": round(quantity, 6),
         "current_price": round(current_price, 4),
         "buy_price": round(buy_price, 4),
@@ -458,6 +464,7 @@ def evaluate_exit_priorities(
     equity = account_equity if account_equity is not None else effective_account_equity()
     exposures = build_position_exposures(positions, equity)
     sector_exposures = aggregate_sector_exposure(exposures, equity)
+    sector_summary = sector_intelligence.build_portfolio_summary(positions, equity, checked_at=checked_at)
     sector_totals = {item["sector"]: item for item in sector_exposures}
     total_market_value = sum(item.market_value for item in exposures)
     total_negative_pnl = sum(abs(min(0.0, item.unrealized_pnl)) for item in exposures)
@@ -511,6 +518,9 @@ def evaluate_exit_priorities(
         "capital_trapped_percent": pct(capital_trapped, equity),
         "capital_trapped_positions": capital_trapped_positions,
         "concentration_warnings": concentration_warnings,
+        "sector_intelligence": sector_summary,
+        "correlation_clusters": sector_summary["correlation_clusters"],
+        "diversification_score": sector_summary["diversification_score"],
         "portfolio": {
             "account_equity": round(equity, 2),
             "total_market_value": round(total_market_value, 2),

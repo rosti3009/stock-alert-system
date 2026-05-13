@@ -246,6 +246,11 @@
           <div class="value" id="tradingStatus">-</div>
         </div>
 
+        <div class="card">
+          <h3>Diversification Score</h3>
+          <div class="value blue" id="diversificationScore">-</div>
+        </div>
+
       </div>
 
       <!-- ========================================= -->
@@ -357,6 +362,29 @@
 
         </div>
 
+      </div>
+
+      <!-- ========================================= -->
+      <!-- SECTOR INTELLIGENCE -->
+      <!-- ========================================= -->
+
+      <div class="mini-grid">
+
+        <div class="box">
+          <h3>Sector Exposure</h3>
+          <div id="sectorExposureRows" class="muted">Loading...</div>
+        </div>
+
+        <div class="box">
+          <h3>Industry Exposure</h3>
+          <div id="industryExposureRows" class="muted">Loading...</div>
+        </div>
+
+      </div>
+
+      <div class="box">
+        <h3>Correlation Clusters</h3>
+        <div id="correlationClusterRows" class="muted">Loading...</div>
       </div>
 
       <!-- ========================================= -->
@@ -611,6 +639,8 @@ async function loadDashboard(){
 
     drawSignalsPreview();
 
+    drawSectorIntelligence();
+
     document.getElementById(
       "updated"
     ).textContent =
@@ -844,6 +874,53 @@ function updateCards(){
         ? "green"
         : "red"
       );
+
+  document.getElementById(
+    "diversificationScore"
+  ).textContent =
+    portfolioRisk.diversification_score !== undefined
+      ? Number(portfolioRisk.diversification_score).toFixed(0)
+      : "-";
+}
+
+function renderExposureList(items, key){
+
+  if(!items || !items.length){
+    return "No open exposure";
+  }
+
+  return items.slice(0,5).map(item => {
+    const label = item[key] || "UNKNOWN";
+    const symbols = (item.symbols || []).join(", ");
+    return `<div style="margin-bottom:10px;">
+      <b>${label}</b> · ${pct(item.exposure_percent)}
+      <div class="muted">${money(item.market_value)} · ${symbols}</div>
+    </div>`;
+  }).join("");
+}
+
+function drawSectorIntelligence(){
+
+  document.getElementById(
+    "sectorExposureRows"
+  ).innerHTML = renderExposureList(
+    portfolioRisk.exposure_by_sector || [],
+    "sector"
+  );
+
+  document.getElementById(
+    "industryExposureRows"
+  ).innerHTML = renderExposureList(
+    portfolioRisk.exposure_by_industry || [],
+    "industry"
+  );
+
+  document.getElementById(
+    "correlationClusterRows"
+  ).innerHTML = renderExposureList(
+    portfolioRisk.top_correlated_groups || [],
+    "correlation_cluster"
+  );
 }
 
 function updateScannerStatus(){

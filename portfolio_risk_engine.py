@@ -11,6 +11,7 @@ import aiosqlite
 import account_sync
 import config
 import database
+import sector_intelligence
 
 
 class RiskState(str, Enum):
@@ -22,34 +23,6 @@ class RiskState(str, Enum):
 
 STATE_KEY = "portfolio_risk_state"
 LATEST_KEY = "portfolio_risk_latest"
-
-DEFAULT_SYMBOL_SECTORS = {
-    "AAPL": "Technology",
-    "MSFT": "Technology",
-    "NVDA": "Technology",
-    "AMD": "Technology",
-    "AVGO": "Technology",
-    "META": "Communication Services",
-    "GOOGL": "Communication Services",
-    "GOOG": "Communication Services",
-    "NFLX": "Communication Services",
-    "AMZN": "Consumer Discretionary",
-    "TSLA": "Consumer Discretionary",
-    "JPM": "Financials",
-    "BAC": "Financials",
-    "WFC": "Financials",
-    "XOM": "Energy",
-    "CVX": "Energy",
-    "JNJ": "Health Care",
-    "UNH": "Health Care",
-    "PFE": "Health Care",
-    "KO": "Consumer Staples",
-    "PEP": "Consumer Staples",
-    "WMT": "Consumer Staples",
-    "BA": "Industrials",
-    "CAT": "Industrials",
-    "GE": "Industrials",
-}
 
 
 def now_iso() -> str:
@@ -76,11 +49,7 @@ def configured_threshold(name: str, default: float) -> float:
 
 
 def get_sector(symbol: str) -> str:
-    normalized = str(symbol or "").strip().upper()
-    overrides = getattr(config, "SYMBOL_SECTOR_OVERRIDES", {}) or {}
-    if normalized in overrides:
-        return str(overrides[normalized] or "Unknown")
-    return DEFAULT_SYMBOL_SECTORS.get(normalized, "Unknown")
+    return str(sector_intelligence.classify_symbol(symbol).get("sector") or sector_intelligence.UNKNOWN)
 
 
 def account_value(summary: list[dict], tag: str) -> float:
@@ -120,9 +89,15 @@ class PositionExposure:
     open_risk: float
 
     def as_dict(self) -> dict:
+        classification = sector_intelligence.classify_symbol(self.symbol)
         return {
             "symbol": self.symbol,
             "sector": self.sector,
+            "industry": classification.get("industry"),
+            "subsector": classification.get("subsector"),
+            "theme": classification.get("theme"),
+            "volatility_group": classification.get("volatility_group"),
+            "correlation_cluster": classification.get("correlation_cluster"),
             "quantity": round(self.quantity, 6),
             "buy_price": round(self.buy_price, 4),
             "current_price": round(self.current_price, 4),
@@ -209,6 +184,7 @@ def evaluate_risk_snapshot(
     account_equity = infer_account_equity(account_summary, daily_realized_pnl)
     position_exposures = build_position_exposures(positions, account_equity)
     sector_exposures = aggregate_sector_exposure(position_exposures, account_equity)
+    sector_summary = sector_intelligence.build_portfolio_summary(positions, account_equity, checked_at=checked_at)
 
     total_market_value = sum(item.market_value for item in position_exposures)
     total_unrealized = sum(item.unrealized_pnl for item in position_exposures)
@@ -302,6 +278,11 @@ def evaluate_risk_snapshot(
         "total_portfolio_exposure_percent": total_exposure_percent,
         "exposure_by_symbol": [item.as_dict() for item in sorted(position_exposures, key=lambda item: item.market_value, reverse=True)],
         "exposure_by_sector": sector_exposures,
+        "exposure_by_industry": sector_summary["exposure_by_industry"],
+        "sector_intelligence": sector_summary,
+        "top_correlated_groups": sector_summary["top_correlated_groups"],
+        "diversification_score": sector_summary["diversification_score"],
+        "concentration_percent": sector_summary["concentration_percent"],
         "largest_position_percent": round(largest_position_percent, 4),
         "largest_position": largest_position.as_dict() if largest_position else None,
         "largest_sector": largest_sector,
