@@ -66,6 +66,64 @@ class SectorIntelligenceTests(unittest.TestCase):
         self.assertGreater(summary["diversification_score"], 0)
         self.assertTrue(summary["top_correlated_groups"])
 
+    def test_large_cap_and_api_classification_fields(self):
+        cases = {
+            "NVDA": "Technology",
+            "LLY": "Healthcare",
+            "XOM": "Energy",
+            "GS": "Financials",
+            "RTX": "Industrials",
+            "HD": "Consumer",
+            "NEE": "Utilities",
+            "LIN": "Materials",
+            "DIS": "Communication Services",
+        }
+
+        for symbol, sector in cases.items():
+            with self.subTest(symbol=symbol):
+                classification = sector_intelligence.classify_symbol(symbol)
+                self.assertEqual(classification["sector"], sector)
+                self.assertIn("classification_source", classification)
+                self.assertIn("confidence", classification)
+                self.assertIn("normalized_sector", classification)
+                self.assertGreater(classification["confidence"], 0.5)
+
+    def test_etf_name_detection_from_cached_metadata(self):
+        classification = sector_intelligence.classify_symbol(
+            "TESTETF",
+            cached_enrichment={"TESTETF": {"name": "Example Vanguard Total Market ETF"}},
+        )
+
+        self.assertEqual(classification["sector"], "ETFs")
+        self.assertEqual(classification["source"], "etf_name_detection")
+        self.assertTrue(classification["fallback_used"])
+
+    def test_company_name_keyword_fallback_inference(self):
+        classification = sector_intelligence.classify_symbol(
+            "BTAI",
+            cached_enrichment={"BTAI": {"company_name": "BioX Artificial Intelligence Therapeutics"}},
+        )
+
+        self.assertIn(classification["sector"], {"Healthcare", "Technology"})
+        self.assertEqual(classification["inferred_vs_static"], "inferred")
+        self.assertGreater(classification["confidence"], 0.5)
+
+    def test_unknown_reduction_metrics_and_diversification_quality(self):
+        summary = sector_intelligence.build_portfolio_summary(
+            positions=[
+                {"symbol": "NVDA", "quantity": 1, "current_price": 100},
+                {"symbol": "LLY", "quantity": 1, "current_price": 100},
+                {"symbol": "ZZZZ", "quantity": 1, "current_price": 25},
+            ],
+            account_equity=1000,
+            checked_at="2026-05-13T00:00:00+00:00",
+        )
+
+        self.assertEqual(summary["known_sector_percentage"], 88.8889)
+        self.assertEqual(summary["unknown_sector_percentage"], 11.1111)
+        self.assertIn(summary["diversification_quality"], {"MODERATE", "LOW"})
+        self.assertTrue(summary["top_sectors"])
+
 
 if __name__ == "__main__":
     unittest.main()

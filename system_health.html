@@ -455,6 +455,7 @@ function renderPortfolioRisk(risk) {
   const totalExposure = numberValue(risk?.total_portfolio_exposure_percent);
   const largestPosition = risk?.largest_position || {};
   const largestSector = risk?.largest_sector || {};
+  const unknownSectorShare = numberValue(risk?.unknown_sector_percentage ?? risk?.sector_intelligence?.unknown_sector_percentage);
   const riskState = text(risk?.risk_state, "UNKNOWN");
   const buyStatus = text(risk?.new_buy_risk_status, "UNKNOWN");
 
@@ -465,8 +466,9 @@ function renderPortfolioRisk(risk) {
   setValue("largestPosition", largestPosition.symbol ? `${largestPosition.symbol} ${percent(largestPosition.exposure_percent)}` : "-", numberValue(largestPosition.exposure_percent) > numberValue(risk?.thresholds?.max_symbol_exposure_percent) * 0.8 ? "yellow" : "green");
   document.getElementById("largestPositionMeta").textContent = largestPosition.symbol ? `${money(largestPosition.market_value)} · ${text(largestPosition.sector)}` : "No open positions.";
 
-  setValue("sectorConcentration", largestSector.sector ? `${largestSector.sector} ${percent(largestSector.exposure_percent)}` : "-", numberValue(largestSector.exposure_percent) > numberValue(risk?.thresholds?.max_sector_exposure_percent) * 0.8 ? "yellow" : "green");
-  document.getElementById("sectorConcentrationMeta").textContent = largestSector.symbols ? `Symbols: ${largestSector.symbols.join(", ")}` : "No sector exposure.";
+  const showUnknownSector = largestSector.sector !== "UNKNOWN" || unknownSectorShare > 10;
+  setValue("sectorConcentration", largestSector.sector && showUnknownSector ? `${largestSector.sector} ${percent(largestSector.exposure_percent)}` : "-", numberValue(largestSector.exposure_percent) > numberValue(risk?.thresholds?.max_sector_exposure_percent) * 0.8 && showUnknownSector ? "yellow" : "green");
+  document.getElementById("sectorConcentrationMeta").textContent = largestSector.symbols && showUnknownSector ? `Symbols: ${largestSector.symbols.join(", ")} · known ${percent(risk?.known_sector_percentage)} · unknown ${percent(unknownSectorShare)}` : `Known ${percent(risk?.known_sector_percentage)} · unknown ${percent(unknownSectorShare)}.`;
 
   setValue("dailyDrawdown", percent(risk?.daily_drawdown_percent), numberValue(risk?.daily_drawdown_percent) > 0 ? riskClass(riskState) : "green");
   document.getElementById("dailyDrawdownMeta").textContent = `Daily realized PnL ${signedMoney(risk?.daily_realized_pnl)} · unrealized drawdown ${percent(risk?.unrealized_drawdown_percent)}`;

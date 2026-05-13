@@ -99,6 +99,9 @@ class PositionExposure:
             "theme": classification.get("theme"),
             "volatility_group": classification.get("volatility_group"),
             "correlation_cluster": classification.get("correlation_cluster"),
+            "classification_source": classification.get("classification_source") or classification.get("source"),
+            "confidence": classification.get("confidence"),
+            "normalized_sector": classification.get("normalized_sector") or classification.get("sector"),
             "quantity": round(self.quantity, 6),
             "buy_price": round(self.buy_price, 4),
             "current_price": round(self.current_price, 4),
@@ -196,7 +199,8 @@ def evaluate_risk_snapshot(
     daily_drawdown_percent = abs(min(0.0, daily_realized_pnl_percent))
 
     largest_position = max(position_exposures, key=lambda item: item.exposure_percent, default=None)
-    largest_sector = max(sector_exposures, key=lambda item: item["exposure_percent"], default=None)
+    concentration_sector_candidates = [item for item in sector_summary.get("exposure_by_sector", []) if item.get("sector") != sector_intelligence.UNKNOWN]
+    largest_sector = max(concentration_sector_candidates or sector_summary.get("exposure_by_sector", []) or sector_exposures, key=lambda item: item["exposure_percent"], default=None)
 
     account_utilization_percent = total_exposure_percent
 
@@ -230,11 +234,16 @@ def evaluate_risk_snapshot(
 
     sector_threshold = thresholds["max_sector_exposure_percent"]
     largest_sector_percent = safe_float((largest_sector or {}).get("exposure_percent"))
-    if largest_sector and largest_sector_percent >= sector_threshold:
+    suppress_unknown_sector_warning = bool(
+        largest_sector
+        and largest_sector.get("sector") == sector_intelligence.UNKNOWN
+        and safe_float(largest_sector.get("average_confidence")) < 0.5
+    )
+    if largest_sector and not suppress_unknown_sector_warning and largest_sector_percent >= sector_threshold:
         alert = make_alert("DANGER", "sector_exposure_percent", f"{largest_sector['sector']} sector exposure exceeds the configured limit.", largest_sector_percent, sector_threshold, True)
         alerts.append(alert)
         concentration_warnings.append(alert)
-    elif largest_sector and largest_sector_percent >= sector_threshold * 0.8:
+    elif largest_sector and not suppress_unknown_sector_warning and largest_sector_percent >= sector_threshold * 0.8:
         alert = make_alert("WARNING", "sector_exposure_percent", f"{largest_sector['sector']} sector exposure is nearing the configured limit.", largest_sector_percent, sector_threshold)
         alerts.append(alert)
         concentration_warnings.append(alert)
@@ -293,11 +302,16 @@ def evaluate_risk_snapshot(
         "total_market_value": round(total_market_value, 2),
         "total_portfolio_exposure_percent": total_exposure_percent,
         "exposure_by_symbol": [item.as_dict() for item in sorted(position_exposures, key=lambda item: item.market_value, reverse=True)],
-        "exposure_by_sector": sector_exposures,
+        "exposure_by_sector": sector_summary.get("visible_sector_exposure") or sector_exposures,
+        "all_exposure_by_sector": sector_summary.get("exposure_by_sector") or sector_exposures,
+        "top_sectors": sector_summary.get("top_sectors", []),
         "exposure_by_industry": sector_summary["exposure_by_industry"],
         "sector_intelligence": sector_summary,
         "top_correlated_groups": sector_summary["top_correlated_groups"],
         "diversification_score": sector_summary["diversification_score"],
+        "diversification_quality": sector_summary.get("diversification_quality"),
+        "known_sector_percentage": sector_summary.get("known_sector_percentage"),
+        "unknown_sector_percentage": sector_summary.get("unknown_sector_percentage"),
         "concentration_percent": sector_summary["concentration_percent"],
         "largest_position_percent": round(largest_position_percent, 4),
         "largest_position": largest_position.as_dict() if largest_position else None,
