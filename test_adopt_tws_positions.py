@@ -5,6 +5,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 
 import config
 import database
@@ -27,7 +28,7 @@ CREATE TABLE IF NOT EXISTS tws_positions (
 
 
 def fetch_position(db_path: str, symbol: str) -> dict | None:
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         db.row_factory = sqlite3.Row
         row = db.execute(
             "SELECT * FROM positions WHERE symbol = ?",
@@ -38,8 +39,8 @@ def fetch_position(db_path: str, symbol: str) -> dict | None:
 
 class AdoptTwsPositionsTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(delete=False)
-        self.tmp.close()
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmpdir.name, "test.sqlite3")
         self.original = {
             "config_DB_PATH": config.DB_PATH,
             "database_DB_PATH": database.DB_PATH,
@@ -48,8 +49,8 @@ class AdoptTwsPositionsTests(unittest.TestCase):
             "IBKR_PORT": config.IBKR_PORT,
             "TRADING_MODE": config.TRADING_MODE,
         }
-        config.DB_PATH = self.tmp.name
-        database.DB_PATH = self.tmp.name
+        config.DB_PATH = self.db_path
+        database.DB_PATH = self.db_path
         config.IBKR_PAPER_TRADING = True
         config.IBKR_ENABLE_REAL_TRADING = False
         config.IBKR_PORT = 7497
@@ -63,10 +64,7 @@ class AdoptTwsPositionsTests(unittest.TestCase):
         config.IBKR_ENABLE_REAL_TRADING = self.original["IBKR_ENABLE_REAL_TRADING"]
         config.IBKR_PORT = self.original["IBKR_PORT"]
         config.TRADING_MODE = self.original["TRADING_MODE"]
-        try:
-            os.unlink(self.tmp.name)
-        except FileNotFoundError:
-            pass
+        self.tmpdir.cleanup()
 
     def insert_tws_position(
         self,
@@ -75,7 +73,7 @@ class AdoptTwsPositionsTests(unittest.TestCase):
         avg_cost: float,
         market_price: float,
     ) -> None:
-        with sqlite3.connect(self.tmp.name) as db:
+        with closing(sqlite3.connect(self.db_path)) as db:
             db.execute(CREATE_TWS_POSITIONS)
             db.execute(
                 """
@@ -105,7 +103,7 @@ class AdoptTwsPositionsTests(unittest.TestCase):
         self.assertEqual(result["symbols_adopted"], ["AAPL"])
         self.assertEqual(result["remaining_reconciliation_issues_count"], 0)
 
-        position = fetch_position(self.tmp.name, "AAPL")
+        position = fetch_position(self.db_path, "AAPL")
         self.assertIsNotNone(position)
         self.assertEqual(position["status"], "OPEN")
         self.assertEqual(position["source"], "TWS_BASELINE_ADOPTED")
@@ -144,7 +142,7 @@ class AdoptTwsPositionsTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "LIVE trading is enabled"):
             asyncio.run(reconciliation.adopt_tws_positions_as_baseline())
 
-        self.assertIsNone(fetch_position(self.tmp.name, "NVDA"))
+        self.assertIsNone(fetch_position(self.db_path, "NVDA"))
 
     def test_adoption_is_blocked_when_not_paper_port(self):
         self.insert_tws_position("TSLA", 2, 250, 255)
@@ -153,7 +151,7 @@ class AdoptTwsPositionsTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "not Paper port 7497"):
             asyncio.run(reconciliation.adopt_tws_positions_as_baseline())
 
-        self.assertIsNone(fetch_position(self.tmp.name, "TSLA"))
+        self.assertIsNone(fetch_position(self.db_path, "TSLA"))
 
 
 if __name__ == "__main__":
