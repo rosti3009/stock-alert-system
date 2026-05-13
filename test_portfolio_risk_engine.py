@@ -180,6 +180,32 @@ class PortfolioRiskEngineTests(unittest.TestCase):
         self.assertIn("Capital: 1 symbol", summary["text"])
         self.assertLessEqual(len(summary["text"]), 250)
 
+    def test_unknown_low_confidence_sector_does_not_dominate_warnings(self):
+        snapshot = portfolio_risk_engine.evaluate_risk_snapshot(
+            positions=[{"symbol": "ZZZZ", "quantity": 50, "buy_price": 100, "current_price": 100, "stop_loss": 90}],
+            account_summary=[{"tag": "NetLiquidation", "value": "10000"}],
+        )
+
+        self.assertFalse(any(alert["metric"] == "sector_exposure_percent" for alert in snapshot["alerts"]))
+        self.assertEqual(snapshot["unknown_sector_percentage"], 100.0)
+        self.assertEqual(snapshot["diversification_quality"], "LOW")
+
+    def test_portfolio_risk_exposes_sector_quality_metrics(self):
+        snapshot = portfolio_risk_engine.evaluate_risk_snapshot(
+            positions=[
+                {"symbol": "NVDA", "quantity": 5, "buy_price": 100, "current_price": 100, "stop_loss": 90},
+                {"symbol": "LLY", "quantity": 5, "buy_price": 100, "current_price": 100, "stop_loss": 90},
+            ],
+            account_summary=[{"tag": "NetLiquidation", "value": "10000"}],
+        )
+
+        self.assertEqual(snapshot["known_sector_percentage"], 100.0)
+        self.assertEqual(snapshot["unknown_sector_percentage"], 0.0)
+        self.assertIn(snapshot["diversification_quality"], {"HIGH", "MODERATE"})
+        self.assertTrue(snapshot["top_sectors"])
+        self.assertIn("classification_source", snapshot["largest_position"])
+        self.assertIn("normalized_sector", snapshot["largest_position"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -885,16 +885,23 @@ function updateCards(){
 
 function renderExposureList(items, key){
 
-  if(!items || !items.length){
+  const unknownShare = Number(portfolioRisk.unknown_sector_percentage ?? portfolioRisk.sector_intelligence?.unknown_sector_percentage ?? 0);
+  const visibleItems = (items || []).filter(item => {
+    const label = item[key] || "UNKNOWN";
+    return label !== "UNKNOWN" || unknownShare > 10;
+  });
+
+  if(!visibleItems.length){
     return "No open exposure";
   }
 
-  return items.slice(0,5).map(item => {
+  return visibleItems.slice(0,5).map(item => {
     const label = item[key] || "UNKNOWN";
     const symbols = (item.symbols || []).join(", ");
+    const confidence = item.average_confidence !== undefined ? ` · confidence ${Math.round(Number(item.average_confidence) * 100)}%` : "";
     return `<div style="margin-bottom:10px;">
       <b>${label}</b> · ${pct(item.exposure_percent)}
-      <div class="muted">${money(item.market_value)} · ${symbols}</div>
+      <div class="muted">${money(item.market_value)} · ${symbols}${confidence}</div>
     </div>`;
   }).join("");
 }
@@ -904,7 +911,7 @@ function drawSectorIntelligence(){
   document.getElementById(
     "sectorExposureRows"
   ).innerHTML = renderExposureList(
-    portfolioRisk.exposure_by_sector || [],
+    portfolioRisk.top_sectors || portfolioRisk.exposure_by_sector || [],
     "sector"
   );
 
