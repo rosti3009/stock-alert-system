@@ -1037,6 +1037,42 @@ async def api_adopt_tws_positions():
         )
 
 
+@app.post("/api/reconciliation/close-db-positions-flat-in-tws")
+async def api_close_db_positions_flat_in_tws(
+    request: Request,
+    dry_run: bool = Body(False, embed=True),
+):
+    query_dry_run = request.query_params.get("dry_run")
+    if query_dry_run is not None:
+        dry_run = query_dry_run.strip().lower() in {"1", "true", "yes", "on"}
+
+    from reconciliation import close_db_positions_flat_in_tws
+
+    try:
+        result = await close_db_positions_flat_in_tws(dry_run=dry_run)
+        return JSONResponse(
+            result,
+            headers=no_cache_headers(),
+        )
+
+    except RuntimeError as exc:
+        return JSONResponse(
+            {
+                "status": "blocked",
+                "reason": str(exc),
+                "tws_positions_count": 0,
+                "db_open_before": 0,
+                "closed_count": 0,
+                "closed_symbols": [],
+                "skipped_symbols": [],
+                "remaining_issues": [],
+                "dry_run": bool(dry_run),
+            },
+            status_code=403,
+            headers=no_cache_headers(),
+        )
+
+
 # ==========================================
 # ACCOUNT SYNC API
 # ==========================================
