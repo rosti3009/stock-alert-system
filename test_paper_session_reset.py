@@ -6,6 +6,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 
 import account_sync
 import config
@@ -16,8 +17,8 @@ import portfolio_risk_engine
 
 class PaperSessionResetTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(delete=False)
-        self.tmp.close()
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmpdir.name, "test.sqlite3")
         self.original = {
             "database_DB_PATH": database.DB_PATH,
             "config_DB_PATH": config.DB_PATH,
@@ -27,8 +28,8 @@ class PaperSessionResetTests(unittest.TestCase):
             "VIRTUAL_TRADING_CAPITAL_USD": config.VIRTUAL_TRADING_CAPITAL_USD,
             "database_VIRTUAL_TRADING_CAPITAL_USD": database.VIRTUAL_TRADING_CAPITAL_USD,
         }
-        database.DB_PATH = self.tmp.name
-        config.DB_PATH = self.tmp.name
+        database.DB_PATH = self.db_path
+        config.DB_PATH = self.db_path
         config.TRADING_MODE = "PAPER"
         config.IBKR_PAPER_TRADING = True
         config.IBKR_ENABLE_REAL_TRADING = False
@@ -45,13 +46,10 @@ class PaperSessionResetTests(unittest.TestCase):
         config.IBKR_ENABLE_REAL_TRADING = self.original["IBKR_ENABLE_REAL_TRADING"]
         config.VIRTUAL_TRADING_CAPITAL_USD = self.original["VIRTUAL_TRADING_CAPITAL_USD"]
         database.VIRTUAL_TRADING_CAPITAL_USD = self.original["database_VIRTUAL_TRADING_CAPITAL_USD"]
-        try:
-            os.unlink(self.tmp.name)
-        except FileNotFoundError:
-            pass
+        self.tmpdir.cleanup()
 
     def insert_closed_position(self, symbol: str, pnl: float) -> None:
-        with sqlite3.connect(self.tmp.name) as db:
+        with closing(sqlite3.connect(self.db_path)) as db:
             db.execute(
                 """
                 INSERT INTO positions (
@@ -73,7 +71,7 @@ class PaperSessionResetTests(unittest.TestCase):
             db.commit()
 
     def insert_execution_and_equity(self) -> None:
-        with sqlite3.connect(self.tmp.name) as db:
+        with closing(sqlite3.connect(self.db_path)) as db:
             db.execute(
                 """
                 INSERT INTO execution_history (
