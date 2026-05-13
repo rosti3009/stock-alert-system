@@ -7,6 +7,8 @@ import aiosqlite
 
 import config
 import database
+from ibkr_asyncio_compat import ensure_event_loop
+from ibkr_client import IBKRClient
 from reconciliation_lifecycle import (
     init_reconciliation_lifecycle_db,
     reconcile_issue_lifecycle,
@@ -16,6 +18,8 @@ log = logging.getLogger(__name__)
 
 PAPER_TWS_PORT = 7497
 BASELINE_SOURCE = "TWS_BASELINE_ADOPTED"
+RECONCILIATION_CLIENT_ID_OFFSET = 450
+FLAT_RECONCILIATION_REASON = "Closed in TWS / reconciled flat"
 
 
 def now_iso() -> str:
@@ -217,6 +221,197 @@ def _require_paper_adoption_allowed() -> None:
 
     if str(config.TRADING_MODE or "").upper() == "LIVE":
         raise RuntimeError("TWS baseline adoption blocked: TRADING_MODE is LIVE")
+
+
+def _require_paper_reconciliation_allowed() -> None:
+    if not config.IBKR_PAPER_TRADING:
+        raise RuntimeError("TWS flat reconciliation blocked: IBKR_PAPER_TRADING is false")
+
+    if config.IBKR_ENABLE_REAL_TRADING:
+        raise RuntimeError("TWS flat reconciliation blocked: LIVE trading is enabled")
+
+    if int(config.IBKR_PORT) != PAPER_TWS_PORT:
+        raise RuntimeError(
+            f"TWS flat reconciliation blocked: IBKR port is not Paper port {PAPER_TWS_PORT}"
+        )
+
+    if str(config.TRADING_MODE or "").upper() == "LIVE":
+        raise RuntimeError("TWS flat reconciliation blocked: TRADING_MODE is LIVE")
+
+
+def _position_symbol(position) -> str:
+    contract = getattr(position, "contract", None)
+    symbol = getattr(contract, "symbol", None)
+
+    if symbol is None and isinstance(position, dict):
+        symbol = position.get("symbol")
+
+    return str(symbol or "").strip().upper()
+
+
+def _position_quantity(position) -> float:
+    if isinstance(position, dict):
+        return float(position.get("quantity", position.get("position", 0)) or 0)
+
+    return float(getattr(position, "position", 0) or 0)
+
+
+def _current_tws_positions_from_client(ibkr_client=None) -> dict[str, dict]:
+    ensure_event_loop()
+
+    client_created = ibkr_client is None
+    client = ibkr_client or IBKRClient(
+        client_id=int(config.IBKR_CLIENT_ID) + RECONCILIATION_CLIENT_ID_OFFSET
+    )
+    connected = False
+
+    try:
+        if hasattr(client, "is_connected") and client.is_connected():
+            connected = True
+        elif hasattr(client, "connect"):
+            connected = bool(client.connect())
+        else:
+            connected = True
+
+        if not connected:
+            raise RuntimeError(
+                "TWS flat reconciliation blocked: unable to connect to IBKR TWS Paper Trading"
+            )
+
+        positions: dict[str, dict] = {}
+
+        for position in list(client.get_positions()):
+            symbol = _position_symbol(position)
+
+            if not symbol:
+                continue
+
+            positions[symbol] = {
+                "symbol": symbol,
+                "quantity": _position_quantity(position),
+            }
+
+        return positions
+
+    finally:
+        if client_created and hasattr(client, "disconnect"):
+            client.disconnect()
+
+
+async def close_db_positions_flat_in_tws(
+    *,
+    dry_run: bool = False,
+    ibkr_client=None,
+) -> dict:
+    """Close local OPEN positions whose symbols are no longer long in TWS.
+
+    This is a DB-only reconciliation path for manual TWS sells. It only reads
+    TWS positions and updates local SQLite state; it never submits IBKR orders.
+    """
+    _require_paper_reconciliation_allowed()
+    await database.init_db()
+
+    tws_positions = _current_tws_positions_from_client(ibkr_client=ibkr_client)
+    tws_long_symbols = {
+        symbol
+        for symbol, position in tws_positions.items()
+        if float(position.get("quantity") or 0) > 0
+    }
+
+    closed_symbols: list[str] = []
+    skipped_symbols: list[str] = []
+    skipped_reasons: dict[str, str] = {}
+    close_payloads: list[dict] = []
+    remaining_issues: list[dict] = []
+    would_close_symbols: list[str] = []
+    db_open_before = 0
+
+    async with aiosqlite.connect(config.DB_PATH) as db:
+        await init_reconciliation_db()
+        await _ensure_position_source_column(db)
+        db_positions = await _load_db_positions(db)
+        db_open_before = len(db_positions)
+        now = now_iso()
+
+        for symbol in sorted(db_positions.keys()):
+            db_position = db_positions[symbol]
+            db_quantity = float(db_position.get("quantity") or 0)
+            tws_position = tws_positions.get(symbol)
+            tws_quantity = float((tws_position or {}).get("quantity") or 0)
+
+            if symbol in tws_long_symbols:
+                skipped_symbols.append(symbol)
+                skipped_reasons[symbol] = "TWS still reports a positive open position"
+                continue
+
+            issue = {
+                "symbol": symbol,
+                "issue_type": "DB_OPEN_TWS_FLAT",
+                "db_quantity": db_quantity,
+                "tws_quantity": tws_quantity,
+                "details": "Local DB position is OPEN but TWS has no positive quantity",
+            }
+            remaining_issues.append(issue)
+            would_close_symbols.append(symbol)
+
+            if dry_run:
+                continue
+
+            await db.execute(
+                """
+                UPDATE positions
+                SET status = 'CLOSED',
+                    action = 'RECONCILED_CLOSED',
+                    reason = ?,
+                    closed_at = ?,
+                    updated_at = ?
+                WHERE symbol = ?
+                  AND status = 'OPEN'
+                """,
+                (FLAT_RECONCILIATION_REASON, now, now, symbol),
+            )
+            closed_symbols.append(symbol)
+            close_payloads.append({
+                "symbol": symbol,
+                "quantity": db_quantity,
+                "tws_quantity": tws_quantity,
+                "status": "CLOSED",
+                "action": "RECONCILED_CLOSED",
+                "reason": FLAT_RECONCILIATION_REASON,
+                "closed_at": now,
+                "updated_at": now,
+            })
+
+        if not dry_run:
+            await db.commit()
+            remaining_issues = [
+                issue
+                for issue in remaining_issues
+                if issue["symbol"] not in set(closed_symbols)
+            ]
+
+    for payload in close_payloads:
+        await database.safe_record_trade_journal_event({
+            "symbol": payload["symbol"],
+            "event_type": "POSITION_RECONCILED_CLOSED",
+            "decision": "RECONCILED_CLOSED",
+            "reason": FLAT_RECONCILIATION_REASON,
+            "source_module": "reconciliation.close_db_positions_flat_in_tws",
+            "quantity": payload["quantity"],
+            "raw_payload": payload,
+        })
+
+    return {
+        "tws_positions_count": len(tws_positions),
+        "db_open_before": db_open_before,
+        "closed_count": len(closed_symbols),
+        "closed_symbols": closed_symbols,
+        "would_close_symbols": would_close_symbols,
+        "skipped_symbols": skipped_symbols,
+        "skipped_reasons": skipped_reasons,
+        "remaining_issues": remaining_issues,
+        "dry_run": bool(dry_run),
+    }
 
 
 async def _ensure_position_source_column(db: aiosqlite.Connection) -> None:
