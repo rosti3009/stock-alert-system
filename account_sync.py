@@ -9,6 +9,7 @@ import aiosqlite
 
 import config
 import database
+import execution_sync
 from circuit_breaker import record_ibkr_error
 
 log = logging.getLogger(__name__)
@@ -224,29 +225,10 @@ def fetch_account_snapshot_sync() -> dict:
                 }),
             })
 
-        execution_history = []
-
-        for item in executions:
-            exec_data = item.execution
-            contract = item.contract
-            execution_history.append({
-                "exec_id": safe_str(exec_data.execId),
-                "symbol": safe_str(contract.symbol).upper(),
-                "side": safe_str(exec_data.side).upper(),
-                "quantity": safe_float(exec_data.shares),
-                "price": safe_float(exec_data.price),
-                "order_id": safe_int(exec_data.orderId),
-                "perm_id": safe_int(exec_data.permId),
-                "account": safe_str(exec_data.acctNumber or account),
-                "exchange": safe_str(exec_data.exchange),
-                "time": safe_str(exec_data.time),
-                "commission": 0.0,
-                "realized_pnl": 0.0,
-                "raw_json": _json_payload({
-                    "execution": getattr(exec_data, "__dict__", {}),
-                    "contract": getattr(contract, "__dict__", {}),
-                }),
-            })
+        execution_history = execution_sync.normalize_execution_items(executions)
+        for row in execution_history:
+            if not row.get("account"):
+                row["account"] = safe_str(account)
 
         return {
             "connected": True,

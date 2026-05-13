@@ -195,6 +195,73 @@ class StartupRecoveryCircuitBreakerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+
+    def test_startup_recovery_account_sync_accepts_raw_execution_objects(self):
+        class FakeIB:
+            def __init__(self):
+                self.connected = False
+
+            def connect(self, *args, **kwargs):
+                self.connected = True
+
+            def isConnected(self):
+                return self.connected
+
+            def disconnect(self):
+                self.connected = False
+
+            def managedAccounts(self):
+                return ["DU1"]
+
+            def accountSummary(self):
+                return [
+                    SimpleNamespace(tag="BuyingPower", value="10000", currency="USD", account="DU1"),
+                    SimpleNamespace(tag="NetLiquidation", value="5000", currency="USD", account="DU1"),
+                ]
+
+            def reqAllOpenOrders(self):
+                return None
+
+            def sleep(self, seconds):
+                return None
+
+            def openTrades(self):
+                return []
+
+            def executions(self):
+                return [
+                    self_execution,
+                    SimpleNamespace(not_an_execution=True),
+                ]
+
+        self_execution = self._execution("RAW1")
+
+        async def fake_tws():
+            return {"connected": True, "positions": [], "orders": [], "account": "DU1", "error": None}
+
+        async def ok(*args, **kwargs):
+            return {"ok": True, "issues": [], "issues_count": 0}
+
+        async def scenario():
+            await reset_circuit_breaker()
+            with patch("ib_insync.IB", FakeIB), \
+                patch("startup_recovery.run_tws_mirror_once", fake_tws), \
+                patch("startup_recovery.execution_sync.sync_executions", ok), \
+                patch("startup_recovery.adopt_tws_positions_as_baseline", ok), \
+                patch("startup_recovery.close_db_positions_flat_in_tws", ok), \
+                patch("startup_recovery.run_reconciliation_once", ok):
+                status = await startup_recovery.run_startup_recovery()
+
+            self.assertTrue(status["ok"], status)
+            self.assertEqual(status["state"], "PASSED", status)
+            self.assertEqual(status["steps"][1]["name"], "sync_account_open_orders_executions", status)
+            self.assertEqual(status["steps"][1]["result"]["execution_history"][0]["exec_id"], "RAW1")
+            executions = await startup_recovery.account_sync.get_executions(symbol="")
+            self.assertEqual(len(executions), 1, executions)
+            self.assertEqual(executions[0]["exec_id"], "RAW1")
+
+        asyncio.run(scenario())
+
     def test_startup_recovery_passes_before_auto_trading_can_run(self):
         async def fake_tws():
             return {"connected": True, "positions": [], "orders": [], "account": "DU1", "error": None}
