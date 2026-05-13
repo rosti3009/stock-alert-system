@@ -33,11 +33,11 @@ class ExecutionQualityTests(unittest.TestCase):
         }
         config.DB_PATH = self.tmp.name
         database.DB_PATH = self.tmp.name
-        config.MAX_SPREAD_PERCENT = 1.0
-        config.MAX_SPREAD_DOLLARS = 0.25
+        config.MAX_SPREAD_PERCENT = 3.0
+        config.MAX_SPREAD_DOLLARS = 0.50
         config.MIN_RELATIVE_VOLUME = 0.75
         config.MIN_AVERAGE_VOLUME = 500000.0
-        config.MAX_SLIPPAGE_ESTIMATE = 1.0
+        config.MAX_SLIPPAGE_ESTIMATE = 2.0
         config.MAX_INTRADAY_VOLATILITY = 6.0
         config.MAX_CANDLE_EXPANSION_PERCENT = 250.0
         asyncio.run(database.init_db())
@@ -70,6 +70,95 @@ class ExecutionQualityTests(unittest.TestCase):
         self.assertTrue(result["allowed"])
         self.assertFalse(result["blocks_buy"])
         self.assertAlmostEqual(result["metrics"]["spread_percent"], 0.04, places=2)
+
+
+    def test_low_price_momentum_stock_uses_wider_slippage_tier(self):
+        with self.assertLogs(execution_quality.log, level="INFO") as captured:
+            result = execution_quality.evaluate_execution_quality(
+                row={
+                    "symbol": "MOMO",
+                    "avg_volume": 2_000_000,
+                    "volume_ratio": 2.4,
+                    "estimated_slippage_percent": 2.4,
+                },
+                quote={"symbol": "MOMO", "bid": 7.99, "ask": 8.01, "last": 8.00},
+                limit_price=8.0,
+            )
+
+        self.assertEqual(result["state"], "EXECUTION_SAFE")
+        self.assertTrue(result["allowed"])
+        self.assertEqual(result["metrics"]["slippage_price_tier"], "under_10")
+        self.assertEqual(result["metrics"]["max_slippage_estimate"], 2.5)
+        self.assertEqual(result["metrics"]["execution_decision"], "allow")
+        self.assertIn("estimated_slippage=2.4", captured.output[0])
+        self.assertIn("threshold=2.5", captured.output[0])
+        self.assertIn("price_tier=under_10", captured.output[0])
+        self.assertIn("decision=allow", captured.output[0])
+
+    def test_mid_price_stock_blocks_above_mid_slippage_tier(self):
+        result = execution_quality.evaluate_execution_quality(
+            row={
+                "symbol": "MID",
+                "avg_volume": 2_000_000,
+                "volume_ratio": 1.4,
+                "estimated_slippage_percent": 1.6,
+            },
+            quote={"symbol": "MID", "bid": 19.99, "ask": 20.01, "last": 20.00},
+            limit_price=20.0,
+        )
+
+        self.assertEqual(result["state"], "EXECUTION_BLOCK_BUY")
+        self.assertFalse(result["allowed"])
+        self.assertEqual(result["metrics"]["slippage_price_tier"], "10_to_50")
+        self.assertEqual(result["metrics"]["max_slippage_estimate"], 1.5)
+        self.assertEqual(result["metrics"]["execution_decision"], "block")
+        self.assertIn("extreme_slippage", result["block_categories"])
+
+    def test_high_price_stock_blocks_above_high_slippage_tier(self):
+        result = execution_quality.evaluate_execution_quality(
+            row={
+                "symbol": "HIGH",
+                "avg_volume": 2_000_000,
+                "volume_ratio": 1.3,
+                "estimated_slippage_percent": 1.01,
+            },
+            quote={"symbol": "HIGH", "bid": 99.99, "ask": 100.01, "last": 100.00},
+            limit_price=100.0,
+        )
+
+        self.assertEqual(result["state"], "EXECUTION_BLOCK_BUY")
+        self.assertEqual(result["metrics"]["slippage_price_tier"], "above_50")
+        self.assertEqual(result["metrics"]["max_slippage_estimate"], 1.0)
+        self.assertIn("extreme_slippage", result["block_categories"])
+
+    def test_slippage_threshold_boundary_allows_equal_and_blocks_above(self):
+        at_threshold = execution_quality.evaluate_execution_quality(
+            row={
+                "symbol": "BNDY",
+                "avg_volume": 2_000_000,
+                "volume_ratio": 1.3,
+                "estimated_slippage_percent": 1.5,
+            },
+            quote={"symbol": "BNDY", "bid": 24.99, "ask": 25.01, "last": 25.00},
+            limit_price=25.0,
+        )
+        above_threshold = execution_quality.evaluate_execution_quality(
+            row={
+                "symbol": "BNDY",
+                "avg_volume": 2_000_000,
+                "volume_ratio": 1.3,
+                "estimated_slippage_percent": 1.5001,
+            },
+            quote={"symbol": "BNDY", "bid": 24.99, "ask": 25.01, "last": 25.00},
+            limit_price=25.0,
+        )
+
+        self.assertEqual(at_threshold["state"], "EXECUTION_SAFE")
+        self.assertTrue(at_threshold["allowed"])
+        self.assertEqual(at_threshold["metrics"]["max_slippage_estimate"], 1.5)
+        self.assertEqual(above_threshold["state"], "EXECUTION_BLOCK_BUY")
+        self.assertFalse(above_threshold["allowed"])
+        self.assertIn("extreme_slippage", above_threshold["block_categories"])
 
     def test_blocks_buy_for_dangerous_spread(self):
         result = execution_quality.evaluate_execution_quality(
