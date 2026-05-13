@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from ibkr_asyncio_compat import ensure_event_loop
 
@@ -12,7 +10,11 @@ ensure_event_loop()
 from ib_insync import IB, Stock, LimitOrder
 from trade_protection import validate_buy_before_order
 from recovery_manager import require_buy_allowed
-from trading_safety import require_paper_auto_trading_allowed
+from trading_safety import (
+    get_market_hours_status,
+    require_market_hours_order_send_allowed,
+    require_paper_auto_trading_allowed,
+)
 
 import config
 import database
@@ -102,15 +104,7 @@ async def _journal_buy_decision(
 
 
 def is_us_regular_market_open() -> bool:
-    now = datetime.now(ZoneInfo("America/New_York"))
-
-    if now.weekday() >= 5:
-        return False
-
-    market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
-    market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
-
-    return market_open <= now <= market_close
+    return bool(get_market_hours_status().get("allowed"))
 
 
 def calculate_position_size(
@@ -205,6 +199,7 @@ def execute_limit_buy_sync(
     symbol = str(symbol).strip().upper()
     require_paper_auto_trading_allowed("AUTO BUY")
     require_buy_allowed("auto_trader")
+    require_market_hours_order_send_allowed("AUTO BUY")
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -428,11 +423,13 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
         log.warning("Real trading is disabled. PAPER_TRADING_ENABLED must stay True.")
         return
 
-    market_is_open = is_us_regular_market_open()
+    market_hours = get_market_hours_status()
+    market_is_open = bool(market_hours.get("allowed"))
 
     if not market_is_open:
         log.warning(
-            "AUTO BUY BLOCKED — US regular market is closed. SELL management remains active."
+            "AUTO BUY BLOCKED — %s. SELL management remains active.",
+            market_hours.get("reason"),
         )
 
     market = get_market_regime()
@@ -476,13 +473,15 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
 
         if signal == "BUY":
             if not market_is_open:
-                log.info("AUTO BUY skipped for %s — US market closed", symbol)
+                reason = market_hours.get("reason") or "US regular market is closed"
+                log.info("AUTO BUY skipped for %s — %s", symbol, reason)
                 await _journal_buy_decision(
                     row,
-                    "BUY_CANDIDATE_REJECTED",
-                    "REJECTED",
-                    "US market closed",
+                    "BUY_BLOCKED_BY_SAFETY_GATE",
+                    "BLOCKED",
+                    reason,
                     market,
+                    {"market_hours": market_hours},
                 )
                 continue
 

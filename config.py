@@ -189,6 +189,14 @@ TRADING_MODE = get_str("TRADING_MODE", "OFF").upper()
 AUTO_SEND_ORDERS = get_bool("AUTO_SEND_ORDERS", False)
 REQUIRE_MANUAL_CONFIRMATION = get_bool("REQUIRE_MANUAL_CONFIRMATION", True)
 
+# ==============================
+# MARKET HOURS GUARD
+# ==============================
+ENABLE_MARKET_HOURS_GUARD = get_bool("ENABLE_MARKET_HOURS_GUARD", True)
+MARKET_TIMEZONE = get_str("MARKET_TIMEZONE", "America/New_York")
+MARKET_OPEN_TIME = get_str("MARKET_OPEN_TIME", "09:30")
+MARKET_CLOSE_TIME = get_str("MARKET_CLOSE_TIME", "16:00")
+
 MAX_DAILY_LOSS_PERCENT = get_float(
     "MAX_DAILY_LOSS_PERCENT",
     5.0,
