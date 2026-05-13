@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import config
-from trading_safety import require_paper_auto_trading_allowed
+from trading_safety import get_market_hours_status, require_paper_auto_trading_allowed
 
 
 class TradingSafetyGateTests(unittest.TestCase):
@@ -14,6 +16,10 @@ class TradingSafetyGateTests(unittest.TestCase):
             "IBKR_PAPER_TRADING": config.IBKR_PAPER_TRADING,
             "IBKR_ENABLE_REAL_TRADING": config.IBKR_ENABLE_REAL_TRADING,
             "IBKR_PORT": config.IBKR_PORT,
+            "ENABLE_MARKET_HOURS_GUARD": config.ENABLE_MARKET_HOURS_GUARD,
+            "MARKET_TIMEZONE": config.MARKET_TIMEZONE,
+            "MARKET_OPEN_TIME": config.MARKET_OPEN_TIME,
+            "MARKET_CLOSE_TIME": config.MARKET_CLOSE_TIME,
         }
         config.TRADING_MODE = "PAPER"
         config.AUTO_SEND_ORDERS = True
@@ -52,6 +58,59 @@ class TradingSafetyGateTests(unittest.TestCase):
     def test_trading_mode_off_is_blocked(self):
         config.TRADING_MODE = "OFF"
         self.assert_blocked("TEST blocked: TRADING_MODE is OFF")
+
+    def test_market_hours_guard_allows_inside_regular_session(self):
+        config.ENABLE_MARKET_HOURS_GUARD = True
+        config.MARKET_TIMEZONE = "America/New_York"
+        config.MARKET_OPEN_TIME = "09:30"
+        config.MARKET_CLOSE_TIME = "16:00"
+
+        status = get_market_hours_status(
+            datetime(2026, 5, 13, 10, 0, tzinfo=ZoneInfo("America/New_York"))
+        )
+
+        self.assertTrue(status["allowed"])
+        self.assertEqual(status["reason"].split(" (")[0], "US regular market is open")
+
+    def test_market_hours_guard_blocks_before_open(self):
+        config.ENABLE_MARKET_HOURS_GUARD = True
+        config.MARKET_TIMEZONE = "America/New_York"
+        config.MARKET_OPEN_TIME = "09:30"
+        config.MARKET_CLOSE_TIME = "16:00"
+
+        status = get_market_hours_status(
+            datetime(2026, 5, 13, 9, 29, tzinfo=ZoneInfo("America/New_York"))
+        )
+
+        self.assertFalse(status["allowed"])
+        self.assertIn("not open yet", status["reason"])
+
+    def test_market_hours_guard_blocks_after_close(self):
+        config.ENABLE_MARKET_HOURS_GUARD = True
+        config.MARKET_TIMEZONE = "America/New_York"
+        config.MARKET_OPEN_TIME = "09:30"
+        config.MARKET_CLOSE_TIME = "16:00"
+
+        status = get_market_hours_status(
+            datetime(2026, 5, 13, 16, 1, tzinfo=ZoneInfo("America/New_York"))
+        )
+
+        self.assertFalse(status["allowed"])
+        self.assertIn("closed after regular session", status["reason"])
+
+    def test_market_hours_guard_blocks_weekend(self):
+        config.ENABLE_MARKET_HOURS_GUARD = True
+        config.MARKET_TIMEZONE = "America/New_York"
+        config.MARKET_OPEN_TIME = "09:30"
+        config.MARKET_CLOSE_TIME = "16:00"
+
+        status = get_market_hours_status(
+            datetime(2026, 5, 16, 10, 0, tzinfo=ZoneInfo("America/New_York"))
+        )
+
+        self.assertFalse(status["allowed"])
+        self.assertTrue(status["is_weekend"])
+        self.assertIn("weekends", status["reason"])
 
 
 if __name__ == "__main__":

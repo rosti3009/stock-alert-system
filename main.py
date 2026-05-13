@@ -24,6 +24,7 @@ import position_exit_priority_engine
 import sector_intelligence
 from execution_quality import evaluate_execution_quality, summarize_execution_quality
 from auto_trader import process_auto_trading
+from trading_safety import get_market_hours_status
 from market_regime_engine import get_cached_market_regime, get_market_regime_history, refresh_market_regime
 from market_regime import get_market_regime
 from data_fetcher import fetch_stock_data
@@ -1818,6 +1819,18 @@ async def api_trading_status():
     )
 
     blocked_reasons = []
+    market_hours = get_market_hours_status()
+
+    # ==========================================
+    # MARKET HOURS ORDER GUARD
+    # ==========================================
+
+    if not market_hours.get("allowed"):
+
+        blocked_reasons.append(
+            market_hours.get("reason")
+            or "US regular market is closed"
+        )
 
     # ==========================================
     # MANUAL KILL SWITCH
@@ -1944,6 +1957,14 @@ async def api_trading_status():
             "real_trading_enabled": config.IBKR_ENABLE_REAL_TRADING,
 
             "auto_trading_enabled": auto_trading_enabled,
+
+            "market_hours_guard_enabled": market_hours.get("enabled"),
+
+            "market_hours_allowed": market_hours.get("allowed"),
+
+            "market_hours_reason": market_hours.get("reason"),
+
+            "market_hours": market_hours,
 
             # ==========================================
             # MARKET REGIME
