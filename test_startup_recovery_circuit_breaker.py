@@ -10,11 +10,16 @@ from contextlib import closing
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from fastapi.testclient import TestClient
+
 import config
 import database
 import execution_sync
 import startup_recovery
 from circuit_breaker import (
+    IBKR_ERROR_COUNT_KEY,
+    IBKR_LAST_ERROR_KEY,
+    IBKR_THRESHOLD_STATE_KEY,
     get_circuit_breaker_state,
     record_ibkr_error,
     reset_circuit_breaker,
@@ -85,6 +90,67 @@ class StartupRecoveryCircuitBreakerTests(unittest.TestCase):
             self.assertIn("Repeated IBKR errors", state["reason"])
 
         asyncio.run(scenario())
+
+    def test_api_reset_clears_repeated_ibkr_error_state_and_allows_startup_recovery(self):
+        async def fake_tws():
+            return {"connected": True, "positions": [], "orders": [], "account": "DU1", "error": None}
+
+        async def fake_account():
+            return {
+                "connected": True,
+                "account": "DU1",
+                "account_summary": [
+                    {"tag": "BuyingPower", "value": "10000", "currency": "USD", "account": "DU1"},
+                    {"tag": "NetLiquidation", "value": "5000", "currency": "USD", "account": "DU1"},
+                ],
+                "equity": {"buying_power": 10000, "net_liquidation": 5000},
+                "error": None,
+            }
+
+        async def ok(*args, **kwargs):
+            return {"ok": True, "issues": [], "issues_count": 0}
+
+        async def seed_repeated_error_state():
+            await record_ibkr_error("first", source="test")
+            await record_ibkr_error("second", source="test")
+            state = await record_ibkr_error("third", source="test")
+            self.assertTrue(state["tripped"], state)
+            self.assertEqual(await database.get_app_state(IBKR_ERROR_COUNT_KEY), "3")
+            self.assertEqual(await database.get_app_state(IBKR_LAST_ERROR_KEY), "third")
+            threshold_state = await database.get_app_state(IBKR_THRESHOLD_STATE_KEY)
+            self.assertIsNotNone(threshold_state)
+            self.assertIn('"threshold_reached": true', threshold_state)
+
+        asyncio.run(seed_repeated_error_state())
+
+        from main import app
+
+        response = TestClient(app).post(
+            "/api/circuit-breaker/reset",
+            json={"reason": "Unit test reset"},
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()["tripped"], response.json())
+
+        async def verify_reset_and_startup_recovery():
+            self.assertIsNone(await database.get_app_state(IBKR_ERROR_COUNT_KEY))
+            self.assertIsNone(await database.get_app_state(IBKR_LAST_ERROR_KEY))
+            self.assertIsNone(await database.get_app_state(IBKR_THRESHOLD_STATE_KEY))
+
+            with patch("startup_recovery.run_tws_mirror_once", fake_tws), \
+                patch("startup_recovery.account_sync.run_account_sync_once", fake_account), \
+                patch("startup_recovery.execution_sync.sync_executions", ok), \
+                patch("startup_recovery.adopt_tws_positions_as_baseline", ok), \
+                patch("startup_recovery.close_db_positions_flat_in_tws", ok), \
+                patch("startup_recovery.run_reconciliation_once", ok):
+                status = await startup_recovery.run_startup_recovery()
+
+            self.assertTrue(status["ok"], status)
+            self.assertEqual(status["state"], "PASSED", status)
+            self.assertFalse((await get_circuit_breaker_state())["tripped"])
+            self.assertIsNone(await database.get_app_state(IBKR_ERROR_COUNT_KEY))
+
+        asyncio.run(verify_reset_and_startup_recovery())
 
     def _execution(self, exec_id="E1"):
         return SimpleNamespace(

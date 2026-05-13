@@ -10,6 +10,13 @@ import database
 
 CIRCUIT_BREAKER_STATE_KEY = "circuit_breaker_state"
 IBKR_ERROR_COUNT_KEY = "circuit_breaker_ibkr_error_count"
+IBKR_LAST_ERROR_KEY = "circuit_breaker_ibkr_last_error"
+IBKR_THRESHOLD_STATE_KEY = "circuit_breaker_ibkr_threshold_state"
+IBKR_ERROR_STATE_KEYS = (
+    IBKR_ERROR_COUNT_KEY,
+    IBKR_LAST_ERROR_KEY,
+    IBKR_THRESHOLD_STATE_KEY,
+)
 DEFAULT_MAX_IBKR_ERRORS = 3
 DEFAULT_MAX_DRAWDOWN_PERCENT = 20.0
 
@@ -68,7 +75,7 @@ async def get_circuit_breaker_state() -> dict:
 
 
 async def reset_circuit_breaker(reason: str = "Manual circuit breaker reset") -> dict:
-    await database.delete_app_states([CIRCUIT_BREAKER_STATE_KEY, IBKR_ERROR_COUNT_KEY])
+    await database.delete_app_states([CIRCUIT_BREAKER_STATE_KEY, *IBKR_ERROR_STATE_KEYS])
     await database.safe_record_trade_journal_event({
         "event_type": "CIRCUIT_BREAKER_RESET",
         "decision": "RESET",
@@ -85,18 +92,21 @@ async def record_ibkr_error(error: str, *, source: str = "ibkr") -> dict:
         count = int(raw or 0) + 1
     except Exception:
         count = 1
+    threshold_state = {"error_count": count, "max_errors": max_errors, "threshold_reached": count >= max_errors}
     await database.set_app_state(IBKR_ERROR_COUNT_KEY, str(count))
+    await database.set_app_state(IBKR_LAST_ERROR_KEY, str(error))
+    await database.set_app_state(IBKR_THRESHOLD_STATE_KEY, _json_payload(threshold_state))
     if count >= max_errors:
         return await trip_circuit_breaker(
             f"Repeated IBKR errors ({count}/{max_errors}): {error}",
             source=source,
-            details={"error_count": count, "max_errors": max_errors, "last_error": str(error)},
+            details={**threshold_state, "last_error": str(error)},
         )
     return await get_circuit_breaker_state()
 
 
 async def reset_ibkr_error_count() -> None:
-    await database.set_app_state(IBKR_ERROR_COUNT_KEY, "0")
+    await database.delete_app_states(IBKR_ERROR_STATE_KEYS)
 
 
 async def record_order_reject(reason: str, *, source: str = "order_lifecycle", details: dict | None = None) -> dict:
