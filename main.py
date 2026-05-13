@@ -31,6 +31,7 @@ from signal_logic import evaluate_signal
 from symbol_loader import load_nasdaq_symbols
 from telegram_notifier import send_buy_alert, send_sell_alert, send_position_alert
 from position_manager import evaluate_position
+from paper_liquidation import liquidate_all_paper_positions
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 log = logging.getLogger(__name__)
@@ -1026,6 +1027,34 @@ async def api_adopt_tws_positions():
 # ==========================================
 # ACCOUNT SYNC API
 # ==========================================
+
+@app.post("/api/paper/liquidate-all")
+async def api_paper_liquidate_all(
+    restart_auto_trading_after: bool = Body(False, embed=True),
+):
+    try:
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: liquidate_all_paper_positions(
+                restart_auto_trading_after=restart_auto_trading_after,
+            ),
+        )
+        return JSONResponse(
+            result,
+            headers=no_cache_headers(),
+        )
+
+    except RuntimeError as exc:
+        return JSONResponse(
+            {
+                "status": "blocked",
+                "reason": str(exc),
+            },
+            status_code=403,
+            headers=no_cache_headers(),
+        )
+
 
 @app.get("/api/account-summary")
 async def api_account_summary():

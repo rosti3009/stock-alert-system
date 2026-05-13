@@ -5,6 +5,10 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from ibkr_asyncio_compat import ensure_event_loop
+
+ensure_event_loop()
+
 from ib_insync import IB, Stock, LimitOrder
 from trade_protection import validate_buy_before_order
 from recovery_manager import require_buy_allowed
