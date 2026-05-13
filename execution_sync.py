@@ -43,6 +43,128 @@ def safe_str(v):
         return ""
 
 
+def safe_optional_float(v):
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except Exception:
+        return None
+
+
+def _get_value(obj, name, default=None):
+    if obj is None:
+        return default
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _raw_payload(obj):
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return obj
+    return getattr(obj, "__dict__", safe_str(obj))
+
+
+def _looks_like_execution(obj) -> bool:
+    return bool(_get_value(obj, "execId"))
+
+
+def _looks_like_commission_report(obj) -> bool:
+    if obj is None:
+        return False
+    return (
+        _get_value(obj, "commission") is not None
+        or _get_value(obj, "realizedPNL") is not None
+        or _get_value(obj, "realized_pnl") is not None
+    )
+
+
+def _looks_like_contract(obj) -> bool:
+    return bool(_get_value(obj, "symbol")) and not _looks_like_execution(obj)
+
+
+def _unpack_execution_item(item):
+    execution = _get_value(item, "execution")
+    contract = _get_value(item, "contract")
+    commission_report = _get_value(item, "commissionReport")
+
+    if execution is not None:
+        return execution, contract, commission_report
+
+    if _looks_like_execution(item):
+        return item, contract, commission_report
+
+    if isinstance(item, (tuple, list)):
+        for part in item:
+            if execution is None and _looks_like_execution(part):
+                execution = part
+            elif commission_report is None and _looks_like_commission_report(part):
+                commission_report = part
+            elif contract is None and _looks_like_contract(part):
+                contract = part
+        if execution is not None:
+            return execution, contract, commission_report
+
+    return None, contract, commission_report
+
+
+def normalize_execution_items(items) -> list[dict]:
+    rows = []
+    for index, item in enumerate(items or []):
+        try:
+            rows.append(normalize_execution_item(item))
+        except Exception as e:
+            log.warning(
+                "Skipping malformed IBKR execution row at index %s: %s | row=%s",
+                index,
+                e,
+                safe_str(item),
+            )
+    return rows
+
+
+def normalize_execution_item(item) -> dict:
+    exec_data, contract, commission_report = _unpack_execution_item(item)
+    if exec_data is None:
+        raise ValueError("missing execution data")
+
+    exec_id = safe_str(_get_value(exec_data, "execId"))
+    if not exec_id:
+        raise ValueError("missing execution execId")
+
+    commission = safe_optional_float(_get_value(commission_report, "commission"))
+    realized_pnl = safe_optional_float(
+        _get_value(commission_report, "realizedPNL", _get_value(commission_report, "realized_pnl"))
+    )
+
+    return {
+        "exec_id": exec_id,
+        "symbol": safe_str(_get_value(contract, "symbol")).upper(),
+        "side": safe_str(_get_value(exec_data, "side")).upper(),
+        "quantity": safe_float(_get_value(exec_data, "shares")),
+        "price": safe_float(_get_value(exec_data, "price")),
+        "order_id": safe_int(_get_value(exec_data, "orderId")),
+        "perm_id": safe_int(_get_value(exec_data, "permId")),
+        "account": safe_str(_get_value(exec_data, "acctNumber")),
+        "exchange": safe_str(_get_value(exec_data, "exchange")),
+        "time": safe_str(_get_value(exec_data, "time")),
+        "commission": commission,
+        "realized_pnl": realized_pnl,
+        "raw_json": json.dumps(
+            {
+                "execution": _raw_payload(exec_data),
+                "contract": _raw_payload(contract),
+                "commission_report": _raw_payload(commission_report),
+            },
+            default=str,
+            ensure_ascii=False,
+        ),
+    }
+
+
 def fetch_executions_sync():
 
     loop = asyncio.new_event_loop()
@@ -68,41 +190,7 @@ def fetch_executions_sync():
         fills = ib.fills()
         executions = fills or ib.executions()
 
-        rows = []
-
-        for item in executions:
-
-            exec_data = item.execution
-            contract = item.contract
-            commission_report = getattr(item, "commissionReport", None)
-
-            rows.append(
-                {
-                    "exec_id": safe_str(exec_data.execId),
-                    "symbol": safe_str(contract.symbol).upper(),
-                    "side": safe_str(exec_data.side).upper(),
-                    "quantity": safe_float(exec_data.shares),
-                    "price": safe_float(exec_data.price),
-                    "order_id": safe_int(exec_data.orderId),
-                    "perm_id": safe_int(exec_data.permId),
-                    "account": safe_str(exec_data.acctNumber),
-                    "exchange": safe_str(exec_data.exchange),
-                    "time": safe_str(exec_data.time),
-                    "commission": safe_float(getattr(commission_report, "commission", 0.0)),
-                    "realized_pnl": safe_float(getattr(commission_report, "realizedPNL", 0.0)),
-                    "raw_json": json.dumps(
-                        {
-                            "execution": exec_data.__dict__,
-                            "contract": contract.__dict__,
-                            "commission_report": getattr(commission_report, "__dict__", {}),
-                        },
-                        default=str,
-                        ensure_ascii=False,
-                    ),
-                }
-            )
-
-        return rows
+        return normalize_execution_items(executions)
 
     finally:
         try:
