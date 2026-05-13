@@ -7,7 +7,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, Body, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 import config
@@ -1030,14 +1030,21 @@ async def api_adopt_tws_positions():
 
 @app.post("/api/paper/liquidate-all")
 async def api_paper_liquidate_all(
+    request: Request,
     restart_auto_trading_after: bool = Body(False, embed=True),
+    dry_run: bool = Body(False, embed=True),
 ):
+    query_dry_run = request.query_params.get("dry_run")
+    if query_dry_run is not None:
+        dry_run = query_dry_run.strip().lower() in {"1", "true", "yes", "on"}
+
     try:
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None,
             lambda: liquidate_all_paper_positions(
                 restart_auto_trading_after=restart_auto_trading_after,
+                dry_run=dry_run,
             ),
         )
         return JSONResponse(

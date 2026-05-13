@@ -33,7 +33,10 @@ def _position_quantity(position: Any) -> float:
 
 
 def _trade_status(trade: Any) -> str:
-    return str(getattr(getattr(trade, "orderStatus", None), "status", "SUBMITTED") or "SUBMITTED")
+    return str(
+        getattr(getattr(trade, "orderStatus", None), "status", "SUBMITTED")
+        or "SUBMITTED"
+    )
 
 
 def _trade_order_id(trade: Any) -> int | None:
@@ -59,15 +62,17 @@ def _record_liquidation_attempt(
         "reason": reason,
         "order_id": order_id,
     }
-    database.safe_record_trade_journal_event_sync({
-        "symbol": symbol,
-        "event_type": "PAPER_LIQUIDATION_ATTEMPT",
-        "decision": status,
-        "reason": reason,
-        "source_module": "paper_liquidation",
-        "quantity": quantity,
-        "raw_payload": payload,
-    })
+    database.safe_record_trade_journal_event_sync(
+        {
+            "symbol": symbol,
+            "event_type": "PAPER_LIQUIDATION_ATTEMPT",
+            "decision": status,
+            "reason": reason,
+            "source_module": "paper_liquidation",
+            "quantity": quantity,
+            "raw_payload": payload,
+        }
+    )
     return payload
 
 
@@ -88,11 +93,14 @@ def _set_auto_trading_enabled_sync(enabled: bool) -> None:
 def liquidate_all_paper_positions(
     restart_auto_trading_after: bool = False,
     ibkr_client: Any | None = None,
+    dry_run: bool = False,
 ) -> dict:
     """
     Sell every current long TWS/IBKR paper position with a market order.
 
-    The shared paper-only safety gate runs before any TWS connection or order
+    When dry_run is true, return a preview of the current TWS positions that
+    would be sold without qualifying contracts or submitting IBKR orders. The
+    shared paper-only safety gate still runs before any TWS connection or order
     submission. Liquidation is blocked unless automated paper trading is enabled
     on the TWS paper port with live trading disabled.
     """
@@ -108,9 +116,14 @@ def liquidate_all_paper_positions(
         raise
 
     client_created = ibkr_client is None
-    client = ibkr_client or IBKRClient(client_id=int(config.IBKR_CLIENT_ID) + LIQUIDATION_CLIENT_ID_OFFSET)
+    client = ibkr_client or IBKRClient(
+        client_id=int(config.IBKR_CLIENT_ID) + LIQUIDATION_CLIENT_ID_OFFSET
+    )
     connected = False
     attempts: list[dict] = []
+    would_sell: list[dict] = []
+    skipped_positions: list[dict] = []
+    errors: list[dict] = []
 
     try:
         if hasattr(client, "is_connected") and client.is_connected():
@@ -121,46 +134,79 @@ def liquidate_all_paper_positions(
             connected = True
 
         if not connected:
-            raise RuntimeError("Paper liquidation blocked: unable to connect to IBKR TWS Paper Trading")
+            raise RuntimeError(
+                "Paper liquidation blocked: unable to connect to IBKR TWS Paper Trading"
+            )
 
         positions = list(client.get_positions())
-        long_positions = [position for position in positions if _position_quantity(position) > 0]
+        long_positions = []
 
-        for position in long_positions:
-            contract = position.contract
+        for position in positions:
+            contract = getattr(position, "contract", None)
             symbol = _contract_symbol(contract)
             quantity = _position_quantity(position)
-            order = MarketOrder("SELL", quantity, tif="DAY")
 
-            try:
-                if hasattr(client, "ib") and hasattr(client.ib, "qualifyContracts"):
-                    client.ib.qualifyContracts(contract)
-
-                trade = client.ib.placeOrder(contract, order)
-
-                if hasattr(client, "ib") and hasattr(client.ib, "sleep"):
-                    client.ib.sleep(1)
-
-                status = _trade_status(trade)
-                attempts.append(
-                    _record_liquidation_attempt(
-                        symbol=symbol,
-                        quantity=quantity,
-                        status=status,
-                        reason="Submitted SELL market order to TWS Paper Trading",
-                        order_id=_trade_order_id(trade),
-                    )
+            if quantity > 0:
+                long_positions.append(position)
+                would_sell.append(
+                    {
+                        "symbol": symbol,
+                        "quantity": quantity,
+                        "action": "SELL",
+                        "order_type": LIQUIDATION_ORDER_TYPE,
+                    }
+                )
+            else:
+                skipped_positions.append(
+                    {
+                        "symbol": symbol,
+                        "quantity": quantity,
+                        "reason": "Position is not long",
+                    }
                 )
 
-            except Exception as exc:
-                attempts.append(
-                    _record_liquidation_attempt(
-                        symbol=symbol,
-                        quantity=quantity,
-                        status="FAILED",
-                        reason=str(exc),
+        if not dry_run:
+            for position in long_positions:
+                contract = position.contract
+                symbol = _contract_symbol(contract)
+                quantity = _position_quantity(position)
+                order = MarketOrder("SELL", quantity, tif="DAY")
+
+                try:
+                    if hasattr(client, "ib") and hasattr(client.ib, "qualifyContracts"):
+                        client.ib.qualifyContracts(contract)
+
+                    trade = client.ib.placeOrder(contract, order)
+
+                    if hasattr(client, "ib") and hasattr(client.ib, "sleep"):
+                        client.ib.sleep(1)
+
+                    status = _trade_status(trade)
+                    attempts.append(
+                        _record_liquidation_attempt(
+                            symbol=symbol,
+                            quantity=quantity,
+                            status=status,
+                            reason="Submitted SELL market order to TWS Paper Trading",
+                            order_id=_trade_order_id(trade),
+                        )
                     )
-                )
+
+                except Exception as exc:
+                    error = {
+                        "symbol": symbol,
+                        "quantity": quantity,
+                        "reason": str(exc),
+                    }
+                    errors.append(error)
+                    attempts.append(
+                        _record_liquidation_attempt(
+                            symbol=symbol,
+                            quantity=quantity,
+                            status="FAILED",
+                            reason=str(exc),
+                        )
+                    )
 
         if restart_auto_trading_after:
             _set_auto_trading_enabled_sync(True)
@@ -171,8 +217,13 @@ def liquidate_all_paper_positions(
             "real_trading_enabled": False,
             "ibkr_port": int(config.IBKR_PORT),
             "restart_auto_trading_after": bool(restart_auto_trading_after),
+            "dry_run": bool(dry_run),
             "positions_seen": len(positions),
-            "long_positions_liquidated": len(long_positions),
+            "positions_found": len(positions),
+            "long_positions_liquidated": 0 if dry_run else len(long_positions),
+            "would_sell": would_sell,
+            "skipped_positions": skipped_positions,
+            "errors": errors,
             "attempts": attempts,
         }
 
