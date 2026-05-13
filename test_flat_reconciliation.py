@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -43,7 +44,7 @@ def make_tws_position(symbol: str, quantity: float):
 
 
 def fetch_position(db_path: str, symbol: str) -> dict | None:
-    with sqlite3.connect(db_path) as db:
+    with closing(sqlite3.connect(db_path)) as db:
         db.row_factory = sqlite3.Row
         row = db.execute(
             "SELECT * FROM positions WHERE symbol = ?",
@@ -54,8 +55,8 @@ def fetch_position(db_path: str, symbol: str) -> dict | None:
 
 class FlatTwsReconciliationTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.NamedTemporaryFile(delete=False)
-        self.tmp.close()
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self.tmpdir.name, "test.sqlite3")
         self.original = {
             "config_DB_PATH": config.DB_PATH,
             "database_DB_PATH": database.DB_PATH,
@@ -64,8 +65,8 @@ class FlatTwsReconciliationTests(unittest.TestCase):
             "IBKR_ENABLE_REAL_TRADING": config.IBKR_ENABLE_REAL_TRADING,
             "IBKR_PORT": config.IBKR_PORT,
         }
-        config.DB_PATH = self.tmp.name
-        database.DB_PATH = self.tmp.name
+        config.DB_PATH = self.db_path
+        database.DB_PATH = self.db_path
         config.TRADING_MODE = "PAPER"
         config.IBKR_PAPER_TRADING = True
         config.IBKR_ENABLE_REAL_TRADING = False
@@ -79,10 +80,7 @@ class FlatTwsReconciliationTests(unittest.TestCase):
         config.IBKR_PAPER_TRADING = self.original["IBKR_PAPER_TRADING"]
         config.IBKR_ENABLE_REAL_TRADING = self.original["IBKR_ENABLE_REAL_TRADING"]
         config.IBKR_PORT = self.original["IBKR_PORT"]
-        try:
-            os.unlink(self.tmp.name)
-        except FileNotFoundError:
-            pass
+        self.tmpdir.cleanup()
 
     def add_open_position(self, symbol: str, quantity: float = 2):
         return asyncio.run(database.add_position({
@@ -108,7 +106,7 @@ class FlatTwsReconciliationTests(unittest.TestCase):
         self.assertEqual(result["would_close_symbols"], ["AAPL"])
         self.assertEqual(result["remaining_issues"][0]["symbol"], "AAPL")
 
-        position = fetch_position(self.tmp.name, "AAPL")
+        position = fetch_position(self.db_path, "AAPL")
         self.assertEqual(position["status"], "OPEN")
         self.assertEqual(position["action"], "HOLD")
         journal = asyncio.run(database.get_trade_journal(limit=10, symbol="AAPL"))
@@ -128,7 +126,7 @@ class FlatTwsReconciliationTests(unittest.TestCase):
         self.assertEqual(result["closed_symbols"], ["MSFT"])
         self.assertEqual(result["remaining_issues"], [])
 
-        position = fetch_position(self.tmp.name, "MSFT")
+        position = fetch_position(self.db_path, "MSFT")
         self.assertEqual(position["status"], "CLOSED")
         self.assertEqual(position["action"], "RECONCILED_CLOSED")
         self.assertEqual(position["reason"], reconciliation.FLAT_RECONCILIATION_REASON)
@@ -155,7 +153,7 @@ class FlatTwsReconciliationTests(unittest.TestCase):
         self.assertEqual(result["skipped_symbols"], ["NVDA"])
         self.assertEqual(result["remaining_issues"], [])
 
-        position = fetch_position(self.tmp.name, "NVDA")
+        position = fetch_position(self.db_path, "NVDA")
         self.assertEqual(position["status"], "OPEN")
         self.assertEqual(position["action"], "HOLD")
         self.assertEqual(client.ib.orders, [])
@@ -201,7 +199,7 @@ class FlatTwsReconciliationTests(unittest.TestCase):
         self.assertFalse(client.loop_running)
         self.assertEqual(client.ib.orders, [])
 
-        position = fetch_position(self.tmp.name, "AMD")
+        position = fetch_position(self.db_path, "AMD")
         self.assertEqual(position["status"], "OPEN")
 
     def test_live_trading_blocks_endpoint(self):
@@ -223,7 +221,7 @@ class FlatTwsReconciliationTests(unittest.TestCase):
         self.assertEqual(payload["closed_count"], 0)
         self.assertEqual(payload["dry_run"], True)
 
-        position = fetch_position(self.tmp.name, "TSLA")
+        position = fetch_position(self.db_path, "TSLA")
         self.assertEqual(position["status"], "OPEN")
 
 
