@@ -10,6 +10,7 @@ from typing import Any
 import config
 import database
 import portfolio_risk_engine
+import sector_intelligence
 from execution_quality import evaluate_execution_quality, summarize_execution_quality
 from market_regime_engine import get_cached_market_regime
 
@@ -263,7 +264,8 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
         concentration_adjustment = min(concentration_adjustment, 0.5)
         reductions.append(f"Open risk elevated: {total_open_risk_percent:.2f}%")
 
-    sector = _sector_for_symbol(symbol)
+    classification = sector_intelligence.classify_symbol(symbol)
+    sector = str(classification.get("sector") or _sector_for_symbol(symbol))
     current_sector_exposure = _sector_exposure_percent(portfolio_risk, sector)
     current_symbol_exposure = _symbol_exposure_percent(portfolio_risk, symbol)
     prospective_by_risk = max_risk_per_trade / risk_per_share * price if risk_per_share > 0 else 0.0
@@ -328,6 +330,7 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
     return {
         "symbol": symbol,
         "checked_at": now_iso(),
+        "sector_intelligence": classification,
         "state": state.value,
         "allowed": not blocks_buy,
         "blocks_buy": blocks_buy,
@@ -373,6 +376,9 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
             "relative_volume": round(relative_volume, 4) if relative_volume is not None else None,
             "spread_percent": round(spread_percent, 4) if spread_percent is not None else None,
             "sector": sector,
+            "industry": classification.get("industry"),
+            "theme": classification.get("theme"),
+            "correlation_cluster": classification.get("correlation_cluster"),
             "current_sector_exposure_percent": round(current_sector_exposure, 4),
             "current_symbol_exposure_percent": round(current_symbol_exposure, 4),
             "available_capital": round(available, 2),

@@ -19,6 +19,7 @@ import order_lifecycle
 import portfolio_risk_engine
 import position_sizing_engine
 import position_exit_priority_engine
+import sector_intelligence
 from execution_quality import evaluate_execution_quality, summarize_execution_quality
 from auto_trader import process_auto_trading
 from market_regime_engine import get_cached_market_regime, get_market_regime_history, refresh_market_regime
@@ -1056,6 +1057,22 @@ async def api_executions(limit: int = 200, symbol: str | None = None):
 async def api_portfolio_risk():
     return JSONResponse(
         await portfolio_risk_engine.get_portfolio_risk(),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/sector-intelligence")
+async def api_sector_intelligence():
+    return JSONResponse(
+        await sector_intelligence.get_sector_intelligence(),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/sector-intelligence/{symbol}")
+async def api_sector_intelligence_symbol(symbol: str):
+    return JSONResponse(
+        await sector_intelligence.get_symbol_intelligence(symbol),
         headers=no_cache_headers(),
     )
 

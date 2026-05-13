@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 import config
 import database
+import sector_intelligence
 from data_fetcher import fetch_stock_data
 from indicators import compute_indicators
 
@@ -234,12 +235,17 @@ def _risk_concentration(positions: list[dict]) -> dict:
     else:
         state = "NORMAL"
 
+    sector_summary = sector_intelligence.build_portfolio_summary(positions or [], account_equity)
+
     return {
         "state": state,
         "total_exposure_percent": total_percent,
         "largest_symbol": largest_symbol[0],
         "largest_symbol_exposure_percent": largest_percent,
         "positions_count": len(exposures),
+        "diversification_score": sector_summary["diversification_score"],
+        "top_correlated_groups": sector_summary["top_correlated_groups"],
+        "sector_concentration_percent": sector_summary["concentration_percent"],
     }
 
 
