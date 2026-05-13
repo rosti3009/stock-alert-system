@@ -328,6 +328,114 @@ class StartupRecoveryCircuitBreakerTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def _no_reconciliation_issues(self):
+        return {
+            "ok": True,
+            "issues_count": 0,
+            "open_count": 0,
+            "issues": [],
+            "counters": {},
+            "checked_at": "2026-05-13T00:00:00+00:00",
+        }
+
+    def test_auto_trading_enable_blocked_if_startup_recovery_failed(self):
+        from main import app
+
+        async def no_issues():
+            return self._no_reconciliation_issues()
+
+        with patch("main.reconciliation_lifecycle.get_reconciliation_status", no_issues):
+            response = TestClient(app).post("/api/auto-trading/enable")
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 403, payload)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertFalse(payload["auto_trading_enabled"])
+        self.assertIn("Startup recovery", payload["reason"])
+
+    def test_auto_trading_enable_blocked_if_circuit_breaker_tripped(self):
+        from main import app
+
+        async def no_issues():
+            return self._no_reconciliation_issues()
+
+        async def seed_safe_startup_and_tripped_circuit():
+            await startup_recovery.save_startup_recovery_status({
+                "ok": True,
+                "state": "PASSED",
+                "reason": None,
+                "steps": [],
+                "checked_at": "2026-05-13T00:00:00+00:00",
+            })
+            await validate_buying_power(-1, source="test")
+
+        asyncio.run(seed_safe_startup_and_tripped_circuit())
+
+        with patch("main.reconciliation_lifecycle.get_reconciliation_status", no_issues):
+            response = TestClient(app).post("/api/auto-trading/enable")
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 403, payload)
+        self.assertEqual(payload["status"], "blocked")
+        self.assertFalse(payload["auto_trading_enabled"])
+        self.assertIn("Circuit breaker tripped", payload["reason"])
+
+    def test_auto_trading_enable_succeeds_when_safe(self):
+        from main import app
+
+        async def no_issues():
+            return self._no_reconciliation_issues()
+
+        async def seed_safe_startup():
+            await reset_circuit_breaker()
+            await startup_recovery.save_startup_recovery_status({
+                "ok": True,
+                "state": "PASSED",
+                "reason": None,
+                "steps": [],
+                "checked_at": "2026-05-13T00:00:00+00:00",
+            })
+            await database.set_app_state("auto_trading_enabled", "false")
+
+        asyncio.run(seed_safe_startup())
+
+        with patch("main.reconciliation_lifecycle.get_reconciliation_status", no_issues):
+            response = TestClient(app).post("/api/auto-trading/enable")
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 200, payload)
+        self.assertEqual(payload["status"], "enabled")
+        self.assertTrue(payload["auto_trading_enabled"])
+        self.assertIn("market_hours", payload)
+        self.assertEqual(asyncio.run(database.get_app_state("auto_trading_enabled")), "true")
+        self.assertEqual(
+            asyncio.run(database.get_app_state("auto_trading_state_source")),
+            "api_auto_trading_enable",
+        )
+
+    def test_auto_trading_disable_succeeds(self):
+        from main import app
+
+        asyncio.run(database.set_app_state("auto_trading_enabled", "true"))
+
+        response = TestClient(app).post("/api/auto-trading/disable")
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 200, payload)
+        self.assertEqual(payload["status"], "disabled")
+        self.assertFalse(payload["auto_trading_enabled"])
+        self.assertEqual(payload["orders_cancelled"], 0)
+        self.assertEqual(asyncio.run(database.get_app_state("auto_trading_enabled")), "false")
+        self.assertEqual(
+            asyncio.run(database.get_app_state("auto_trading_state_source")),
+            "api_auto_trading_disable",
+        )
+        self.assertIn(
+            "not cancelled",
+            asyncio.run(database.get_app_state("auto_trading_state_reason")),
+        )
+
+
     def test_startup_recovery_passes_before_auto_trading_can_run(self):
         async def fake_tws():
             return {"connected": True, "positions": [], "orders": [], "account": "DU1", "error": None}
