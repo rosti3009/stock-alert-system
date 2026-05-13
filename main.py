@@ -31,6 +31,7 @@ from signal_logic import evaluate_signal
 from symbol_loader import load_nasdaq_symbols
 from telegram_notifier import send_buy_alert, send_sell_alert, send_position_alert
 from position_manager import evaluate_position
+from ibkr_asyncio_compat import ensure_event_loop
 from paper_liquidation import liquidate_all_paper_positions
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
@@ -53,6 +54,18 @@ def no_cache_headers() -> dict:
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _run_paper_liquidation_worker(
+    *,
+    restart_auto_trading_after: bool,
+    dry_run: bool,
+) -> dict:
+    ensure_event_loop()
+    return liquidate_all_paper_positions(
+        restart_auto_trading_after=restart_auto_trading_after,
+        dry_run=dry_run,
+    )
 
 
 def parse_dt(value: str | None) -> datetime | None:
@@ -1042,7 +1055,7 @@ async def api_paper_liquidate_all(
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None,
-            lambda: liquidate_all_paper_positions(
+            lambda: _run_paper_liquidation_worker(
                 restart_auto_trading_after=restart_auto_trading_after,
                 dry_run=dry_run,
             ),

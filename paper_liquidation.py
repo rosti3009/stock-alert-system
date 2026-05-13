@@ -115,6 +115,8 @@ def liquidate_all_paper_positions(
         )
         raise
 
+    ensure_event_loop()
+
     client_created = ibkr_client is None
     client = ibkr_client or IBKRClient(
         client_id=int(config.IBKR_CLIENT_ID) + LIQUIDATION_CLIENT_ID_OFFSET

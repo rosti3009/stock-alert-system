@@ -20,6 +20,7 @@ class IBKRClient:
         self.host = host or config.IBKR_HOST
         self.port = port or config.IBKR_PORT
         self.client_id = client_id or config.IBKR_CLIENT_ID
+        ensure_event_loop()
         self.ib = IB()
 
     def connect(self):
