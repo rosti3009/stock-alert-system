@@ -5,8 +5,10 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import config
 import database
@@ -157,6 +159,50 @@ class FlatTwsReconciliationTests(unittest.TestCase):
         self.assertEqual(position["status"], "OPEN")
         self.assertEqual(position["action"], "HOLD")
         self.assertEqual(client.ib.orders, [])
+
+    def test_endpoint_runs_tws_reconciliation_in_worker_thread(self):
+        import main
+
+        self.add_open_position("AMD", 5)
+        request_thread_id = threading.get_ident()
+
+        class ThreadCheckingClient(FakeClient):
+            def __init__(self):
+                super().__init__([])
+                self.connect_thread_id = None
+                self.loop_available = False
+                self.loop_running = True
+
+            def connect(self):
+                self.connect_thread_id = threading.get_ident()
+                loop = asyncio.get_event_loop()
+                self.loop_available = loop is not None
+                self.loop_running = loop.is_running()
+                return super().connect()
+
+        client = ThreadCheckingClient()
+        request = SimpleNamespace(query_params={"dry_run": "true"})
+
+        with patch.object(reconciliation, "IBKRClient", return_value=client):
+            response = asyncio.run(main.api_close_db_positions_flat_in_tws(
+                request=request,
+                dry_run=False,
+            ))
+
+        payload = json.loads(response.body)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["dry_run"], True)
+        self.assertEqual(payload["closed_count"], 0)
+        self.assertEqual(payload["would_close_symbols"], ["AMD"])
+        self.assertIsNotNone(client.connect_thread_id)
+        self.assertNotEqual(client.connect_thread_id, request_thread_id)
+        self.assertTrue(client.loop_available)
+        self.assertFalse(client.loop_running)
+        self.assertEqual(client.ib.orders, [])
+
+        position = fetch_position(self.tmp.name, "AMD")
+        self.assertEqual(position["status"], "OPEN")
 
     def test_live_trading_blocks_endpoint(self):
         import main
