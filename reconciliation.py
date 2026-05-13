@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -311,7 +312,10 @@ async def close_db_positions_flat_in_tws(
     _require_paper_reconciliation_allowed()
     await database.init_db()
 
-    tws_positions = _current_tws_positions_from_client(ibkr_client=ibkr_client)
+    tws_positions = await asyncio.to_thread(
+        _current_tws_positions_from_client,
+        ibkr_client=ibkr_client,
+    )
     tws_long_symbols = {
         symbol
         for symbol, position in tws_positions.items()
@@ -412,6 +416,34 @@ async def close_db_positions_flat_in_tws(
         "remaining_issues": remaining_issues,
         "dry_run": bool(dry_run),
     }
+
+
+def close_db_positions_flat_in_tws_worker(
+    *,
+    dry_run: bool = False,
+    ibkr_client=None,
+) -> dict:
+    """Run flat TWS reconciliation from a synchronous worker thread.
+
+    FastAPI handlers use this wrapper so ib_insync synchronous APIs never run
+    on the already-running request event loop. The worker thread installs a
+    default event loop for ib_insync compatibility before driving the async DB
+    portion of the reconciliation. The TWS read itself is still isolated with
+    ``asyncio.to_thread`` inside ``close_db_positions_flat_in_tws`` so sync IBKR
+    calls do not execute while that worker loop is running.
+    """
+    loop = ensure_event_loop()
+    if loop.is_running():
+        raise RuntimeError(
+            "TWS flat reconciliation worker must not run inside an active event loop"
+        )
+
+    return loop.run_until_complete(
+        close_db_positions_flat_in_tws(
+            dry_run=dry_run,
+            ibkr_client=ibkr_client,
+        )
+    )
 
 
 async def _ensure_position_source_column(db: aiosqlite.Connection) -> None:

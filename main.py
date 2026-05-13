@@ -68,6 +68,13 @@ def _run_paper_liquidation_worker(
     )
 
 
+def _run_flat_tws_reconciliation_worker(*, dry_run: bool) -> dict:
+    from reconciliation import close_db_positions_flat_in_tws_worker
+
+    ensure_event_loop()
+    return close_db_positions_flat_in_tws_worker(dry_run=dry_run)
+
+
 def parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -1046,10 +1053,12 @@ async def api_close_db_positions_flat_in_tws(
     if query_dry_run is not None:
         dry_run = query_dry_run.strip().lower() in {"1", "true", "yes", "on"}
 
-    from reconciliation import close_db_positions_flat_in_tws
-
     try:
-        result = await close_db_positions_flat_in_tws(dry_run=dry_run)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: _run_flat_tws_reconciliation_worker(dry_run=dry_run),
+        )
         return JSONResponse(
             result,
             headers=no_cache_headers(),
