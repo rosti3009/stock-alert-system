@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -192,6 +193,8 @@ class PaperLiquidationTests(unittest.TestCase):
         def fake_liquidation(*, restart_auto_trading_after=False, dry_run=False):
             captured["restart_auto_trading_after"] = restart_auto_trading_after
             captured["dry_run"] = dry_run
+            captured["thread_name"] = threading.current_thread().name
+            captured["event_loop"] = asyncio.get_event_loop()
             return {
                 "status": "completed",
                 "dry_run": dry_run,
@@ -219,6 +222,8 @@ class PaperLiquidationTests(unittest.TestCase):
         payload = json.loads(response.body)
         self.assertEqual(response.status_code, 200)
         self.assertIs(captured["dry_run"], True)
+        self.assertNotEqual(captured["thread_name"], threading.main_thread().name)
+        self.assertFalse(captured["event_loop"].is_closed())
         self.assertIs(payload["dry_run"], True)
         self.assertEqual(payload["positions_found"], 0)
         self.assertEqual(payload["would_sell"], [])
