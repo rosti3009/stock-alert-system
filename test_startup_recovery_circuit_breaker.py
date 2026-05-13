@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from contextlib import closing
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import config
@@ -84,6 +85,52 @@ class StartupRecoveryCircuitBreakerTests(unittest.TestCase):
             self.assertIn("Repeated IBKR errors", state["reason"])
 
         asyncio.run(scenario())
+
+    def _execution(self, exec_id="E1"):
+        return SimpleNamespace(
+            execId=exec_id,
+            side="BOT",
+            shares=5,
+            price=100.25,
+            orderId=1,
+            permId=10,
+            acctNumber="DU1",
+            exchange="NYSE",
+            time="2026-05-13T00:00:00+00:00",
+        )
+
+    def test_normalize_raw_execution_without_execution_attribute(self):
+        row = execution_sync.normalize_execution_item(self._execution())
+
+        self.assertEqual(row["exec_id"], "E1")
+        self.assertEqual(row["side"], "BOT")
+        self.assertEqual(row["quantity"], 5.0)
+        self.assertEqual(row["price"], 100.25)
+        self.assertEqual(row["commission"], None)
+        self.assertEqual(row["realized_pnl"], None)
+
+    def test_normalize_fill_like_execution_with_commission_report(self):
+        fill = SimpleNamespace(
+            execution=self._execution("E2"),
+            contract=SimpleNamespace(symbol="aapl"),
+            commissionReport=SimpleNamespace(commission=1.23, realizedPNL=4.56),
+        )
+
+        row = execution_sync.normalize_execution_item(fill)
+
+        self.assertEqual(row["exec_id"], "E2")
+        self.assertEqual(row["symbol"], "AAPL")
+        self.assertEqual(row["commission"], 1.23)
+        self.assertEqual(row["realized_pnl"], 4.56)
+
+    def test_normalize_execution_items_skips_malformed_rows(self):
+        rows = execution_sync.normalize_execution_items([
+            SimpleNamespace(not_an_execution=True),
+            self._execution("E3"),
+        ])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["exec_id"], "E3")
 
     def test_execution_sync_dedupes_execution_ids_and_preserves_commission(self):
         rows = [
