@@ -7,7 +7,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 import aiosqlite
 
-from config import DB_PATH, ACCOUNT_BALANCE
+from config import DB_PATH, ACCOUNT_BALANCE, VIRTUAL_TRADING_CAPITAL_USD
 
 log = logging.getLogger(__name__)
 
@@ -236,6 +236,14 @@ CREATE TABLE IF NOT EXISTS app_state (
     value TEXT
 )
 """
+
+PAPER_SESSION_STATE_KEY = "paper_trading_active_session"
+RESETTABLE_SESSION_STATE_KEYS = {
+    "portfolio_risk_state",
+    "portfolio_risk_latest",
+    "scan_offset",
+}
+
 
 CREATE_ORDER_LIFECYCLE_EVENTS = """
 CREATE TABLE IF NOT EXISTS order_lifecycle_events (
@@ -497,6 +505,22 @@ async def set_app_state(key: str, value: str) -> None:
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(sql, (key, value))
+        await db.commit()
+
+
+async def delete_app_state(key: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM app_state WHERE key = ?", (key,))
+        await db.commit()
+
+
+async def delete_app_states(keys: list[str] | set[str] | tuple[str, ...]) -> None:
+    if not keys:
+        return
+
+    placeholders = ",".join("?" for _ in keys)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(f"DELETE FROM app_state WHERE key IN ({placeholders})", tuple(keys))
         await db.commit()
 
 
@@ -1004,7 +1028,7 @@ async def get_performance_summary() -> dict:
     }
 
 
-async def get_realized_pnl() -> float:
+async def get_total_realized_pnl() -> float:
     query = """
     SELECT SUM(profit_amount) as realized_pnl
     FROM positions
@@ -1016,6 +1040,162 @@ async def get_realized_pnl() -> float:
         row = await cursor.fetchone()
 
     return float(row[0] or 0)
+
+
+def _paper_session_payload(
+    *,
+    session_id: str,
+    started_at: str,
+    realized_pnl_baseline: float,
+    daily_realized_pnl_baseline: float,
+    equity_curve_start_id: int | None,
+    equity_curve_start_timestamp: str | None,
+    session_start_equity: float,
+) -> dict:
+    return {
+        "session_id": session_id,
+        "started_at": started_at,
+        "session_start_equity": round(float(session_start_equity or 0), 2),
+        "realized_pnl_baseline": round(float(realized_pnl_baseline or 0), 2),
+        "daily_realized_pnl_baseline": round(float(daily_realized_pnl_baseline or 0), 2),
+        "equity_curve_start_id": equity_curve_start_id,
+        "equity_curve_start_timestamp": equity_curve_start_timestamp,
+        "active": True,
+    }
+
+
+async def get_latest_equity_curve_checkpoint() -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_EQUITY_CURVE)
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT id, timestamp, net_liquidation
+            FROM equity_curve
+            ORDER BY timestamp DESC, id DESC
+            LIMIT 1
+            """
+        ) as cursor:
+            row = await cursor.fetchone()
+
+    return dict(row) if row else None
+
+
+async def get_daily_realized_pnl_total() -> float:
+    start = datetime.combine(datetime.now(timezone.utc).date(), datetime.min.time(), tzinfo=timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_EXECUTION_HISTORY)
+        async with db.execute(
+            """
+            SELECT SUM(realized_pnl)
+            FROM execution_history
+            WHERE COALESCE(time, created_at) >= ?
+            """,
+            (start,),
+        ) as cursor:
+            row = await cursor.fetchone()
+    return float(row[0] or 0)
+
+
+async def get_active_paper_session(create_if_missing: bool = True) -> dict | None:
+    raw = await get_app_state(PAPER_SESSION_STATE_KEY)
+    if raw:
+        try:
+            session = json.loads(raw)
+            if isinstance(session, dict):
+                session.setdefault("active", True)
+                session.setdefault("session_start_equity", float(VIRTUAL_TRADING_CAPITAL_USD))
+                session.setdefault("realized_pnl_baseline", 0.0)
+                session.setdefault("daily_realized_pnl_baseline", 0.0)
+                return session
+        except Exception:
+            log.warning("Invalid paper session state; creating a fresh baseline")
+
+    if not create_if_missing:
+        return None
+
+    started_at = now_iso()
+    session = _paper_session_payload(
+        session_id=started_at,
+        started_at=started_at,
+        realized_pnl_baseline=0.0,
+        daily_realized_pnl_baseline=0.0,
+        equity_curve_start_id=0,
+        equity_curve_start_timestamp=None,
+        session_start_equity=float(VIRTUAL_TRADING_CAPITAL_USD),
+    )
+    await set_app_state(PAPER_SESSION_STATE_KEY, json.dumps(session, ensure_ascii=False, default=str))
+    return session
+
+
+async def reset_active_paper_session() -> dict:
+    open_count = await count_open_positions()
+    if open_count > 0:
+        return {
+            "status": "blocked",
+            "reason": "Cannot reset paper trading session while positions are open.",
+            "open_positions": open_count,
+        }
+
+    started_at = now_iso()
+    checkpoint = await get_latest_equity_curve_checkpoint()
+    realized_baseline = await get_total_realized_pnl()
+    daily_baseline = await get_daily_realized_pnl_total()
+    start_equity = float(VIRTUAL_TRADING_CAPITAL_USD) + float(realized_baseline)
+    if checkpoint and checkpoint.get("net_liquidation") is not None:
+        try:
+            start_equity = float(checkpoint.get("net_liquidation"))
+        except Exception:
+            pass
+
+    previous_session = await get_active_paper_session(create_if_missing=False)
+    session = _paper_session_payload(
+        session_id=started_at,
+        started_at=started_at,
+        realized_pnl_baseline=realized_baseline,
+        daily_realized_pnl_baseline=daily_baseline,
+        equity_curve_start_id=checkpoint.get("id") if checkpoint else None,
+        equity_curve_start_timestamp=checkpoint.get("timestamp") if checkpoint else None,
+        session_start_equity=start_equity,
+    )
+
+    await set_app_state(PAPER_SESSION_STATE_KEY, json.dumps(session, ensure_ascii=False, default=str))
+    await delete_app_states(RESETTABLE_SESSION_STATE_KEYS)
+
+    await safe_record_trade_journal_event({
+        "event_type": "PAPER_SESSION_RESET",
+        "decision": "RESET",
+        "reason": "Started a fresh paper trading session after all positions were flat.",
+        "source_module": "database.reset_active_paper_session",
+        "realized_pnl": 0.0,
+        "raw_payload": {
+            "session": session,
+            "previous_session": previous_session,
+            "preserved_history": [
+                "closed_positions",
+                "trade_journal",
+                "execution_history",
+                "equity_curve",
+                "scan_runs",
+            ],
+        },
+    })
+
+    return {
+        "status": "reset",
+        "open_positions": open_count,
+        "session": session,
+        "previous_session": previous_session,
+        "preserved_history": True,
+        "orders_submitted": 0,
+    }
+
+
+async def get_realized_pnl() -> float:
+    total = await get_total_realized_pnl()
+    session = await get_active_paper_session()
+    baseline = float((session or {}).get("realized_pnl_baseline") or 0)
+    return float(total) - baseline
 
 
 async def get_equity_curve(start_balance: float | None = None) -> list[dict]:

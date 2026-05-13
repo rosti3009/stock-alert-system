@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, time, timezone
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
-import aiosqlite
 
 import account_sync
 import config
@@ -331,19 +330,10 @@ def evaluate_risk_snapshot(
 
 
 async def get_daily_realized_pnl() -> float:
-    start = datetime.combine(datetime.now(timezone.utc).date(), time.min, tzinfo=timezone.utc).isoformat()
-    async with aiosqlite.connect(config.DB_PATH) as db:
-        await db.execute(account_sync.CREATE_EXECUTION_HISTORY)
-        async with db.execute(
-            """
-            SELECT SUM(realized_pnl)
-            FROM execution_history
-            WHERE COALESCE(time, created_at) >= ?
-            """,
-            (start,),
-        ) as cursor:
-            row = await cursor.fetchone()
-    return safe_float(row[0] if row else 0.0)
+    total = await database.get_daily_realized_pnl_total()
+    session = await database.get_active_paper_session()
+    baseline = safe_float((session or {}).get("daily_realized_pnl_baseline"))
+    return total - baseline
 
 
 async def _record_state_events(snapshot: dict) -> None:

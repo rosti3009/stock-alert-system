@@ -75,6 +75,22 @@ def _run_flat_tws_reconciliation_worker(*, dry_run: bool) -> dict:
     return close_db_positions_flat_in_tws_worker(dry_run=dry_run)
 
 
+def _require_paper_session_reset_allowed() -> None:
+    if str(getattr(config, "TRADING_MODE", "")).upper() != "PAPER":
+        raise RuntimeError("Paper session reset blocked: TRADING_MODE is not PAPER")
+
+    if not bool(getattr(config, "IBKR_PAPER_TRADING", False)):
+        raise RuntimeError("Paper session reset blocked: IBKR_PAPER_TRADING is false")
+
+    if bool(getattr(config, "IBKR_ENABLE_REAL_TRADING", False)):
+        raise RuntimeError("Paper session reset blocked: LIVE trading is enabled")
+
+
+async def _reset_paper_session() -> dict:
+    _require_paper_session_reset_allowed()
+    return await database.reset_active_paper_session()
+
+
 def parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -1121,6 +1137,25 @@ async def api_paper_liquidate_all(
         )
 
 
+@app.post("/api/paper/reset-session")
+async def api_paper_reset_session():
+    try:
+        result = await _reset_paper_session()
+        status_code = 409 if result.get("status") == "blocked" else 200
+        return JSONResponse(result, status_code=status_code, headers=no_cache_headers())
+
+    except RuntimeError as exc:
+        return JSONResponse(
+            {
+                "status": "blocked",
+                "reason": str(exc),
+                "orders_submitted": 0,
+            },
+            status_code=403,
+            headers=no_cache_headers(),
+        )
+
+
 @app.get("/api/account-summary")
 async def api_account_summary():
     return JSONResponse(
@@ -1674,6 +1709,8 @@ async def api_trading_status():
 
     open_positions = await database.get_open_positions()
 
+    active_paper_session = await database.get_active_paper_session()
+
     realized_pnl = await database.get_realized_pnl()
 
     market = get_market_regime()
@@ -1684,7 +1721,12 @@ async def api_trading_status():
     # ACCOUNT CALCULATIONS
     # ==========================================
 
-    account_equity = float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0))
+    account_equity = float(
+        (active_paper_session or {}).get(
+            "session_start_equity",
+            getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0),
+        )
+    ) + float(realized_pnl)
 
     used_capital = sum(
         float(p.get("buy_price") or 0)
@@ -1877,6 +1919,13 @@ async def api_trading_status():
             "account_balance": float(config.ACCOUNT_BALANCE),
 
             "virtual_trading_capital": float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0)),
+
+            "active_paper_session": active_paper_session,
+
+            "session_start_equity": round(
+                float((active_paper_session or {}).get("session_start_equity", account_equity)),
+                2,
+            ),
 
             "risk_calculation_basis": "virtual_trading_capital",
 

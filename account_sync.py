@@ -430,18 +430,65 @@ async def get_executions(limit: int = 200, symbol: str | None = None) -> list[di
     )
 
 
-async def get_equity_curve(limit: int = 500) -> list[dict]:
+async def get_equity_curve(limit: int = 500, session_only: bool = True) -> list[dict]:
     limit = max(1, min(int(limit or 500), 5000))
-    return await _fetch_rows(
+
+    if not session_only:
+        return await _fetch_rows(
+            """
+            SELECT timestamp, account, net_liquidation, total_cash, buying_power,
+                   unrealized_pnl, realized_pnl, source
+            FROM equity_curve
+            ORDER BY timestamp ASC, id ASC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+
+    session = await database.get_active_paper_session()
+    baseline_id = safe_int((session or {}).get("equity_curve_start_id"), 0)
+    baseline_timestamp = (session or {}).get("equity_curve_start_timestamp")
+    session_start_equity = safe_float(
+        (session or {}).get("session_start_equity"),
+        safe_float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0), 5000.0),
+    )
+    realized_baseline = safe_float((session or {}).get("realized_pnl_baseline"))
+
+    rows = await _fetch_rows(
         """
-        SELECT timestamp, account, net_liquidation, total_cash, buying_power,
+        SELECT id, timestamp, account, net_liquidation, total_cash, buying_power,
                unrealized_pnl, realized_pnl, source
         FROM equity_curve
+        WHERE id > ?
         ORDER BY timestamp ASC, id ASC
         LIMIT ?
         """,
-        (limit,),
+        (baseline_id, max(1, limit - 1)),
     )
+
+    curve = [
+        {
+            "timestamp": baseline_timestamp or (session or {}).get("started_at"),
+            "account": None,
+            "net_liquidation": round(session_start_equity, 2),
+            "total_cash": None,
+            "buying_power": None,
+            "unrealized_pnl": 0.0,
+            "realized_pnl": 0.0,
+            "source": "paper_session_baseline",
+            "session_id": (session or {}).get("session_id"),
+            "session_start_equity": round(session_start_equity, 2),
+        }
+    ]
+
+    for row in rows:
+        row.pop("id", None)
+        if row.get("realized_pnl") is not None:
+            row["realized_pnl"] = round(safe_float(row.get("realized_pnl")) - realized_baseline, 2)
+        row["session_id"] = (session or {}).get("session_id")
+        curve.append(row)
+
+    return curve[:limit]
 
 
 async def _load_open_position_quantities(db: aiosqlite.Connection) -> dict[str, float]:
