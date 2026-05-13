@@ -407,6 +407,11 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
     if not AUTO_TRADING_ENABLED:
         return
 
+    persisted_auto_trading = await database.get_app_state("auto_trading_enabled", "true")
+    if str(persisted_auto_trading).lower() != "true":
+        log.info("AUTO TRADER disabled by persisted app state")
+        return
+
     from circuit_breaker import get_circuit_breaker_state
     from startup_recovery import startup_recovery_passed
 

@@ -6,6 +6,10 @@ import logging
 from datetime import datetime, timezone
 
 import aiosqlite
+from ibkr_asyncio_compat import ensure_event_loop
+
+ensure_event_loop()
+
 from ib_insync import IB
 
 import config

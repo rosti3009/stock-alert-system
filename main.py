@@ -18,6 +18,7 @@ import session_manager
 import order_lifecycle
 import portfolio_risk_engine
 import startup_recovery
+import reconciliation_lifecycle
 from circuit_breaker import get_circuit_breaker_state, reset_circuit_breaker
 import position_sizing_engine
 import position_exit_priority_engine
@@ -79,8 +80,11 @@ def _run_flat_tws_reconciliation_worker(*, dry_run: bool) -> dict:
 
 
 def _require_paper_session_reset_allowed() -> None:
-    if str(getattr(config, "TRADING_MODE", "")).upper() != "PAPER":
-        raise RuntimeError("Paper session reset blocked: TRADING_MODE is not PAPER")
+    trading_mode = str(getattr(config, "TRADING_MODE", "")).upper()
+    if trading_mode not in {"PAPER", "PAPER_AUTO"}:
+        raise RuntimeError(
+            "Paper session reset blocked: TRADING_MODE must be PAPER or PAPER_AUTO"
+        )
 
     if not bool(getattr(config, "IBKR_PAPER_TRADING", False)):
         raise RuntimeError("Paper session reset blocked: IBKR_PAPER_TRADING is false")
@@ -92,6 +96,76 @@ def _require_paper_session_reset_allowed() -> None:
 async def _reset_paper_session() -> dict:
     _require_paper_session_reset_allowed()
     return await database.reset_active_paper_session()
+
+
+AUTO_TRADING_ENABLED_KEY = "auto_trading_enabled"
+AUTO_TRADING_STATE_SOURCE_KEY = "auto_trading_state_source"
+AUTO_TRADING_STATE_REASON_KEY = "auto_trading_state_reason"
+
+
+async def _set_auto_trading_state(enabled: bool, *, source: str, reason: str) -> None:
+    await database.set_app_state(AUTO_TRADING_ENABLED_KEY, "true" if enabled else "false")
+    await database.set_app_state(AUTO_TRADING_STATE_SOURCE_KEY, source)
+    await database.set_app_state(AUTO_TRADING_STATE_REASON_KEY, reason)
+
+
+async def _get_auto_trading_state() -> dict:
+    raw_enabled = await database.get_app_state(AUTO_TRADING_ENABLED_KEY, "true")
+    enabled = str(raw_enabled).lower() == "true"
+    default_source = "default" if enabled else "unknown"
+    default_reason = "Auto trading enabled by default" if enabled else "Auto trading disabled"
+    return {
+        "enabled": enabled,
+        "source": await database.get_app_state(AUTO_TRADING_STATE_SOURCE_KEY, default_source),
+        "reason": await database.get_app_state(AUTO_TRADING_STATE_REASON_KEY, default_reason),
+    }
+
+
+async def _evaluate_auto_trading_enable_safety() -> dict:
+    startup_status = await startup_recovery.get_startup_recovery_status()
+    startup_passed = bool(startup_status.get("ok")) and await startup_recovery.startup_recovery_passed()
+    circuit = await get_circuit_breaker_state()
+    reconciliation = await reconciliation_lifecycle.get_reconciliation_status()
+    market_hours = get_market_hours_status()
+
+    blocked_reasons: list[str] = []
+    trading_mode = str(getattr(config, "TRADING_MODE", "")).upper()
+
+    if not startup_passed:
+        blocked_reasons.append(
+            startup_status.get("reason") or "Startup recovery has not passed"
+        )
+
+    if circuit.get("tripped"):
+        blocked_reasons.append(
+            f"Circuit breaker tripped: {circuit.get('reason') or 'unknown reason'}"
+        )
+
+    if int(reconciliation.get("issues_count") or 0) != 0:
+        blocked_reasons.append(
+            f"Reconciliation issues_count={reconciliation.get('issues_count')}"
+        )
+
+    if not bool(getattr(config, "IBKR_PAPER_TRADING", False)):
+        blocked_reasons.append("IBKR_PAPER_TRADING is false")
+
+    if bool(getattr(config, "IBKR_ENABLE_REAL_TRADING", False)):
+        blocked_reasons.append("LIVE trading is enabled")
+
+    if trading_mode == "LIVE":
+        blocked_reasons.append("TRADING_MODE is LIVE")
+
+    return {
+        "ok": len(blocked_reasons) == 0,
+        "blocked_reasons": blocked_reasons,
+        "startup_recovery": startup_status,
+        "circuit_breaker": circuit,
+        "reconciliation": reconciliation,
+        "paper_trading": bool(getattr(config, "IBKR_PAPER_TRADING", False)),
+        "real_trading_enabled": bool(getattr(config, "IBKR_ENABLE_REAL_TRADING", False)),
+        "trading_mode": trading_mode,
+        "market_hours": market_hours,
+    }
 
 
 def parse_dt(value: str | None) -> datetime | None:
@@ -1166,6 +1240,55 @@ async def api_paper_reset_session():
         )
 
 
+@app.post("/api/auto-trading/enable")
+async def api_auto_trading_enable():
+    safety = await _evaluate_auto_trading_enable_safety()
+    if not safety["ok"]:
+        reason = "; ".join(safety["blocked_reasons"])
+        await _set_auto_trading_state(
+            False,
+            source="api_auto_trading_enable",
+            reason=reason,
+        )
+        return JSONResponse(
+            {
+                "status": "blocked",
+                "auto_trading_enabled": False,
+                "reason": reason,
+                **safety,
+            },
+            status_code=403,
+            headers=no_cache_headers(),
+        )
+
+    reason = "Auto trading enabled after safety checks passed"
+    await _set_auto_trading_state(True, source="api_auto_trading_enable", reason=reason)
+    return JSONResponse(
+        {
+            "status": "enabled",
+            "auto_trading_enabled": True,
+            "reason": reason,
+            **safety,
+        },
+        headers=no_cache_headers(),
+    )
+
+
+@app.post("/api/auto-trading/disable")
+async def api_auto_trading_disable():
+    reason = "Auto trading disabled by API request; existing TWS orders were not cancelled"
+    await _set_auto_trading_state(False, source="api_auto_trading_disable", reason=reason)
+    return JSONResponse(
+        {
+            "status": "disabled",
+            "auto_trading_enabled": False,
+            "reason": reason,
+            "orders_cancelled": 0,
+        },
+        headers=no_cache_headers(),
+    )
+
+
 @app.get("/api/account-summary")
 async def api_account_summary():
     return JSONResponse(
@@ -1808,15 +1931,8 @@ async def api_trading_status():
     # AUTO TRADING STATE
     # ==========================================
 
-    auto_trading_state = await database.get_app_state(
-        "auto_trading_enabled",
-        "true",
-    )
-
-    auto_trading_enabled = (
-        str(auto_trading_state).lower()
-        == "true"
-    )
+    auto_trading_state = await _get_auto_trading_state()
+    auto_trading_enabled = bool(auto_trading_state["enabled"])
 
     blocked_reasons = []
     market_hours = get_market_hours_status()
@@ -1917,12 +2033,13 @@ async def api_trading_status():
 
         # AUTO DISABLE TRADING
 
-        await database.set_app_state(
-            "auto_trading_enabled",
-            "false",
+        await _set_auto_trading_state(
+            False,
+            source="global_risk_manager",
+            reason=global_risk.get("risk_message") or "Global risk protection activated",
         )
-
         auto_trading_enabled = False
+        auto_trading_state = await _get_auto_trading_state()
 
         log.warning(
             "GLOBAL RISK PROTECTION ACTIVATED | %s",
@@ -1957,6 +2074,10 @@ async def api_trading_status():
             "real_trading_enabled": config.IBKR_ENABLE_REAL_TRADING,
 
             "auto_trading_enabled": auto_trading_enabled,
+
+            "auto_trading_state_source": auto_trading_state.get("source"),
+
+            "auto_trading_state_reason": auto_trading_state.get("reason"),
 
             "market_hours_guard_enabled": market_hours.get("enabled"),
 

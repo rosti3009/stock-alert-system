@@ -135,6 +135,17 @@ class PaperSessionResetTests(unittest.TestCase):
         self.assertEqual(equity_curve[0]["net_liquidation"], 5250.0)
         self.assertEqual(len(asyncio.run(account_sync.get_equity_curve(session_only=False))), 1)
 
+    def test_reset_session_allows_paper_auto_mode(self):
+        config.TRADING_MODE = "PAPER_AUTO"
+
+        response = asyncio.run(main.api_paper_reset_session())
+        payload = json.loads(response.body)
+
+        self.assertEqual(response.status_code, 200, payload)
+        self.assertEqual(payload["status"], "reset")
+        self.assertEqual(payload["orders_submitted"], 0)
+
+
     def test_endpoint_is_paper_only(self):
         config.IBKR_PAPER_TRADING = False
 
