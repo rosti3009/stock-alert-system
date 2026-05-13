@@ -12,6 +12,7 @@ import account_sync
 import config
 import database
 import sector_intelligence
+from reason_summarizer import summarize_reason_list
 
 
 class RiskState(str, Enum):
@@ -251,6 +252,16 @@ def evaluate_risk_snapshot(
         alerts.append(make_alert("WARNING", "account_utilization_percent", "Account utilization is nearing the configured warning limit.", account_utilization_percent, utilization_threshold))
 
     blocks_new_buys = any(alert["blocks_new_buys"] for alert in alerts)
+    raw_block_reasons = [alert["message"] for alert in alerts if alert["blocks_new_buys"]]
+    alert_messages = [alert["message"] for alert in alerts]
+    block_reason_summary = summarize_reason_list(
+        raw_block_reasons,
+        default_text="No portfolio-risk BUY block active.",
+    )
+    alert_reason_summary = summarize_reason_list(
+        alert_messages,
+        default_text="No portfolio-risk alerts active.",
+    )
     danger = any(alert["severity"] == "DANGER" for alert in alerts)
     warning = any(alert["severity"] == "WARNING" for alert in alerts)
 
@@ -268,7 +279,12 @@ def evaluate_risk_snapshot(
         "risk_state": risk_state,
         "new_buy_risk_status": "BLOCKED" if blocks_new_buys else "ALLOWED",
         "blocks_new_buys": blocks_new_buys,
-        "block_reasons": [alert["message"] for alert in alerts if alert["blocks_new_buys"]],
+        "block_reasons": raw_block_reasons,
+        "block_reason_summary": block_reason_summary,
+        "alert_reason_summary": alert_reason_summary,
+        "raw_block_reasons": raw_block_reasons,
+        "raw_reasons": raw_block_reasons,
+        "full_details": {"block_reasons": raw_block_reasons, "alerts": alerts},
         "account_equity": round(account_equity, 2),
         "effective_equity": round(account_equity, 2),
         "virtual_trading_capital": round(account_equity, 2),

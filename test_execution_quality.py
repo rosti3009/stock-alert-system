@@ -153,6 +153,46 @@ class ExecutionQualityTests(unittest.TestCase):
         rows = asyncio.run(database.get_trade_journal(limit=10, symbol="THIN"))
         self.assertTrue(any(row["event_type"] == "EXECUTION_BLOCK_BUY" for row in rows))
 
+    def test_long_execution_reason_list_is_summarized_and_raw_preserved(self):
+        evaluations = []
+        for index in range(10):
+            evaluations.append({
+                "symbol": f"TH{index}",
+                "state": "EXECUTION_BLOCK_BUY",
+                "blocked_buy_reason": "Low average volume 10000 below minimum 500000",
+                "block_categories": ["low_liquidity"],
+                "metrics": {},
+                "warnings": [],
+            })
+        for index in range(3):
+            evaluations.append({
+                "symbol": f"WD{index}",
+                "state": "EXECUTION_BLOCK_BUY",
+                "blocked_buy_reason": "Dangerous spread 4.00% exceeds max 1.00%",
+                "block_categories": ["dangerous_spread"],
+                "metrics": {},
+                "warnings": [],
+            })
+
+        summary = execution_quality.summarize_execution_quality(evaluations)
+
+        self.assertLessEqual(len(summary["blocked_buy_reason"]), 250)
+        self.assertIn("Low liquidity: 10 symbols", summary["blocked_buy_reason"])
+        self.assertIn("Spread risk: 3 symbols", summary["blocked_buy_reason"])
+        self.assertEqual(len(summary["raw_blocked_buy_reasons"]), 13)
+        self.assertEqual(summary["full_details"]["blocked_buy_reasons"], summary["raw_blocked_buy_reasons"])
+
+    def test_duplicate_execution_reasons_are_grouped(self):
+        evaluations = [
+            {"symbol": "AAA", "state": "EXECUTION_BLOCK_BUY", "blocked_buy_reason": "Low relative volume 0.20x", "block_categories": ["low_liquidity"], "metrics": {}, "warnings": []},
+            {"symbol": "BBB", "state": "EXECUTION_BLOCK_BUY", "blocked_buy_reason": "Low relative volume 0.20x", "block_categories": ["low_liquidity"], "metrics": {}, "warnings": []},
+        ]
+
+        summary = execution_quality.summarize_execution_quality(evaluations)
+
+        self.assertIn("Low liquidity: 2 symbols", summary["blocked_buy_reason"])
+        self.assertEqual(summary["blocked_buy_reason_summary"]["top_categories"][0]["symbol_count"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

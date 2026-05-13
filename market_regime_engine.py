@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 import config
 import database
+from reason_summarizer import summarize_reason_list
 import sector_intelligence
 from data_fetcher import fetch_stock_data
 from indicators import compute_indicators
@@ -402,6 +403,15 @@ def evaluate_market_regime(
         else:
             vix_state = "NORMAL"
 
+    warning_summary = summarize_reason_list(
+        warnings + dangers,
+        default_text="No market regime warnings.",
+    )
+    block_reason_summary = summarize_reason_list(
+        block_reasons,
+        default_text="No market-regime BUY block active.",
+    )
+
     return {
         "checked_at": checked_at or now_iso(),
         "regime": regime.value,
@@ -418,6 +428,11 @@ def evaluate_market_regime(
         "min_score_override": 80,
         "buy_blocked": not recommendation["allow_new_buys"],
         "buy_block_reasons": block_reasons,
+        "block_reason_summary": block_reason_summary,
+        "warning_reason_summary": warning_summary,
+        "raw_buy_block_reasons": block_reasons,
+        "raw_reasons": block_reasons + warnings + dangers,
+        "full_details": {"buy_block_reasons": block_reasons, "warnings": warnings, "dangers": dangers},
         "warnings": warnings,
         "dangers": dangers,
         "metrics": {

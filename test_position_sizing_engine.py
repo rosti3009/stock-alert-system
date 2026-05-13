@@ -110,6 +110,46 @@ class PositionSizingEngineTests(unittest.TestCase):
         self.assertEqual(summary["state"], PositionSizingState.BLOCK_NEW_POSITION.value)
         self.assertTrue(summary["blocks_buy"])
 
+    def test_long_block_reason_list_is_summarized_and_raw_preserved(self):
+        evaluations = []
+        for index in range(12):
+            evaluations.append({
+                "symbol": f"LQ{index}",
+                "state": PositionSizingState.BLOCK_NEW_POSITION.value,
+                "blocks_buy": True,
+                "block_reasons": ["Insufficient liquidity: average volume 10000"],
+                "recommended_position_size_usd": 0,
+                "recommended_share_quantity": 0,
+            })
+        for index in range(4):
+            evaluations.append({
+                "symbol": f"VOL{index}",
+                "state": PositionSizingState.BLOCK_NEW_POSITION.value,
+                "blocks_buy": True,
+                "block_reasons": ["Dangerous volatility: ATR 15.00%"],
+                "recommended_position_size_usd": 0,
+                "recommended_share_quantity": 0,
+            })
+
+        summary = summarize_position_sizing(evaluations)
+
+        self.assertLessEqual(len(summary["block_reason_summary"]["text"]), 250)
+        self.assertIn("Low liquidity: 12 symbols", summary["block_reason_summary"]["text"])
+        self.assertIn("Dangerous volatility: 4 symbols", summary["block_reason_summary"]["text"])
+        self.assertEqual(len(summary["raw_block_reasons"]), 16)
+        self.assertEqual(summary["block_reason_summary"]["affected_symbol_count"], 16)
+
+    def test_duplicate_position_sizing_reasons_are_grouped(self):
+        evaluations = [
+            {"symbol": "AAA", "state": PositionSizingState.BLOCK_NEW_POSITION.value, "blocks_buy": True, "block_reasons": ["Crash protection regime"]},
+            {"symbol": "BBB", "state": PositionSizingState.BLOCK_NEW_POSITION.value, "blocks_buy": True, "block_reasons": ["Crash protection regime"]},
+        ]
+
+        summary = summarize_position_sizing(evaluations)
+
+        self.assertIn("Crash protection: 2 symbols", summary["block_reason_summary"]["text"])
+        self.assertEqual(summary["block_reasons"], ["Crash protection regime"])
+
 
 if __name__ == "__main__":
     unittest.main()

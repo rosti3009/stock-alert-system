@@ -408,6 +408,24 @@ function percent(value) {
   return `${parsed.toFixed(2)}%`;
 }
 
+
+function dashboardReason(summary, fallback, emptyText = "No active risk/block reasons.") {
+  const raw = summary?.text || fallback || emptyText;
+  const note = summary?.truncated ? "" : (String(raw).length > 250 ? " … details available in API" : "");
+  const textValue = `${raw}${note}`;
+  return textValue.length > 250 ? `${textValue.slice(0, 222).trim()} … details available in API` : textValue;
+}
+
+function affectedReasonMeta(summary, fallback = "") {
+  const parts = [];
+  const hasReasons = Number(summary?.raw_reason_count || 0) > 0 || safeArray(summary?.top_categories).length > 0;
+  if (hasReasons && summary?.primary_reason) parts.push(`Primary: ${summary.primary_reason}`);
+  if (hasReasons && summary?.affected_symbol_count !== undefined) parts.push(`${summary.affected_symbol_count} affected symbol(s)`);
+  if (hasReasons && summary?.top_categories?.length) parts.push(summary.top_categories.map(item => `${item.category} ${item.symbol_count || item.count}`).join(" · "));
+  const value = parts.join(" · ") || fallback;
+  return value.length > 250 ? `${value.slice(0, 222).trim()} … details available in API` : value;
+}
+
 function renderMarketRegime(regime) {
   const state = text(regime?.regime, "UNKNOWN");
   const riskLevel = text(regime?.risk_level, "UNKNOWN");
@@ -420,7 +438,7 @@ function renderMarketRegime(regime) {
   document.getElementById("marketRegimeMeta").textContent = `Checked ${dateTime(regime?.checked_at)}`;
 
   setValue("marketRiskLevel", riskLevel, riskClass(riskLevel));
-  document.getElementById("marketRiskMeta").textContent = safeArray(regime?.warnings).concat(safeArray(regime?.dangers)).join(" · ") || "No market regime warnings.";
+  document.getElementById("marketRiskMeta").textContent = dashboardReason(regime?.warning_reason_summary, safeArray(regime?.warnings).concat(safeArray(regime?.dangers)).join(" · "), "No market regime warnings.");
 
   setValue("vixState", vixState, riskClass(vixState));
   document.getElementById("vixMeta").textContent = regime?.vix_level ? `VIX ${Number(regime.vix_level).toFixed(2)}` : "VIX unavailable";
@@ -430,7 +448,7 @@ function renderMarketRegime(regime) {
 
   setValue("aggressiveEntriesAllowed", allowAggressive ? "Allowed" : "Blocked", allowAggressive ? "green" : "yellow");
   setValue("marketBuyStatus", allowBuys ? "BUY ALLOWED" : "BUY BLOCKED", allowBuys ? "green" : "red");
-  document.getElementById("marketBuyStatusMeta").textContent = blockedReasons.join(" · ") || "No market-regime BUY block active.";
+  document.getElementById("marketBuyStatusMeta").textContent = dashboardReason(regime?.block_reason_summary, blockedReasons.join(" · "), "No market-regime BUY block active.");
 }
 
 function renderPortfolioRisk(risk) {
@@ -454,10 +472,10 @@ function renderPortfolioRisk(risk) {
   document.getElementById("dailyDrawdownMeta").textContent = `Daily realized PnL ${signedMoney(risk?.daily_realized_pnl)} · unrealized drawdown ${percent(risk?.unrealized_drawdown_percent)}`;
 
   setValue("riskState", riskState, riskClass(riskState));
-  document.getElementById("riskStateMeta").textContent = `${safeArray(risk?.alerts).length} active risk alert(s) · checked ${dateTime(risk?.checked_at)}`;
+  document.getElementById("riskStateMeta").textContent = affectedReasonMeta(risk?.alert_reason_summary, `${safeArray(risk?.alerts).length} active risk alert(s) · checked ${dateTime(risk?.checked_at)}`);
 
   setValue("newBuyRiskStatus", buyStatus, riskClass(buyStatus));
-  document.getElementById("newBuyRiskMeta").textContent = safeArray(risk?.block_reasons).join(" · ") || "No portfolio-risk BUY block active.";
+  document.getElementById("newBuyRiskMeta").textContent = dashboardReason(risk?.block_reason_summary, safeArray(risk?.block_reasons).join(" · "), "No portfolio-risk BUY block active.");
 }
 
 function adjustmentClass(value) {
@@ -472,7 +490,7 @@ function renderPositionSizing(positionSizing) {
   const blocked = positionSizing?.blocks_buy === true;
   const reasons = safeArray(positionSizing?.block_reasons);
   setValue("positionSizingState", state.replaceAll("_", " "), blocked ? "red" : riskClass(state));
-  document.getElementById("positionSizingMeta").textContent = reasons.join(" · ") || `${safeArray(positionSizing?.evaluations).length} sizing evaluation(s) · checked ${dateTime(positionSizing?.checked_at)}`;
+  document.getElementById("positionSizingMeta").textContent = affectedReasonMeta(positionSizing?.block_reason_summary, reasons.join(" · ") || `${safeArray(positionSizing?.evaluations).length} sizing evaluation(s) · checked ${dateTime(positionSizing?.checked_at)}`);
   setValue("recommendedPositionSize", money(positionSizing?.recommended_position_size_usd), blocked ? "red" : "green");
   document.getElementById("recommendedPositionMeta").textContent = `${text(positionSizing?.recommended_share_quantity, "0")} recommended share(s)`;
   setValue("maxRiskPerTrade", money(positionSizing?.max_risk_per_trade), "blue");
@@ -487,13 +505,13 @@ function renderExecutionQuality(executionQuality) {
   const state = text(executionQuality?.state, "UNKNOWN");
   const spreadRisk = text(executionQuality?.spread_risk, "UNKNOWN");
   const liquidity = text(executionQuality?.liquidity_status, "UNKNOWN");
-  const blockedReason = text(executionQuality?.blocked_buy_reason, "None");
+  const blockedReason = dashboardReason(executionQuality?.blocked_buy_reason_summary, executionQuality?.blocked_buy_reason, "None");
 
   setValue("executionQualityState", state.replace("EXECUTION_", ""), riskClass(state));
   setValue("spreadRisk", spreadRisk, riskClass(spreadRisk));
   setValue("slippageEstimate", percent(executionQuality?.slippage_estimate), numberValue(executionQuality?.slippage_estimate) > 0 ? riskClass(state) : "green");
   setValue("liquidityStatus", liquidity, riskClass(liquidity));
-  setValue("blockedBuyReason", blockedReason.length > 28 ? `${blockedReason.slice(0, 28)}…` : blockedReason, executionQuality?.blocked_buy_reason ? "red" : "green");
+  setValue("blockedBuyReason", blockedReason, executionQuality?.blocked_buy_reason ? "red" : "green");
 }
 
 function renderReconciliation(status) {
