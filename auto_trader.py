@@ -424,6 +424,21 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
         log.warning("AUTO TRADER blocked: startup recovery has not passed")
         return
 
+    from watchdog import get_watchdog_status
+
+    watchdog_status = await get_watchdog_status()
+    if watchdog_status.get("trading_blocked"):
+        reason = "; ".join(watchdog_status.get("blocking_reasons") or ["Watchdog blocked trading"])
+        log.warning("AUTO TRADER blocked by watchdog: %s", reason)
+        await database.safe_record_trade_journal_event({
+            "event_type": "AUTO_TRADING_BLOCKED_BY_WATCHDOG",
+            "decision": "BLOCKED",
+            "reason": reason,
+            "source_module": "auto_trader.process_auto_trading",
+            "raw_payload": watchdog_status,
+        })
+        return
+
     if not PAPER_TRADING_ENABLED:
         log.warning("Real trading is disabled. PAPER_TRADING_ENABLED must stay True.")
         return
@@ -935,6 +950,22 @@ async def auto_open_position(
 
 
 async def auto_close_position(symbol: str, reason: str) -> bool:
+    from watchdog import get_watchdog_status
+
+    watchdog_status = await get_watchdog_status()
+    if watchdog_status.get("trading_blocked"):
+        block_reason = "; ".join(watchdog_status.get("blocking_reasons") or ["Watchdog blocked trading"])
+        log.warning("AUTO SELL/CLOSE blocked for %s by watchdog: %s", symbol, block_reason)
+        await database.safe_record_trade_journal_event({
+            "symbol": symbol,
+            "event_type": "SELL_BLOCKED_BY_WATCHDOG",
+            "decision": "BLOCKED",
+            "reason": block_reason,
+            "source_module": "auto_trader.auto_close_position",
+            "raw_payload": {"requested_reason": reason, "watchdog": watchdog_status},
+        })
+        return False
+
     try:
         await database.close_position(
             symbol,

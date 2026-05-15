@@ -9,6 +9,7 @@ import aiosqlite
 from ib_insync import IB
 
 import config
+import database
 from circuit_breaker import record_ibkr_error
 
 log = logging.getLogger(__name__)
@@ -443,6 +444,9 @@ async def run_tws_mirror_once() -> dict:
         }
 
     await save_tws_snapshot(snapshot)
+
+    if snapshot.get("connected"):
+        await database.set_app_state("tws_mirror_last_success_at", snapshot.get("synced_at") or now_iso())
 
     log.info(
         "TWS MIRROR SYNC | connected=%s | account=%s | positions=%s | orders=%s",

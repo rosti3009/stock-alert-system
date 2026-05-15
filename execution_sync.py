@@ -292,6 +292,7 @@ async def sync_executions():
             "duplicate_count": max(0, len(rows) - inserted),
             "synced_at": now_iso(),
         }
+        await database.set_app_state("execution_sync_last_success_at", result["synced_at"])
 
         log.info(
             "Execution sync complete | fetched=%s inserted=%s duplicates=%s",
