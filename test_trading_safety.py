@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -37,7 +38,8 @@ class TradingSafetyGateTests(unittest.TestCase):
         self.assertEqual(str(raised.exception), expected_message)
 
     def test_safe_paper_auto_configuration_is_allowed(self):
-        require_paper_auto_trading_allowed("TEST")
+        with patch("watchdog.get_watchdog_status_sync", return_value={"trading_blocked": False}):
+            require_paper_auto_trading_allowed("TEST")
 
     def test_live_trading_is_blocked(self):
         config.IBKR_ENABLE_REAL_TRADING = True
