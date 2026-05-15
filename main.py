@@ -55,7 +55,18 @@ _latest: dict[str, dict] = {}
 _top_weekly: list[dict] = []
 _scan_lock = asyncio.Lock()
 _positions_lock = asyncio.Lock()
+_scanner_state: dict[str, object] = {
+    "last_scan_at": None,
+    "next_scan_at": None,
+    "current_universe_size": 0,
+    "priority_count": 0,
+    "rotation_offset": 0,
+}
 scheduler = AsyncIOScheduler()
+
+SCANNER_JOB_ID = "scanner_scan"
+SWING_SCAN_OFFSET_KEY = "scan_offset"
+INTRADAY_SCAN_OFFSET_KEY = "intraday_scan_offset"
 
 
 def no_cache_headers() -> dict:
@@ -253,30 +264,160 @@ def serve_index_html() -> HTMLResponse:
     )
 
 
-async def get_scan_symbols() -> list[str]:
+def _unique_symbols(symbols: list[str]) -> list[str]:
+    selected: list[str] = []
+    seen: set[str] = set()
+
+    for symbol in symbols:
+        normalized = str(symbol or "").strip().upper()
+        if not normalized or normalized in seen:
+            continue
+        selected.append(normalized)
+        seen.add(normalized)
+
+    return selected
+
+
+def _relative_volume(row: dict) -> float:
+    explicit = row.get("relative_volume") or row.get("volume_ratio") or row.get("intraday_relative_volume")
+    if explicit is not None:
+        try:
+            return float(explicit)
+        except (TypeError, ValueError):
+            return 0.0
+
+    try:
+        volume = float(row.get("volume") or 0)
+        avg_volume = float(row.get("avg_volume") or row.get("average_volume") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if volume > 0 and avg_volume > 0:
+        return volume / avg_volume
+
+    return 0.0
+
+
+def _mover_score(row: dict) -> float:
+    try:
+        price = float(row.get("price") or 0)
+        ma20 = float(row.get("ma20") or 0)
+        atr = float(row.get("atr") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+    gap_score = abs(price - ma20) / ma20 if price > 0 and ma20 > 0 else 0.0
+    atr_score = atr / price if price > 0 and atr > 0 else 0.0
+    return gap_score + atr_score + (_relative_volume(row) * 0.1)
+
+
+def scanner_cadence_for_mode(mode: strategy_mode.StrategyMode | str | None) -> dict:
+    normalized = strategy_mode.normalize_strategy_mode(mode)
+
+    if strategy_mode.is_intraday_mode(normalized):
+        return {
+            "active_strategy_mode": normalized.value,
+            "scan_interval_seconds": int(getattr(config, "INTRADAY_SCAN_INTERVAL_SECONDS", 30)),
+            "symbols_per_scan": int(getattr(config, "INTRADAY_SYMBOLS_PER_SCAN", 100)),
+            "priority_symbols_per_scan": int(getattr(config, "INTRADAY_PRIORITY_SYMBOLS_PER_SCAN", 50)),
+            "batch_size": int(getattr(config, "INTRADAY_BATCH_SIZE", 20)),
+            "offset_key": INTRADAY_SCAN_OFFSET_KEY,
+            "intraday_fast_scan_active": True,
+        }
+
+    return {
+        "active_strategy_mode": normalized.value,
+        "scan_interval_seconds": int(getattr(config, "SCAN_INTERVAL_MINUTES", 5)) * 60,
+        "symbols_per_scan": int(getattr(config, "MAX_SYMBOLS_PER_SCAN", 30)),
+        "priority_symbols_per_scan": int(getattr(config, "MAX_SYMBOLS_PER_SCAN", 30)),
+        "batch_size": int(getattr(config, "BATCH_SIZE", 5)),
+        "offset_key": SWING_SCAN_OFFSET_KEY,
+        "intraday_fast_scan_active": False,
+    }
+
+
+def _load_scan_universe() -> list[str]:
     if config.USE_DYNAMIC_SYMBOLS:
         all_symbols = load_nasdaq_symbols(limit=None)
     else:
         all_symbols = config.SYMBOLS
 
-    if not all_symbols:
-        return config.SYMBOLS[:config.MAX_SYMBOLS_PER_SCAN]
+    all_symbols = _unique_symbols(all_symbols)
+    return all_symbols or _unique_symbols(config.SYMBOLS)
 
-    all_symbols = [
-        str(symbol).strip().upper()
-        for symbol in all_symbols
-        if symbol
+
+async def _build_intraday_priority_symbols(priority_limit: int) -> list[str]:
+    open_positions = await database.get_open_positions()
+    open_position_symbols = [position.get("symbol") for position in open_positions]
+
+    latest_candidates = await database.get_latest_candidates(limit=max(500, priority_limit * 6))
+    recent_buy_symbols = [
+        row.get("symbol")
+        for row in latest_candidates
+        if str(row.get("signal") or "").upper() == "BUY"
     ]
 
+    cached_rows_by_symbol = {
+        symbol: row
+        for symbol, row in _latest.items()
+        if symbol
+    }
+    for row in latest_candidates:
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if symbol and symbol not in cached_rows_by_symbol:
+            cached_rows_by_symbol[symbol] = row
+
+    high_relative_volume_symbols = [
+        row.get("symbol")
+        for row in sorted(
+            cached_rows_by_symbol.values(),
+            key=lambda item: _relative_volume(item),
+            reverse=True,
+        )
+        if _relative_volume(row) >= float(getattr(config, "INTRADAY_MIN_RELATIVE_VOLUME", 1.5))
+    ]
+
+    mover_symbols = [
+        row.get("symbol")
+        for row in sorted(
+            cached_rows_by_symbol.values(),
+            key=lambda item: _mover_score(item),
+            reverse=True,
+        )
+        if _mover_score(row) > 0
+    ]
+    watchlist_symbols = list(getattr(config, "SYMBOLS", []))
+    priority_symbols = await database.get_priority_symbols(limit=priority_limit)
+
+    return _unique_symbols(
+        open_position_symbols
+        + recent_buy_symbols
+        + high_relative_volume_symbols
+        + mover_symbols
+        + watchlist_symbols
+        + priority_symbols
+    )[:priority_limit]
+
+
+async def get_scan_symbols() -> list[str]:
+    active_mode = await strategy_mode.get_strategy_mode()
+    cadence = scanner_cadence_for_mode(active_mode)
+    all_symbols = _load_scan_universe()
+
     if not all_symbols:
-        return config.SYMBOLS[:config.MAX_SYMBOLS_PER_SCAN]
+        return _unique_symbols(config.SYMBOLS)[:cadence["symbols_per_scan"]]
 
     total = len(all_symbols)
-    batch_size = min(config.MAX_SYMBOLS_PER_SCAN, total)
+    symbols_per_scan = min(int(cadence["symbols_per_scan"]), max(total, int(cadence["symbols_per_scan"])))
+    priority_limit = int(cadence["priority_symbols_per_scan"])
+    offset_key = str(cadence["offset_key"])
 
-    priority_symbols = await database.get_priority_symbols(limit=batch_size)
+    if strategy_mode.is_intraday_mode(active_mode):
+        priority_symbols = await _build_intraday_priority_symbols(priority_limit)
+    else:
+        priority_symbols = await database.get_priority_symbols(limit=min(symbols_per_scan, total))
 
-    saved_offset = await database.get_app_state("scan_offset", "0")
+    saved_offset = await database.get_app_state(offset_key, "0")
 
     try:
         start = int(saved_offset or 0)
@@ -286,54 +427,70 @@ async def get_scan_symbols() -> list[str]:
     if start >= total:
         start = 0
 
-    end = start + batch_size
+    rotation_quota = max(symbols_per_scan - len(priority_symbols), 0)
+    end = start + rotation_quota
 
-    if end <= total:
+    if rotation_quota <= 0:
+        rotation_symbols = []
+        next_offset = start
+    elif end <= total:
         rotation_symbols = all_symbols[start:end]
+        next_offset = end % total
     else:
         rotation_symbols = all_symbols[start:] + all_symbols[:end - total]
+        next_offset = end % total
 
     selected: list[str] = []
     seen: set[str] = set()
     all_set = set(all_symbols)
+    priority_set = set(priority_symbols)
+    open_symbols = {
+        str(position.get("symbol") or "").strip().upper()
+        for position in await database.get_open_positions()
+    }
+    configured_symbols = {str(symbol or "").strip().upper() for symbol in getattr(config, "SYMBOLS", [])}
 
     for symbol in priority_symbols + rotation_symbols:
-        symbol = str(symbol).strip().upper()
+        symbol = str(symbol or "").strip().upper()
 
-        if not symbol:
+        if not symbol or symbol in seen:
             continue
 
-        if symbol in seen:
-            continue
-
-        if symbol not in all_set:
+        # Open positions and configured watchlist symbols can be scanned even when the
+        # dynamic Nasdaq universe does not currently include them.
+        if symbol not in all_set and symbol not in configured_symbols and symbol not in open_symbols and symbol not in priority_set:
             continue
 
         selected.append(symbol)
         seen.add(symbol)
 
-        if len(selected) >= batch_size:
+        if len(selected) >= symbols_per_scan:
             break
 
-    if len(selected) < batch_size:
+    if len(selected) < symbols_per_scan:
         for symbol in all_symbols:
-            symbol = str(symbol).strip().upper()
+            symbol = str(symbol or "").strip().upper()
 
-            if symbol in seen:
+            if not symbol or symbol in seen:
                 continue
 
             selected.append(symbol)
             seen.add(symbol)
 
-            if len(selected) >= batch_size:
+            if len(selected) >= symbols_per_scan:
                 break
 
-    next_offset = end % total
+    await database.set_app_state(offset_key, str(next_offset))
 
-    await database.set_app_state("scan_offset", str(next_offset))
+    _scanner_state.update({
+        "current_universe_size": total,
+        "priority_count": min(len(priority_symbols), len(selected)),
+        "rotation_offset": next_offset,
+    })
 
     log.info(
-        "Smart rotation selected: priority=%s rotation=%s total_selected=%s | next_offset=%s",
+        "Smart rotation selected: mode=%s priority=%s rotation=%s total_selected=%s | next_offset=%s",
+        cadence["active_strategy_mode"],
         len(priority_symbols),
         len(rotation_symbols),
         len(selected),
@@ -569,7 +726,11 @@ async def run_full_scan() -> dict:
             log.info("Scan skipped — session=%s scan_allowed=False", session_status.get("current_session"))
             return {"status": "skipped", "reason": "scan not allowed in current session", "session": session_status}
 
+        active_mode = await strategy_mode.get_strategy_mode()
+        cadence = scanner_cadence_for_mode(active_mode)
         symbols = await get_scan_symbols()
+        scan_started_at = utc_now()
+        _scanner_state["last_scan_at"] = scan_started_at.isoformat()
 
         scan_run_id = await database.start_scan_run(total_symbols=len(symbols))
 
@@ -586,8 +747,10 @@ async def run_full_scan() -> dict:
         all_results: list[dict] = []
 
         try:
-            for i in range(0, len(symbols), config.BATCH_SIZE):
-                batch = symbols[i:i + config.BATCH_SIZE]
+            batch_size = int(cadence["batch_size"])
+
+            for i in range(0, len(symbols), batch_size):
+                batch = symbols[i:i + batch_size]
 
                 results = await asyncio.gather(
                     *(scan_symbol(symbol) for symbol in batch),
@@ -620,7 +783,7 @@ async def run_full_scan() -> dict:
 
                 rebuild_top_weekly(limit=10)
 
-                if i + config.BATCH_SIZE < len(symbols):
+                if i + batch_size < len(symbols):
                     await asyncio.sleep(config.REQUEST_DELAY_SECONDS)
 
             _top_weekly = rank_top_weekly_setups(all_results, limit=10)
@@ -647,6 +810,7 @@ async def run_full_scan() -> dict:
                 await database.save_daily_candidate(result, scan_run_id)
 
             await database.finish_scan_run(scan_run_id, stats, status="completed")
+            _scanner_state["last_scan_at"] = utc_now().isoformat()
             fresh_symbols = stats["scanned_count"] + stats["skipped_count"]
             if fresh_symbols > 0:
                 await watchdog.refresh_market_data_timestamp(
@@ -712,6 +876,86 @@ async def restore_latest_from_db() -> None:
         log.info("Restored %s candidates from DB | TOP10=%s", len(_latest), len(_top_weekly))
 
 
+def _sync_scanner_next_run_state() -> None:
+    job = scheduler.get_job(SCANNER_JOB_ID)
+    next_run = getattr(job, "next_run_time", None) if job else None
+    _scanner_state["next_scan_at"] = next_run.isoformat() if next_run else None
+
+
+async def configure_scanner_job() -> dict:
+    active_mode = await strategy_mode.get_strategy_mode()
+    cadence = scanner_cadence_for_mode(active_mode)
+
+    for old_job_id in ("daily_scan", "interval_scan", SCANNER_JOB_ID):
+        while scheduler.get_job(old_job_id):
+            scheduler.remove_job(old_job_id)
+
+    if config.SCAN_MODE == "daily" and not cadence["intraday_fast_scan_active"]:
+        scheduler.add_job(
+            run_full_scan,
+            "cron",
+            hour=getattr(config, "DAILY_SCAN_HOUR", 16),
+            minute=getattr(config, "DAILY_SCAN_MINUTE", 30),
+            id=SCANNER_JOB_ID,
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        log.info(
+            "Daily scanner scheduler started — %s:%02d",
+            getattr(config, "DAILY_SCAN_HOUR", 16),
+            getattr(config, "DAILY_SCAN_MINUTE", 30),
+        )
+    else:
+        scheduler.add_job(
+            run_full_scan,
+            "interval",
+            seconds=int(cadence["scan_interval_seconds"]),
+            id=SCANNER_JOB_ID,
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        log.info(
+            "Scanner scheduler started — every %s seconds | mode=%s",
+            cadence["scan_interval_seconds"],
+            cadence["active_strategy_mode"],
+        )
+
+    _sync_scanner_next_run_state()
+    return await get_scanner_status()
+
+
+async def get_scanner_status() -> dict:
+    active_mode = await strategy_mode.get_strategy_mode()
+    cadence = scanner_cadence_for_mode(active_mode)
+    _sync_scanner_next_run_state()
+
+    offset_raw = await database.get_app_state(str(cadence["offset_key"]), "0")
+    try:
+        rotation_offset = int(offset_raw or 0)
+    except (TypeError, ValueError):
+        rotation_offset = int(_scanner_state.get("rotation_offset") or 0)
+
+    current_universe_size = int(_scanner_state.get("current_universe_size") or 0)
+    if current_universe_size <= 0:
+        current_universe_size = len(_latest)
+
+    return {
+        "active_strategy_mode": cadence["active_strategy_mode"],
+        "scan_interval_seconds": cadence["scan_interval_seconds"],
+        "symbols_per_scan": cadence["symbols_per_scan"],
+        "last_scan_at": _scanner_state.get("last_scan_at"),
+        "next_scan_at": _scanner_state.get("next_scan_at"),
+        "current_universe_size": current_universe_size,
+        "priority_count": int(_scanner_state.get("priority_count") or 0),
+        "rotation_offset": rotation_offset,
+        "intraday_fast_scan_active": bool(cadence["intraday_fast_scan_active"]),
+        "batch_size": cadence["batch_size"],
+        "scan_running": _scan_lock.locked(),
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await database.init_db()
@@ -724,35 +968,7 @@ async def lifespan(app: FastAPI):
             startup_status.get("reason"),
         )
 
-    if config.SCAN_MODE == "daily":
-        scheduler.add_job(
-            run_full_scan,
-            "cron",
-            hour=getattr(config, "DAILY_SCAN_HOUR", 16),
-            minute=getattr(config, "DAILY_SCAN_MINUTE", 30),
-            id="daily_scan",
-            replace_existing=True,
-        )
-
-        log.info(
-            "Daily scheduler started — %s:%02d",
-            getattr(config, "DAILY_SCAN_HOUR", 16),
-            getattr(config, "DAILY_SCAN_MINUTE", 30),
-        )
-
-    else:
-        scheduler.add_job(
-            run_full_scan,
-            "interval",
-            minutes=config.SCAN_INTERVAL_MINUTES,
-            id="interval_scan",
-            replace_existing=True,
-        )
-
-        log.info(
-            "Interval scheduler started — every %s min",
-            config.SCAN_INTERVAL_MINUTES,
-        )
+    await configure_scanner_job()
 
     scheduler.add_job(
         refresh_open_positions_safe,
@@ -1232,16 +1448,20 @@ async def api_strategy_mode():
 
 @app.post("/api/strategy-mode/swing")
 async def api_strategy_mode_swing():
+    payload = await strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.SWING_DEFAULT)
+    scanner = await configure_scanner_job()
     return JSONResponse(
-        await strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.SWING_DEFAULT),
+        {**payload, "scanner": scanner},
         headers=no_cache_headers(),
     )
 
 
 @app.post("/api/strategy-mode/intraday")
 async def api_strategy_mode_intraday():
+    payload = await strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.INTRADAY_TECHNICAL)
+    scanner = await configure_scanner_job()
     return JSONResponse(
-        await strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.INTRADAY_TECHNICAL),
+        {**payload, "scanner": scanner},
         headers=no_cache_headers(),
     )
 
@@ -1631,6 +1851,11 @@ async def api_top_weekly():
         rebuild_top_weekly(limit=10)
 
     return JSONResponse(_top_weekly, headers=no_cache_headers())
+
+
+@app.get("/api/scanner/status")
+async def api_scanner_status():
+    return JSONResponse(await get_scanner_status(), headers=no_cache_headers())
 
 
 @app.post("/api/run-scan")
