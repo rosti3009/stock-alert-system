@@ -447,6 +447,7 @@
                   <th>PnL $</th>
                   <th>PnL %</th>
                   <th>Action</th>
+                  <th>Live Tracking</th>
                 </tr>
 
               </thead>
@@ -454,7 +455,7 @@
               <tbody id="positionsRows">
 
                 <tr>
-                  <td colspan="7">
+                  <td colspan="8">
                     Loading...
                   </td>
                 </tr>
@@ -1219,6 +1220,16 @@ function drawPositionsPreview(){
         <span class="badge">
           ${p.action || "HOLD"}
         </span>
+      </td>
+
+      <td>
+        <span class="badge">
+          ${p.live_tracking ? "LIVE" : "-"}
+        </span>
+        <div class="muted">
+          ${p.live_tracking_source || "-"}
+          ${p.live_tracking_last_refresh_at ? " · " + p.live_tracking_last_refresh_at : ""}
+        </div>
       </td>
 
     </tr>

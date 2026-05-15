@@ -976,6 +976,13 @@ async def close_position(symbol: str, reason: str = "Closed manually") -> dict |
         "updated_at": now_iso(),
     })
 
+    if updated:
+        try:
+            import live_position_tracker
+            await live_position_tracker.prune_closed_positions()
+        except Exception as exc:
+            log.warning("Live position tracker prune failed after close: %s", exc)
+
     if updated and not str(reason or "").upper().startswith("AUTO:"):
         await safe_record_trade_journal_event({
             "symbol": symbol,

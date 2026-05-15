@@ -20,6 +20,7 @@ import portfolio_risk_engine
 import startup_recovery
 import reconciliation_lifecycle
 import watchdog
+import live_position_tracker
 from circuit_breaker import (
     auto_clear_recoverable_circuit_breaker,
     get_circuit_breaker_state,
@@ -548,124 +549,11 @@ async def refresh_open_positions_safe() -> None:
             await refresh_open_positions()
 
         except Exception:
-            log.exception("Fast position refresh failed")
+            log.exception("Live position refresh failed")
 
 async def refresh_open_positions() -> list[dict]:
-    positions = await database.get_open_positions()
-    updated_positions = []
+    return await live_position_tracker.refresh_live_tracked_positions(scan_symbol)
 
-    if not positions:
-        return []
-
-    log.info("Refreshing %s open positions", len(positions))
-
-    important_actions = {
-        "STOP_LOSS_HIT",
-        "SELL_SIGNAL",
-        "TAKE_PROFIT_1",
-        "TAKE_PROFIT_2",
-        "MOVE_STOP_TO_BREAKEVEN",
-        "TRAILING_STOP_UPDATED",
-        "EXIT_WARNING",
-        "WARNING",
-        "WATCH_PROFIT",
-    }
-
-    for position in positions:
-        symbol = position.get("symbol")
-
-        if not symbol:
-            continue
-
-        scan_result = await scan_symbol(symbol)
-
-        if scan_result.get("error") or scan_result.get("signal") == "ERROR":
-            await database.update_position(symbol, {
-                "action": "ERROR",
-                "reason": scan_result.get("error", "Failed to update position"),
-                "updated_at": database.now_iso(),
-            })
-            continue
-
-        position_update = evaluate_position(position, scan_result, mode=(await strategy_mode.get_strategy_mode()).value)
-
-        previous_action = position.get("action")
-        new_action = position_update.get("action")
-        new_status = position_update.get("status", "OPEN")
-
-        journal_event_by_action = {
-            "STOP_LOSS_HIT": "STOP_LOSS_TRIGGERED",
-            "TAKE_PROFIT_1": "TP1_TRIGGERED",
-            "TAKE_PROFIT_2": "TP2_TRIGGERED",
-            "TRAILING_STOP_UPDATED": "TRAILING_STOP_UPDATED",
-            "SELL_SIGNAL": "SELL_SIGNAL_DETECTED",
-        }
-
-        journal_event_type = journal_event_by_action.get(new_action)
-
-        if journal_event_type and new_action != previous_action:
-            await database.safe_record_trade_journal_event({
-                "symbol": symbol,
-                "event_type": journal_event_type,
-                "decision": new_action,
-                "reason": position_update.get("reason"),
-                "source_module": "main.refresh_open_positions",
-                "signal_score": scan_result.get("score"),
-                "weekly_score": scan_result.get("weekly_score"),
-                "price": position_update.get("current_price"),
-                "quantity": position_update.get("sell_quantity") or position.get("quantity"),
-                "stop_loss": position_update.get("stop_loss"),
-                "take_profit_1": position_update.get("take_profit_1"),
-                "take_profit_2": position_update.get("take_profit_2"),
-                "risk_percent": scan_result.get("risk_percent"),
-                "realized_pnl": (
-                    position_update.get("profit_amount")
-                    if new_status == "CLOSED"
-                    else None
-                ),
-                "unrealized_pnl": (
-                    position_update.get("profit_amount")
-                    if new_status != "CLOSED"
-                    else None
-                ),
-                "raw_payload": {
-                    "position": position,
-                    "scan_result": scan_result,
-                    "position_update": position_update,
-                },
-            })
-
-        updated = await database.update_position(symbol, {
-            "current_price": position_update.get("current_price"),
-            "profit_amount": position_update.get("profit_amount"),
-            "profit_percent": position_update.get("profit_percent"),
-            "stop_loss": position_update.get("stop_loss"),
-            "take_profit_1": position_update.get("take_profit_1"),
-            "take_profit_2": position_update.get("take_profit_2"),
-            "status": new_status,
-            "action": new_action,
-            "reason": position_update.get("reason"),
-            "updated_at": database.now_iso(),
-            "closed_at": database.now_iso() if new_status == "CLOSED" else position.get("closed_at"),
-        })
-
-        if updated:
-            updated_positions.append(updated)
-
-            should_alert = (
-                new_action in important_actions
-                and new_action != previous_action
-            )
-
-            if should_alert:
-                try:
-                    loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(None, send_position_alert, updated)
-                    log.info("[%s] Position Telegram alert sent: %s", symbol, new_action)
-                except Exception as exc:
-                    log.warning("[%s] Telegram position alert failed: %s", symbol, exc)
-
-    return updated_positions
 
 
 async def run_full_scan() -> dict:
@@ -682,13 +570,6 @@ async def run_full_scan() -> dict:
             return {"status": "skipped", "reason": "scan not allowed in current session", "session": session_status}
 
         symbols = await get_scan_symbols()
-
-        open_positions = await database.get_open_positions()
-        open_symbols = {p["symbol"] for p in open_positions if p.get("symbol")}
-
-        for symbol in open_symbols:
-            if symbol not in symbols:
-                symbols.append(symbol)
 
         scan_run_id = await database.start_scan_run(total_symbols=len(symbols))
 
@@ -764,8 +645,6 @@ async def run_full_scan() -> dict:
                     result["weekly_rank"] = rank_by_symbol[symbol]
 
                 await database.save_daily_candidate(result, scan_run_id)
-
-            await refresh_open_positions()
 
             await database.finish_scan_run(scan_run_id, stats, status="completed")
             fresh_symbols = stats["scanned_count"] + stats["skipped_count"]
@@ -878,12 +757,16 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(
         refresh_open_positions_safe,
         "interval",
-        seconds=30,
-        id="fast_positions_refresh",
+        seconds=config.POSITION_TRACK_INTERVAL_SECONDS,
+        id="live_position_tracker",
         replace_existing=True,
+        max_instances=1,
     )
 
-    log.info("Fast positions refresh started — every 30 seconds")
+    log.info(
+        "Live position tracker started — every %s seconds",
+        config.POSITION_TRACK_INTERVAL_SECONDS,
+    )
     # ==========================================
     # AUTO CANCEL STALE ORDERS
     # ==========================================
@@ -1804,7 +1687,29 @@ async def api_equity_curve(limit: int = 500):
 
 @app.get("/api/positions")
 async def api_positions():
-    return JSONResponse(await database.get_all_positions(100), headers=no_cache_headers())
+    positions = await database.get_all_positions(100)
+    tracker = await live_position_tracker.get_tracker_status()
+    tracker_by_symbol = {
+        str(item.get("symbol") or "").upper(): item
+        for item in tracker.get("positions", [])
+        if item.get("symbol")
+    }
+    for position in positions:
+        symbol = str(position.get("symbol") or "").upper()
+        live = tracker_by_symbol.get(symbol)
+        position["live_tracking"] = bool(live and str(position.get("status") or "").upper() == "OPEN")
+        position["live_tracking_source"] = (live or {}).get("source")
+        position["live_tracking_last_refresh_at"] = (live or {}).get("last_refresh_at")
+        position["live_tracking_last_refresh_age_seconds"] = (live or {}).get("last_refresh_age_seconds")
+    return JSONResponse(positions, headers=no_cache_headers())
+
+
+@app.get("/api/live-position-tracker")
+async def api_live_position_tracker():
+    return JSONResponse(
+        await live_position_tracker.get_tracker_status(),
+        headers=no_cache_headers(),
+    )
 
 
 @app.get("/api/market-regime")
@@ -2234,6 +2139,8 @@ async def api_trading_status():
             "market_hours": market_hours,
 
             "watchdog": watchdog_status,
+
+            "live_position_tracker": await live_position_tracker.get_tracker_status(),
 
             "circuit_breaker_auto_recovered": bool(
                 watchdog_status.get("circuit_breaker_auto_recovered")
