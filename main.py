@@ -1926,6 +1926,30 @@ async def api_analytics_learning_summary():
     )
 
 
+@app.get("/api/trade-reviews")
+async def api_trade_reviews(limit: int = 200):
+    return JSONResponse(
+        await database.get_trade_reviews(limit=limit),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/trade-reviews/{symbol}")
+async def api_trade_reviews_symbol(symbol: str, limit: int = 200):
+    return JSONResponse(
+        await database.get_trade_reviews(limit=limit, symbol=symbol),
+        headers=no_cache_headers(),
+    )
+
+
+@app.post("/api/trade-reviews/rebuild")
+async def api_trade_reviews_rebuild():
+    return JSONResponse(
+        await database.rebuild_trade_reviews(),
+        headers=no_cache_headers(),
+    )
+
+
 @app.get("/api/scan-runs")
 async def api_scan_runs():
     return JSONResponse(await database.get_scan_runs(20), headers=no_cache_headers())

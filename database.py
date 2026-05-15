@@ -332,6 +332,34 @@ CREATE TABLE IF NOT EXISTS trade_outcomes (
 )
 """
 
+
+CREATE_TRADE_REVIEWS = """
+CREATE TABLE IF NOT EXISTS trade_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    position_id INTEGER,
+    setup_type TEXT DEFAULT 'UNKNOWN',
+    entry_time TEXT,
+    entry_price REAL,
+    entry_reason TEXT,
+    entry_score REAL,
+    entry_indicators_json TEXT,
+    exit_time TEXT,
+    exit_price REAL,
+    exit_reason TEXT,
+    exit_engine TEXT,
+    exit_indicators_json TEXT,
+    profit_amount REAL,
+    profit_percent REAL,
+    hold_minutes REAL,
+    max_favorable_excursion REAL,
+    max_adverse_excursion REAL,
+    review_summary TEXT,
+    lessons_json TEXT,
+    created_at TEXT
+)
+"""
+
 CREATE_ORDER_LIFECYCLE_EVENTS = """
 CREATE TABLE IF NOT EXISTS order_lifecycle_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -380,6 +408,7 @@ async def init_db() -> None:
         await db.execute(CREATE_REJECTED_SETUPS)
         await db.execute(CREATE_SETUP_PERFORMANCE)
         await db.execute(CREATE_TRADE_OUTCOMES)
+        await db.execute(CREATE_TRADE_REVIEWS)
 
         await _ensure_columns(db, "signals", {
             "score": "REAL",
@@ -433,6 +462,9 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trade_decisions_symbol ON trade_decisions(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trade_outcomes_symbol ON trade_outcomes(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trade_outcomes_setup_type ON trade_outcomes(setup_type)")
+        await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_reviews_position_id ON trade_reviews(position_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_trade_reviews_symbol ON trade_reviews(symbol)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_trade_reviews_exit_time ON trade_reviews(exit_time)")
         await db.commit()
 
 
@@ -1092,6 +1124,9 @@ async def close_position(symbol: str, reason: str = "Closed manually") -> dict |
         except Exception as exc:
             log.warning("Trade outcome analytics insert failed after close: %s", exc)
 
+    if updated:
+        await safe_upsert_trade_review_for_position(updated)
+
     if updated and not str(reason or "").upper().startswith("AUTO:"):
         await safe_record_trade_journal_event({
             "symbol": symbol,
@@ -1632,6 +1667,320 @@ async def get_trade_outcomes(limit: int = 200) -> list[dict]:
         async with db.execute("SELECT * FROM trade_outcomes ORDER BY exit_time DESC, id DESC LIMIT ?", (limit,)) as cursor:
             rows = await cursor.fetchall()
     return [dict(row) for row in rows]
+
+def _safe_json_dict(value) -> dict:
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return value
+    try:
+        decoded = json.loads(value)
+        return decoded if isinstance(decoded, dict) else {"value": decoded}
+    except Exception:
+        return {"raw": str(value)}
+
+
+def _first_present(*values):
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _review_summary(row: dict, entry_indicators: dict, exit_indicators: dict) -> str:
+    symbol = row.get("symbol") or "UNKNOWN"
+    setup = row.get("setup_type") or "UNKNOWN"
+    entry_reason = row.get("entry_reason") or "No entry reason recorded"
+    exit_reason = row.get("exit_reason") or "No exit reason recorded"
+    exit_engine = row.get("exit_engine") or "unknown engine"
+    pnl = float(row.get("profit_amount") or 0)
+    pnl_pct = row.get("profit_percent")
+    hold = row.get("hold_minutes")
+    followed_plan = "unknown because plan metadata was incomplete"
+    if row.get("entry_reason") and row.get("exit_reason"):
+        followed_plan = "reviewable from recorded entry and exit rationale"
+    worked = "positive realized PnL" if pnl > 0 else "risk controls limited the recorded outcome" if pnl == 0 else "nothing obvious in the final PnL"
+    failed = "exit or entry timing needs review" if pnl < 0 else "no major failure captured in the outcome data"
+    risk_reward = "profitable" if pnl > 0 else "flat" if pnl == 0 else "unprofitable"
+    hold_result = f"held for {hold:.1f} minutes" if hold is not None else "hold time unavailable"
+    entry_context = ", ".join(
+        f"{key}={value}" for key, value in entry_indicators.items()
+        if value not in (None, "", {}) and key in {"rvol", "vwap_status", "breakout_status", "momentum_score", "market_regime", "strategy_mode"}
+    ) or "no indicator context recorded"
+    return (
+        f"{symbol} {setup} trade review. Entered because: {entry_reason}. "
+        f"Entry context: {entry_context}. Exited because: {exit_reason} via {exit_engine}. "
+        f"Setup followed plan: {followed_plan}. What worked: {worked}. "
+        f"What failed: {failed}. Risk/reward result: {risk_reward} "
+        f"({pnl:.2f}{'' if pnl_pct is None else f', {float(pnl_pct):.2f}%'}). "
+        f"Hold time result: {hold_result}."
+    )
+
+
+def _review_lessons(row: dict, entry_indicators: dict, exit_indicators: dict) -> list[dict]:
+    pnl = float(row.get("profit_amount") or 0)
+    lessons = []
+    lessons.append({
+        "topic": "entry_quality",
+        "lesson": "Entry reason and indicator context were captured" if row.get("entry_reason") else "Entry rationale was missing; improve decision logging",
+    })
+    lessons.append({
+        "topic": "exit_quality",
+        "lesson": "Exit reason was captured" if row.get("exit_reason") else "Exit rationale was missing; improve close logging",
+    })
+    lessons.append({
+        "topic": "risk_reward",
+        "lesson": "Repeatable setup candidate" if pnl > 0 else "Review sizing, stop distance, and exit trigger before repeating",
+    })
+    if row.get("hold_minutes") is None:
+        lessons.append({"topic": "data_quality", "lesson": "Hold time could not be computed because entry or exit time was missing"})
+    if not entry_indicators:
+        lessons.append({"topic": "data_quality", "lesson": "Entry indicators were unavailable for replay"})
+    if not exit_indicators:
+        lessons.append({"topic": "data_quality", "lesson": "Exit indicators or execution context were unavailable for replay"})
+    return lessons
+
+
+async def _latest_trade_outcome_for_review(db: aiosqlite.Connection, symbol: str, position: dict) -> dict | None:
+    await db.execute(CREATE_TRADE_OUTCOMES)
+    candidates = []
+    async with db.execute(
+        """
+        SELECT * FROM trade_outcomes
+        WHERE symbol = ?
+        ORDER BY exit_time DESC, id DESC
+        LIMIT 10
+        """,
+        (symbol,),
+    ) as cursor:
+        candidates = [dict(row) for row in await cursor.fetchall()]
+    if not candidates:
+        return None
+    closed_at = learning_analytics.parse_dt(position.get("closed_at") or position.get("updated_at"))
+    if not closed_at:
+        return candidates[0]
+    def distance(outcome: dict) -> float:
+        exit_dt = learning_analytics.parse_dt(outcome.get("exit_time"))
+        return abs((exit_dt - closed_at).total_seconds()) if exit_dt else 10**12
+    return sorted(candidates, key=distance)[0]
+
+
+async def _latest_decision_for_review(db: aiosqlite.Connection, symbol: str, entry_time: str | None) -> dict | None:
+    await db.execute(CREATE_TRADE_DECISIONS)
+    if entry_time:
+        async with db.execute(
+            """
+            SELECT * FROM trade_decisions
+            WHERE symbol = ? AND COALESCE(entry_time, created_at) <= ?
+            ORDER BY entry_time DESC, id DESC
+            LIMIT 1
+            """,
+            (symbol, entry_time),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return dict(row)
+    async with db.execute(
+        "SELECT * FROM trade_decisions WHERE symbol = ? ORDER BY entry_time DESC, id DESC LIMIT 1",
+        (symbol,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def _executions_for_review(db: aiosqlite.Connection, symbol: str, entry_time: str | None, exit_time: str | None) -> list[dict]:
+    await db.execute(CREATE_EXECUTIONS)
+    params: list = [symbol]
+    where = ["symbol = ?"]
+    if entry_time:
+        where.append("COALESCE(time, created_at) >= ?")
+        params.append(entry_time)
+    if exit_time:
+        where.append("COALESCE(time, created_at) <= ?")
+        params.append(exit_time)
+    sql = f"SELECT * FROM executions WHERE {' AND '.join(where)} ORDER BY COALESCE(time, created_at) ASC LIMIT 50"
+    async with db.execute(sql, params) as cursor:
+        rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def build_trade_review(position: dict) -> dict | None:
+    symbol = _symbol(position.get("symbol"))
+    if not symbol or str(position.get("status") or "").upper() != "CLOSED":
+        return None
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_TRADE_REVIEWS)
+        db.row_factory = aiosqlite.Row
+        outcome = await _latest_trade_outcome_for_review(db, symbol, position) or {}
+        entry_time = _first_present(outcome.get("entry_time"), position.get("buy_date"), position.get("created_at"))
+        exit_time = _first_present(outcome.get("exit_time"), position.get("closed_at"), position.get("updated_at"))
+        decision = await _latest_decision_for_review(db, symbol, entry_time) or {}
+        executions = await _executions_for_review(db, symbol, entry_time, exit_time)
+
+    entry_indicators = {
+        "decision_id": decision.get("id"),
+        "setup_type": decision.get("setup_type"),
+        "score_breakdown": _safe_json_dict(decision.get("score_breakdown")),
+        "rvol": decision.get("rvol"),
+        "vwap_status": decision.get("vwap_status"),
+        "breakout_status": decision.get("breakout_status"),
+        "momentum_score": decision.get("momentum_score"),
+        "market_regime": decision.get("market_regime"),
+        "sector": decision.get("sector"),
+        "strategy_mode": decision.get("strategy_mode"),
+    }
+    exit_indicators = {
+        "outcome_id": outcome.get("id"),
+        "trailing_stop_used": outcome.get("trailing_stop_used"),
+        "force_exit_used": outcome.get("force_exit_used"),
+        "rvol_range": outcome.get("rvol_range"),
+        "market_regime": outcome.get("market_regime"),
+        "sector": outcome.get("sector"),
+        "time_of_day": outcome.get("time_of_day"),
+        "executions": executions,
+        "outcome_raw_json": _safe_json_dict(outcome.get("raw_json")),
+    }
+    entry_score_payload = entry_indicators.get("score_breakdown") or {}
+    entry_score = _first_present(
+        entry_score_payload.get("score"),
+        entry_score_payload.get("weekly_score"),
+        entry_score_payload.get("intraday_technical_score"),
+        decision.get("momentum_score"),
+    )
+    row = {
+        "symbol": symbol,
+        "position_id": position.get("id"),
+        "setup_type": _first_present(outcome.get("setup_type"), decision.get("setup_type"), "UNKNOWN"),
+        "entry_time": _first_present(entry_time, decision.get("entry_time")),
+        "entry_price": _first_present(outcome.get("entry_price"), decision.get("entry_price"), position.get("buy_price")),
+        "entry_reason": _first_present(decision.get("entry_reason"), position.get("reason"), "No entry reason recorded"),
+        "entry_score": entry_score,
+        "entry_indicators_json": _analytics_json(entry_indicators),
+        "exit_time": exit_time,
+        "exit_price": _first_present(outcome.get("exit_price"), position.get("current_price")),
+        "exit_reason": _first_present(outcome.get("exit_reason"), position.get("reason"), "No exit reason recorded"),
+        "exit_engine": _first_present(outcome.get("exit_engine"), "database.close_position"),
+        "exit_indicators_json": _analytics_json(exit_indicators),
+        "profit_amount": _first_present(outcome.get("profit_amount"), position.get("profit_amount")),
+        "profit_percent": _first_present(outcome.get("profit_percent"), position.get("profit_percent")),
+        "hold_minutes": _first_present(outcome.get("hold_minutes"), learning_analytics.hold_minutes(entry_time, exit_time)),
+        "max_favorable_excursion": outcome.get("max_favorable_excursion"),
+        "max_adverse_excursion": outcome.get("max_adverse_excursion"),
+        "created_at": now_iso(),
+    }
+    row["review_summary"] = _review_summary(row, entry_indicators, exit_indicators)
+    row["lessons_json"] = _analytics_json(_review_lessons(row, entry_indicators, exit_indicators))
+    return row
+
+
+async def upsert_trade_review_for_position(position: dict) -> dict | None:
+    row = await build_trade_review(position)
+    if not row:
+        return None
+    sql = """
+    INSERT INTO trade_reviews (
+        symbol, position_id, setup_type, entry_time, entry_price, entry_reason, entry_score,
+        entry_indicators_json, exit_time, exit_price, exit_reason, exit_engine, exit_indicators_json,
+        profit_amount, profit_percent, hold_minutes, max_favorable_excursion, max_adverse_excursion,
+        review_summary, lessons_json, created_at
+    ) VALUES (
+        :symbol, :position_id, :setup_type, :entry_time, :entry_price, :entry_reason, :entry_score,
+        :entry_indicators_json, :exit_time, :exit_price, :exit_reason, :exit_engine, :exit_indicators_json,
+        :profit_amount, :profit_percent, :hold_minutes, :max_favorable_excursion, :max_adverse_excursion,
+        :review_summary, :lessons_json, :created_at
+    )
+    ON CONFLICT(position_id) DO UPDATE SET
+        symbol = excluded.symbol,
+        setup_type = excluded.setup_type,
+        entry_time = excluded.entry_time,
+        entry_price = excluded.entry_price,
+        entry_reason = excluded.entry_reason,
+        entry_score = excluded.entry_score,
+        entry_indicators_json = excluded.entry_indicators_json,
+        exit_time = excluded.exit_time,
+        exit_price = excluded.exit_price,
+        exit_reason = excluded.exit_reason,
+        exit_engine = excluded.exit_engine,
+        exit_indicators_json = excluded.exit_indicators_json,
+        profit_amount = excluded.profit_amount,
+        profit_percent = excluded.profit_percent,
+        hold_minutes = excluded.hold_minutes,
+        max_favorable_excursion = excluded.max_favorable_excursion,
+        max_adverse_excursion = excluded.max_adverse_excursion,
+        review_summary = excluded.review_summary,
+        lessons_json = excluded.lessons_json
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_TRADE_REVIEWS)
+        await db.execute(sql, row)
+        await db.commit()
+    return row
+
+
+async def safe_upsert_trade_review_for_position(position: dict) -> None:
+    try:
+        await upsert_trade_review_for_position(position)
+    except Exception as exc:
+        log.warning("Trade review upsert failed: %s", exc)
+
+
+async def rebuild_trade_reviews() -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_POSITIONS)
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM positions WHERE UPPER(TRIM(COALESCE(status, ''))) = 'CLOSED' ORDER BY closed_at DESC, updated_at DESC") as cursor:
+            positions = [dict(row) for row in await cursor.fetchall()]
+    rebuilt = 0
+    failed = 0
+    errors: list[str] = []
+    for position in positions:
+        try:
+            review = await upsert_trade_review_for_position(position)
+            if review:
+                rebuilt += 1
+        except Exception as exc:
+            failed += 1
+            msg = f"{position.get('symbol')}: {exc}"
+            errors.append(msg)
+            log.warning("Trade review rebuild failed for %s: %s", position.get("symbol"), exc)
+    return {"rebuilt": rebuilt, "failed": failed, "errors": errors[:10], "informational_only": True}
+
+
+def _trade_review_row(row) -> dict:
+    data = dict(row)
+    for key in ("entry_indicators_json", "exit_indicators_json", "lessons_json"):
+        try:
+            data[key.replace("_json", "")] = json.loads(data.get(key) or ("[]" if key == "lessons_json" else "{}"))
+        except Exception:
+            data[key.replace("_json", "")] = [] if key == "lessons_json" else {}
+    return data
+
+
+async def get_trade_reviews(limit: int = 200, symbol: str | None = None) -> list[dict]:
+    limit = max(1, min(int(limit or 200), 1000))
+    params: tuple
+    if symbol:
+        sql = """
+        SELECT * FROM trade_reviews
+        WHERE symbol = ?
+        ORDER BY exit_time DESC, id DESC
+        LIMIT ?
+        """
+        params = (symbol.strip().upper(), limit)
+    else:
+        sql = """
+        SELECT * FROM trade_reviews
+        ORDER BY exit_time DESC, id DESC
+        LIMIT ?
+        """
+        params = (limit,)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_TRADE_REVIEWS)
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
+    return [_trade_review_row(row) for row in rows]
 
 
 async def get_setup_performance() -> list[dict]:
