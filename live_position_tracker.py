@@ -18,6 +18,10 @@ log = logging.getLogger(__name__)
 
 LIVE_POSITION_TRACKER_STATE_KEY = "live_position_tracker_status"
 LIVE_POSITION_TRACKER_SOURCE = "live_position_tracker"
+ALWAYS_REFRESH_POSITION_SOURCES = {
+    "TWS_RECONCILIATION_RECOVERY",
+    "TWS_BASELINE_ADOPTED",
+}
 
 _refresh_lock = asyncio.Lock()
 
@@ -130,11 +134,21 @@ def _empty_status(error: str | None = None) -> dict[str, Any]:
     return payload
 
 
+def _position_source(position: dict[str, Any]) -> str:
+    return str(position.get("source") or "").strip().upper()
+
+
+def _is_reconciliation_managed_position(position: dict[str, Any]) -> bool:
+    return _position_source(position) in ALWAYS_REFRESH_POSITION_SOURCES
+
+
 def _is_position_intraday(position: dict[str, Any], active_mode: strategy_mode.StrategyMode | str) -> bool:
-    return strategy_mode.is_intraday_mode(position.get("strategy_mode") or position.get("source") or active_mode)
+    return strategy_mode.is_intraday_mode(position.get("strategy_mode") or active_mode)
 
 
 def _should_refresh_position(position: dict[str, Any], previous_by_symbol: dict[str, dict[str, Any]], active_mode: strategy_mode.StrategyMode | str) -> bool:
+    if _is_reconciliation_managed_position(position):
+        return True
     if _is_position_intraday(position, active_mode):
         return True
     previous = previous_by_symbol.get(str(position.get("symbol") or "").upper()) or {}
@@ -152,8 +166,12 @@ def _live_metadata(position: dict[str, Any], scan_result: dict[str, Any], bars_1
         "symbol": symbol,
         "status": "OPEN",
         "source": LIVE_POSITION_TRACKER_SOURCE,
+        "position_source": position.get("source"),
         "last_refresh_at": refreshed_at,
         "refresh_source": LIVE_POSITION_TRACKER_SOURCE,
+        "live_tracking": True,
+        "live_tracking_source": LIVE_POSITION_TRACKER_SOURCE,
+        "live_tracking_last_refresh_at": refreshed_at,
         "quote_refreshed": scan_result.get("price") is not None or scan_result.get("current_price") is not None,
         "bid": bid,
         "ask": ask,

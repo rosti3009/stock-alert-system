@@ -789,7 +789,7 @@ async def get_open_positions() -> list[dict]:
     sql = """
     SELECT *
     FROM positions
-    WHERE status = 'OPEN'
+    WHERE UPPER(TRIM(COALESCE(status, ''))) = 'OPEN'
     ORDER BY created_at ASC
     """
 
