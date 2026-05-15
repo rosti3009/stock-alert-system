@@ -392,6 +392,45 @@
               </div>
             </div>
 
+            <div class="status-card">
+              <div class="status-label">
+                Cadence
+              </div>
+
+              <div
+                class="status-value blue"
+                id="scannerCadence"
+              >
+                -
+              </div>
+            </div>
+
+            <div class="status-card">
+              <div class="status-label">
+                Last / Next Scan
+              </div>
+
+              <div
+                class="status-value"
+                id="scannerSchedule"
+              >
+                -
+              </div>
+            </div>
+
+            <div class="status-card">
+              <div class="status-label">
+                Intraday Fast Scan
+              </div>
+
+              <div
+                class="status-value"
+                id="intradayFastScan"
+              >
+                -
+              </div>
+            </div>
+
           </div>
 
         </div>
@@ -530,6 +569,7 @@ let performance = {};
 let equityCurve = [];
 let portfolioRisk = {};
 let strategyMode = {};
+let scannerStatus = {};
 let equityChart;
 let isLoading = false;
 
@@ -587,6 +627,19 @@ function pct(v){
 
   return Number(v).toFixed(2)
     + "%";
+}
+
+function shortDateTime(v){
+
+  if(!v){
+    return "-";
+  }
+
+  try{
+    return new Date(v).toLocaleTimeString();
+  }catch(_err){
+    return v;
+  }
 }
 
 function pnlClass(v){
@@ -649,7 +702,8 @@ async function loadDashboard(){
       performance,
       equityCurve,
       portfolioRisk,
-      strategyMode
+      strategyMode,
+      scannerStatus
     ] = await Promise.all([
 
       fetchNoCache("/api/stocks"),
@@ -664,7 +718,9 @@ async function loadDashboard(){
 
       fetchNoCache("/api/portfolio-risk"),
 
-      fetchNoCache("/api/strategy-mode")
+      fetchNoCache("/api/strategy-mode"),
+
+      fetchNoCache("/api/scanner/status")
 
     ]);
 
@@ -741,7 +797,9 @@ async function switchStrategyMode(mode){
         : "/api/strategy-mode/swing",
       { method:"POST" }
     );
+    scannerStatus = strategyMode.scanner || scannerStatus;
     updateStrategyMode();
+    updateScannerStatus();
   }catch(err){
     showError("Strategy mode switch failed: " + err.message);
   }
@@ -1073,6 +1131,23 @@ function updateScannerStatus(){
     top
       ? top.symbol
       : "-";
+
+  const intervalSeconds = Number(scannerStatus.scan_interval_seconds || 0);
+  document.getElementById("scannerCadence").textContent =
+    intervalSeconds > 0
+      ? (intervalSeconds < 60 ? intervalSeconds + " sec" : Math.round(intervalSeconds / 60) + " min")
+        + " · " + (scannerStatus.symbols_per_scan || "-") + " symbols"
+      : "-";
+
+  document.getElementById("scannerSchedule").textContent =
+    shortDateTime(scannerStatus.last_scan_at)
+    + " / "
+    + shortDateTime(scannerStatus.next_scan_at);
+
+  const fastScan = Boolean(scannerStatus.intraday_fast_scan_active);
+  const fastScanEl = document.getElementById("intradayFastScan");
+  fastScanEl.textContent = fastScan ? "ACTIVE" : "OFF";
+  fastScanEl.className = "status-value " + (fastScan ? "green" : "yellow");
 }
 
 function drawEquityChart(){
