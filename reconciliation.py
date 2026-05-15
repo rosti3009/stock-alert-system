@@ -446,12 +446,18 @@ def close_db_positions_flat_in_tws_worker(
     )
 
 
-async def _ensure_position_source_column(db: aiosqlite.Connection) -> None:
+async def _ensure_position_recovery_columns(db: aiosqlite.Connection) -> None:
     async with db.execute("PRAGMA table_info(positions)") as cursor:
         existing = {row[1] for row in await cursor.fetchall()}
 
     if "source" not in existing:
         await db.execute("ALTER TABLE positions ADD COLUMN source TEXT")
+    if "recovery_source_position_id" not in existing:
+        await db.execute("ALTER TABLE positions ADD COLUMN recovery_source_position_id INTEGER")
+
+
+async def _ensure_position_source_column(db: aiosqlite.Connection) -> None:
+    await _ensure_position_recovery_columns(db)
 
 
 def _baseline_notes(position: dict) -> str:
@@ -599,6 +605,141 @@ async def adopt_tws_positions_as_baseline() -> dict:
     }
 
 
+RECOVERY_NOTE = "Recovered from live TWS position after reconciliation mismatch"
+RECOVERY_SOURCE = "TWS_RECONCILIATION_RECOVERY"
+
+
+def _append_recovery_note(existing_notes: str | None) -> str:
+    notes = str(existing_notes or "").strip()
+    if RECOVERY_NOTE in notes:
+        return notes
+    return f"{notes}\n{RECOVERY_NOTE}".strip() if notes else RECOVERY_NOTE
+
+
+async def _load_latest_closed_position(db: aiosqlite.Connection, symbol: str) -> dict | None:
+    db.row_factory = aiosqlite.Row
+    async with db.execute(
+        """
+        SELECT *
+        FROM positions
+        WHERE UPPER(TRIM(symbol)) = ?
+          AND status = 'CLOSED'
+        ORDER BY COALESCE(closed_at, updated_at, created_at) DESC, id DESC
+        LIMIT 1
+        """,
+        (symbol,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def _recover_closed_position_from_tws(
+    db: aiosqlite.Connection,
+    symbol: str,
+    tws_position: dict,
+) -> dict | None:
+    """Reopen a closed DB position when TWS still shows a live long position.
+
+    This is a DB-only recovery path: it never places, cancels, or modifies TWS
+    orders. It is intentionally limited to positive TWS quantities and only runs
+    when no DB OPEN position exists for the symbol.
+    """
+    quantity = float(tws_position.get("quantity") or 0)
+    if quantity <= 0:
+        return None
+
+    existing_open_qty = await _load_db_positions(db)
+    if symbol in existing_open_qty:
+        return None
+
+    closed_position = await _load_latest_closed_position(db, symbol)
+    if not closed_position:
+        return None
+
+    await _ensure_position_recovery_columns(db)
+
+    avg_cost = float(tws_position.get("avg_cost") or 0)
+    market_price = float(tws_position.get("market_price") or 0)
+    buy_price = float(closed_position.get("buy_price") or 0)
+    if buy_price <= 0 and avg_cost > 0:
+        buy_price = avg_cost
+    if buy_price <= 0 and market_price > 0:
+        buy_price = market_price
+
+    current_price = market_price if market_price > 0 else buy_price
+    profit_amount = None
+    profit_percent = None
+    if buy_price > 0 and current_price > 0:
+        profit_amount = round((current_price - buy_price) * quantity, 2)
+        profit_percent = round(((current_price - buy_price) / buy_price) * 100, 2)
+
+    now = now_iso()
+    notes = _append_recovery_note(closed_position.get("notes"))
+    reason = RECOVERY_NOTE
+
+    cursor = await db.execute(
+        """
+        UPDATE positions
+        SET status = 'OPEN',
+            action = 'HOLD',
+            quantity = ?,
+            buy_price = ?,
+            current_price = ?,
+            profit_amount = ?,
+            profit_percent = ?,
+            reason = ?,
+            notes = ?,
+            source = ?,
+            updated_at = ?,
+            closed_at = NULL,
+            recovery_source_position_id = COALESCE(recovery_source_position_id, id)
+        WHERE id = ?
+          AND status = 'CLOSED'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM positions p2
+              WHERE UPPER(TRIM(p2.symbol)) = ?
+                AND p2.status = 'OPEN'
+                AND p2.id != positions.id
+          )
+        """,
+        (
+            round(quantity, 6),
+            round(buy_price, 4),
+            round(current_price, 4),
+            profit_amount,
+            profit_percent,
+            reason,
+            notes,
+            RECOVERY_SOURCE,
+            now,
+            closed_position["id"],
+            symbol,
+        ),
+    )
+
+    if cursor.rowcount <= 0:
+        return None
+
+    recovered = dict(closed_position)
+    recovered.update({
+        "status": "OPEN",
+        "action": "HOLD",
+        "quantity": round(quantity, 6),
+        "buy_price": round(buy_price, 4),
+        "current_price": round(current_price, 4),
+        "profit_amount": profit_amount,
+        "profit_percent": profit_percent,
+        "reason": reason,
+        "notes": notes,
+        "source": RECOVERY_SOURCE,
+        "updated_at": now,
+        "closed_at": None,
+        "recovery_source_position_id": closed_position["id"],
+    })
+    return recovered
+
+
 async def run_reconciliation_once() -> dict:
     await init_reconciliation_db()
 
@@ -613,6 +754,7 @@ async def run_reconciliation_once() -> dict:
         symbols.update(execution_quantities.keys())
 
         issues = []
+        recovered_positions = []
 
         for symbol in sorted(symbols):
             db_qty = float(db_positions.get(symbol, {}).get("quantity", 0) or 0)
@@ -634,16 +776,30 @@ async def run_reconciliation_once() -> dict:
 
             # TWS has position, DB does not
             elif tws_qty > 0 and db_qty <= 0:
-                issue = {
-                    "symbol": symbol,
-                    "issue_type": "TWS_OPEN_BUT_DB_FLAT",
-                    "severity": "HIGH",
-                    "db_quantity": db_qty,
-                    "tws_quantity": tws_qty,
-                    "execution_quantity": exec_qty,
-                    "details": "TWS has an open position but DB does not have matching OPEN position.",
-                }
-                issues.append(issue)
+                recovered = await _recover_closed_position_from_tws(
+                    db,
+                    symbol,
+                    tws_positions.get(symbol, {}),
+                )
+                if recovered:
+                    recovered_positions.append(recovered)
+                    db_qty = float(recovered.get("quantity") or 0)
+                    db_positions[symbol] = {
+                        "symbol": symbol,
+                        "quantity": db_qty,
+                        "status": "OPEN",
+                    }
+                else:
+                    issue = {
+                        "symbol": symbol,
+                        "issue_type": "TWS_OPEN_BUT_DB_FLAT",
+                        "severity": "HIGH",
+                        "db_quantity": db_qty,
+                        "tws_quantity": tws_qty,
+                        "execution_quantity": exec_qty,
+                        "details": "TWS has an open position but DB does not have matching OPEN position.",
+                    }
+                    issues.append(issue)
 
             # both open but quantity mismatch
             elif db_qty > 0 and tws_qty > 0 and abs(db_qty - tws_qty) > 0.0001:
@@ -673,6 +829,19 @@ async def run_reconciliation_once() -> dict:
 
         open_issues = await reconcile_issue_lifecycle(db, issues)
 
+    for recovered in recovered_positions:
+        await database.safe_record_trade_journal_event({
+            "symbol": recovered.get("symbol"),
+            "event_type": "POSITION_RECONCILIATION_RECOVERED",
+            "decision": "RECOVERED",
+            "reason": RECOVERY_NOTE,
+            "source_module": "reconciliation.run_reconciliation_once",
+            "price": recovered.get("current_price"),
+            "quantity": recovered.get("quantity"),
+            "unrealized_pnl": recovered.get("profit_amount"),
+            "raw_payload": recovered,
+        })
+
     log.info(
         "Reconciliation complete | current_issues=%s open_issues=%s",
         len(issues),
@@ -683,5 +852,7 @@ async def run_reconciliation_once() -> dict:
         "ok": len(open_issues) == 0,
         "issues_count": len(open_issues),
         "issues": open_issues,
+        "recovered_positions_count": len(recovered_positions),
+        "recovered_positions": recovered_positions,
         "checked_at": now_iso(),
     }
