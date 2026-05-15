@@ -460,6 +460,58 @@
         <div id="correlationClusterRows" class="muted">Loading...</div>
       </div>
 
+
+      <!-- ========================================= -->
+      <!-- TRADING INTELLIGENCE -->
+      <!-- ========================================= -->
+
+      <div class="box" style="margin-bottom:16px;">
+        <h3>🧠 Trading Intelligence</h3>
+        <div class="muted" style="margin-bottom:10px;">
+          Analytics only — informational recommendations. This layer does not place orders or change strategy automatically.
+        </div>
+        <div class="scan-status">
+          <div class="status-card">
+            <div class="status-label">Average Hold Time</div>
+            <div class="status-value blue" id="tiAvgHold">-</div>
+          </div>
+          <div class="status-card">
+            <div class="status-label">Best RVOL Range</div>
+            <div class="status-value green" id="tiBestRvol">-</div>
+          </div>
+          <div class="status-card">
+            <div class="status-label">Best Hour</div>
+            <div class="status-value yellow" id="tiBestHour">-</div>
+          </div>
+          <div class="status-card">
+            <div class="status-label">Best Sector</div>
+            <div class="status-value green" id="tiBestSector">-</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="mini-grid">
+        <div class="box">
+          <h3>Win Rate by Setup</h3>
+          <div id="tiSetupPerformance" class="muted">Loading...</div>
+        </div>
+        <div class="box">
+          <h3>Rejection Reasons / Filters</h3>
+          <div id="tiRejections" class="muted">Loading...</div>
+        </div>
+      </div>
+
+      <div class="mini-grid">
+        <div class="box">
+          <h3>Best / Worst Filters</h3>
+          <div id="tiFilters" class="muted">Loading...</div>
+        </div>
+        <div class="box">
+          <h3>Recent Trade Outcomes</h3>
+          <div id="tiOutcomes" class="muted">Loading...</div>
+        </div>
+      </div>
+
       <!-- ========================================= -->
       <!-- TABLES -->
       <!-- ========================================= -->
@@ -570,6 +622,10 @@ let equityCurve = [];
 let portfolioRisk = {};
 let strategyMode = {};
 let scannerStatus = {};
+let learningSummary = {};
+let rejectedSetups = [];
+let setupPerformance = [];
+let tradeOutcomes = [];
 let equityChart;
 let isLoading = false;
 
@@ -703,7 +759,11 @@ async function loadDashboard(){
       equityCurve,
       portfolioRisk,
       strategyMode,
-      scannerStatus
+      scannerStatus,
+      learningSummary,
+      rejectedSetups,
+      setupPerformance,
+      tradeOutcomes
     ] = await Promise.all([
 
       fetchNoCache("/api/stocks"),
@@ -720,7 +780,15 @@ async function loadDashboard(){
 
       fetchNoCache("/api/strategy-mode"),
 
-      fetchNoCache("/api/scanner/status")
+      fetchNoCache("/api/scanner/status"),
+
+      fetchNoCache("/api/analytics/learning-summary"),
+
+      fetchNoCache("/api/analytics/rejections?limit=25"),
+
+      fetchNoCache("/api/analytics/setup-performance"),
+
+      fetchNoCache("/api/analytics/outcomes?limit=25")
 
     ]);
 
@@ -737,6 +805,8 @@ async function loadDashboard(){
     drawSignalsPreview();
 
     drawSectorIntelligence();
+
+    drawTradingIntelligence();
 
     document.getElementById(
       "updated"
@@ -757,6 +827,70 @@ async function loadDashboard(){
 
     isLoading = false;
   }
+}
+
+
+function metricRows(items, columns){
+  if(!items || !items.length){
+    return '<div class="muted">No analytics data yet.</div>';
+  }
+  return '<div class="table-wrap compact-table"><table><thead><tr>'
+    + columns.map(c => '<th>' + c.label + '</th>').join('')
+    + '</tr></thead><tbody>'
+    + items.map(item => '<tr>' + columns.map(c => '<td>' + (c.format ? c.format(item[c.key], item) : (item[c.key] ?? '-')) + '</td>').join('') + '</tr>').join('')
+    + '</tbody></table></div>';
+}
+
+function drawTradingIntelligence(){
+  const bestRvol = (learningSummary.best_rvol_ranges || [])[0];
+  const bestHour = (learningSummary.best_intraday_hours || [])[0];
+  const bestSector = (learningSummary.best_sectors || [])[0];
+
+  document.getElementById('tiAvgHold').textContent =
+    Number(learningSummary.average_hold_time || 0).toFixed(1) + 'm';
+  document.getElementById('tiBestRvol').textContent = bestRvol ? bestRvol.rvol_range : '-';
+  document.getElementById('tiBestHour').textContent = bestHour ? bestHour.time_of_day : '-';
+  document.getElementById('tiBestSector').textContent = bestSector ? bestSector.sector : '-';
+
+  document.getElementById('tiSetupPerformance').innerHTML = metricRows(setupPerformance, [
+    {key:'setup_type', label:'Setup'},
+    {key:'total_trades', label:'Trades'},
+    {key:'win_rate', label:'Win %', format:v=>pct(v)},
+    {key:'avg_profit_amount', label:'Avg PnL', format:v=>money(v)},
+    {key:'avg_hold_minutes', label:'Hold', format:v=>Number(v || 0).toFixed(1) + 'm'}
+  ]);
+
+  const rejectionCounts = {};
+  rejectedSetups.forEach(r => {
+    const key = r.rejection_reason || r.failed_filter || 'UNKNOWN';
+    rejectionCounts[key] = (rejectionCounts[key] || 0) + 1;
+  });
+  const rejectionRows = Object.entries(rejectionCounts)
+    .map(([reason,count]) => ({reason,count}))
+    .sort((a,b) => b.count - a.count)
+    .slice(0,10);
+  document.getElementById('tiRejections').innerHTML = metricRows(rejectionRows, [
+    {key:'reason', label:'Reason'},
+    {key:'count', label:'Count'}
+  ]);
+
+  const bestFilters = (learningSummary.best_rejection_reasons || [])
+    .map(item => ({...item, filter_group:'Best'}));
+  const worstFilters = (learningSummary.worst_rejection_reasons || [])
+    .map(item => ({...item, filter_group:'Worst'}));
+  document.getElementById('tiFilters').innerHTML = metricRows([...bestFilters, ...worstFilters].slice(0,12), [
+    {key:'filter_group', label:'Group'},
+    {key:'rejection_reason', label:'Filter / Reason'},
+    {key:'rejection_count', label:'Count'}
+  ]);
+
+  document.getElementById('tiOutcomes').innerHTML = metricRows(tradeOutcomes.slice(0,10), [
+    {key:'symbol', label:'Symbol'},
+    {key:'setup_type', label:'Setup'},
+    {key:'exit_reason', label:'Exit'},
+    {key:'profit_amount', label:'PnL', format:v=>money(v)},
+    {key:'profit_percent', label:'PnL %', format:v=>pct(v)}
+  ]);
 }
 
 function updateStrategyMode(){

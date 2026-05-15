@@ -1894,6 +1894,37 @@ async def api_trade_journal(limit: int = 200, symbol: str | None = None):
         headers=no_cache_headers(),
     )
 
+@app.get("/api/analytics/rejections")
+async def api_analytics_rejections(limit: int = 200):
+    return JSONResponse(
+        await database.get_rejected_setups(limit=limit),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/analytics/setup-performance")
+async def api_analytics_setup_performance():
+    return JSONResponse(
+        await database.refresh_setup_performance(),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/analytics/outcomes")
+async def api_analytics_outcomes(limit: int = 200):
+    return JSONResponse(
+        await database.get_trade_outcomes(limit=limit),
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/analytics/learning-summary")
+async def api_analytics_learning_summary():
+    return JSONResponse(
+        await database.get_learning_summary(),
+        headers=no_cache_headers(),
+    )
+
 
 @app.get("/api/scan-runs")
 async def api_scan_runs():
