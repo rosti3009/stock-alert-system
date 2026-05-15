@@ -187,3 +187,45 @@ def test_learning_layer_does_not_affect_order_execution():
     order_calls, decisions = asyncio.run(run())
     assert len(order_calls) <= 1
     assert all(row["event_type"] != "ORDER_PLACED_BY_ANALYTICS" for row in decisions)
+
+
+def test_strategy_learning_analytics_records_decisions_with_aggressive_profile():
+    import config
+
+    original = {
+        "IBKR_PAPER_TRADING": config.IBKR_PAPER_TRADING,
+        "IBKR_ENABLE_REAL_TRADING": config.IBKR_ENABLE_REAL_TRADING,
+        "PAPER_TRAINING_PROFILE": config.PAPER_TRAINING_PROFILE,
+    }
+
+    async def run():
+        with temp_database():
+            await database.init_db()
+            config.IBKR_PAPER_TRADING = True
+            config.IBKR_ENABLE_REAL_TRADING = False
+            config.PAPER_TRAINING_PROFILE = "AGGRESSIVE_LEARNING"
+            await database.record_trade_decision({
+                "symbol": "amd",
+                "strategy_mode": "INTRADAY_TECHNICAL",
+                "setup_type": "BREAKOUT",
+                "entry_reason": "Aggressive learning profile candidate accepted",
+                "score": 88,
+                "relative_volume": 1.8,
+                "entry_price": 125.0,
+            })
+            async with database.aiosqlite.connect(database.DB_PATH) as db:
+                db.row_factory = database.aiosqlite.Row
+                async with db.execute("SELECT * FROM trade_decisions") as cursor:
+                    return await cursor.fetchall()
+
+    try:
+        rows = asyncio.run(run())
+    finally:
+        for key, value in original.items():
+            setattr(config, key, value)
+
+    assert len(rows) == 1
+    row = dict(rows[0])
+    assert row["symbol"] == "AMD"
+    assert row["strategy_mode"] == "INTRADAY_TECHNICAL"
+    assert row["entry_reason"] == "Aggressive learning profile candidate accepted"

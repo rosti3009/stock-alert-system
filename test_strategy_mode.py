@@ -19,13 +19,13 @@ def run_async(coro):
 
 def test_switching_to_intraday_changes_buy_threshold():
     rules = strategy_mode.active_rules(strategy_mode.StrategyMode.INTRADAY_TECHNICAL)
-    assert rules["min_score_to_buy"] == config.INTRADAY_MIN_SCORE_TO_BUY == 85
-    assert rules["min_score_to_buy"] > strategy_mode.active_rules(strategy_mode.StrategyMode.SWING_DEFAULT)["min_score_to_buy"]
+    assert rules["min_score_to_buy"] == 78
+    assert rules["min_score_to_buy"] < strategy_mode.active_rules(strategy_mode.StrategyMode.SWING_DEFAULT)["min_score_to_buy"]
 
 
 def test_switching_to_intraday_changes_max_positions():
     rules = strategy_mode.active_rules(strategy_mode.StrategyMode.INTRADAY_TECHNICAL)
-    assert rules["max_open_positions"] == config.INTRADAY_MAX_OPEN_POSITIONS == 3
+    assert rules["max_open_positions"] == 8
     assert strategy_mode.active_rules(strategy_mode.StrategyMode.SWING_DEFAULT)["max_open_positions"] == config.MAX_OPEN_POSITIONS
 
 
@@ -128,3 +128,81 @@ def test_switching_back_to_swing_restores_swing_behavior(tmp_path):
         assert rules["max_open_positions"] == config.MAX_OPEN_POSITIONS
     finally:
         database.DB_PATH = original_db_path
+
+def test_aggressive_learning_profile_increases_capital_and_max_positions():
+    original = {
+        "IBKR_PAPER_TRADING": config.IBKR_PAPER_TRADING,
+        "IBKR_ENABLE_REAL_TRADING": config.IBKR_ENABLE_REAL_TRADING,
+        "PAPER_TRAINING_PROFILE": config.PAPER_TRAINING_PROFILE,
+    }
+    try:
+        config.IBKR_PAPER_TRADING = True
+        config.IBKR_ENABLE_REAL_TRADING = False
+        config.PAPER_TRAINING_PROFILE = "AGGRESSIVE_LEARNING"
+
+        rules = strategy_mode.intraday_rules()
+        profile = config.active_paper_training_profile_rules()
+
+        assert config.effective_virtual_trading_capital() == 500000.0
+        assert profile["profile"] == "AGGRESSIVE_LEARNING"
+        assert rules["max_open_positions"] == 8
+        assert rules["position_size_factor"] == 0.5
+        assert rules["min_score_to_buy"] == 78
+        assert rules["min_relative_volume"] == 1.2
+        assert rules["min_dollar_volume"] == 3000000.0
+        assert rules["max_daily_trades"] == 15
+        assert rules["max_consecutive_losses"] == 4
+        assert rules["max_daily_loss_percent"] == 3.0
+    finally:
+        for key, value in original.items():
+            setattr(config, key, value)
+
+
+def test_live_mode_cannot_use_aggressive_paper_profile():
+    original = {
+        "IBKR_PAPER_TRADING": config.IBKR_PAPER_TRADING,
+        "IBKR_ENABLE_REAL_TRADING": config.IBKR_ENABLE_REAL_TRADING,
+        "PAPER_TRAINING_PROFILE": config.PAPER_TRAINING_PROFILE,
+    }
+    try:
+        config.IBKR_PAPER_TRADING = True
+        config.IBKR_ENABLE_REAL_TRADING = True
+        config.PAPER_TRAINING_PROFILE = "AGGRESSIVE_LEARNING"
+
+        profile = config.active_paper_training_profile_rules()
+        rules = strategy_mode.intraday_rules()
+
+        assert profile["profile"] == "CONSERVATIVE"
+        assert profile["requested_profile"] == "AGGRESSIVE_LEARNING"
+        assert profile["live_profile_blocked"] is True
+        assert config.effective_virtual_trading_capital() == config.VIRTUAL_TRADING_CAPITAL_USD
+        assert rules["max_open_positions"] == config.INTRADAY_MAX_OPEN_POSITIONS
+    finally:
+        for key, value in original.items():
+            setattr(config, key, value)
+
+
+def test_strategy_payload_exposes_effective_training_profile():
+    original = {
+        "IBKR_PAPER_TRADING": config.IBKR_PAPER_TRADING,
+        "IBKR_ENABLE_REAL_TRADING": config.IBKR_ENABLE_REAL_TRADING,
+        "PAPER_TRAINING_PROFILE": config.PAPER_TRAINING_PROFILE,
+    }
+    try:
+        config.IBKR_PAPER_TRADING = True
+        config.IBKR_ENABLE_REAL_TRADING = False
+        config.PAPER_TRAINING_PROFILE = "AGGRESSIVE_LEARNING"
+
+        payload = strategy_mode.strategy_mode_payload(strategy_mode.StrategyMode.INTRADAY_TECHNICAL)
+
+        assert payload["active_training_profile"] == "AGGRESSIVE_LEARNING"
+        assert payload["profile_rules"]["paper_capital"] == 500000.0
+        assert payload["effective_max_positions"] == 8
+        assert payload["effective_score_threshold"] == 78
+        assert payload["effective_risk_factor"] == 0.5
+        assert payload["effective_max_daily_trades"] == 15
+        assert "market_hours_guard" in payload["profile_rules"]["hard_protections_kept"]
+        assert payload["force_exit_before_close"]["enabled"] is True
+    finally:
+        for key, value in original.items():
+            setattr(config, key, value)

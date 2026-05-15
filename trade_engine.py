@@ -40,7 +40,7 @@ class TradeEngine:
 
         order_value = quantity * limit_price
         max_position_value = (
-            float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0))
+            float(config.effective_virtual_trading_capital())
             * float(config.MAX_POSITION_PERCENT)
             / 100
         )

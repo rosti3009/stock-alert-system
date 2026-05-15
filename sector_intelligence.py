@@ -519,7 +519,7 @@ async def get_sector_intelligence(positions: list[dict[str, Any]] | None = None,
     if positions is None:
         positions = await database.get_open_positions()
     if account_equity is None:
-        account_equity = safe_float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0), 5000.0)
+        account_equity = safe_float(config.effective_virtual_trading_capital(), 5000.0)
     cached_enrichment = await load_cached_enrichment()
     return build_portfolio_summary(positions or [], account_equity, cached_enrichment)
 

@@ -152,7 +152,7 @@ def calculate_position_size(
         stop_loss = entry_price * 0.92
 
     broker_account_equity = float(account_equity)
-    balance = float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0))
+    balance = float(config.effective_virtual_trading_capital())
     reserve = balance * (float(config.MIN_CASH_RESERVE_PERCENT) / 100)
 
     used = sum(
@@ -502,7 +502,7 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
     }
 
     realized_pnl = await database.get_realized_pnl()
-    account_equity = float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0))
+    account_equity = float(config.effective_virtual_trading_capital())
 
     current_open_count = len(open_positions)
     max_positions = int(active_rules.get("max_open_positions", getattr(config, "MAX_OPEN_POSITIONS", 10)))
@@ -628,7 +628,7 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
                 open_symbols.add(symbol)
                 open_positions = await database.get_open_positions()
                 realized_pnl = await database.get_realized_pnl()
-                account_equity = float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0))
+                account_equity = float(config.effective_virtual_trading_capital())
 
         elif signal == "SELL":
             if symbol in open_symbols:
@@ -658,7 +658,7 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
 
                     current_open_count = len(open_positions)
                     realized_pnl = await database.get_realized_pnl()
-                    account_equity = float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0))
+                    account_equity = float(config.effective_virtual_trading_capital())
 
 
 async def auto_open_position(

@@ -22,9 +22,11 @@ class PositionExitPriorityEngineTests(unittest.TestCase):
         self.original_db_path = config.DB_PATH
         self.original_database_db_path = database.DB_PATH
         self.original_capital = config.VIRTUAL_TRADING_CAPITAL_USD
+        self.original_training_profile = config.PAPER_TRAINING_PROFILE
         config.DB_PATH = self.tmp.name
         database.DB_PATH = self.tmp.name
         config.VIRTUAL_TRADING_CAPITAL_USD = 5000.0
+        config.PAPER_TRAINING_PROFILE = "CONSERVATIVE"
         asyncio.run(database.init_db())
         asyncio.run(database.set_app_state(
             "market_regime_engine_latest",
@@ -35,6 +37,7 @@ class PositionExitPriorityEngineTests(unittest.TestCase):
         config.DB_PATH = self.original_db_path
         database.DB_PATH = self.original_database_db_path
         config.VIRTUAL_TRADING_CAPITAL_USD = self.original_capital
+        config.PAPER_TRAINING_PROFILE = self.original_training_profile
         gc.collect()
         for attempt in range(5):
             try:
