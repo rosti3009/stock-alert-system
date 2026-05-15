@@ -2184,6 +2184,10 @@ async def api_trading_status():
                 )
             ),
 
+            "last_market_data_at": watchdog_status.get("last_market_data_at"),
+
+            "last_market_data_age_seconds": watchdog_status.get("last_market_data_age_seconds"),
+
             "last_market_data_refresh_source": watchdog_status.get("last_market_data_refresh_source"),
 
             "market_data_feed_active": bool(watchdog_status.get("market_data_feed_active")),

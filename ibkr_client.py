@@ -7,6 +7,7 @@ from ib_insync import *
 import config
 import database
 import order_lifecycle
+import watchdog
 from trading_safety import require_paper_auto_trading_allowed
 
 
@@ -74,6 +75,18 @@ class IBKRClient:
         }
 
         self.ib.cancelMktData(contract)
+
+        if any(result.get(key) for key in ("bid", "ask", "last", "close", "market_price")):
+            watchdog.refresh_market_data_timestamp_sync(
+                "quote_fetch",
+                symbol=symbol,
+                metadata={
+                    "bid": result.get("bid"),
+                    "ask": result.get("ask"),
+                    "last": result.get("last"),
+                    "market_price": result.get("market_price"),
+                },
+            )
 
         return result
 

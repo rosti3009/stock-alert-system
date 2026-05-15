@@ -271,6 +271,18 @@ class CircuitBreakerRecoveryTests(unittest.TestCase):
     def test_active_scanner_refreshes_market_data_timestamp(self):
         import main
 
+        fresh = iso_delta(0)
+        stale = iso_delta(-600)
+        asyncio.run(seed_watchdog_inputs(connected=True, mirror_at=fresh, execution_at=fresh, market_at=None))
+        asyncio.run(database.set_app_state(watchdog.LAST_MARKET_DATA_AT_KEY, stale))
+        asyncio.run(database.set_app_state(watchdog.LAST_MARKET_DATA_REFRESH_SOURCE_KEY, json.dumps({"source": "scanner_bars", "refreshed_at": stale})))
+
+        with patch.object(watchdog, "is_ib_connected", return_value=True), \
+             patch.object(watchdog, "send_watchdog_alert", return_value=True):
+            stale_status = asyncio.run(watchdog.run_watchdog_once())
+        self.assertTrue(stale_status["stale_data"]["market_data"])
+        self.assertFalse(stale_status["market_data_feed_active"])
+
         closes = [100 + (i * 0.1) for i in range(230)]
         raw = {
             "symbol": "AAPL",
@@ -291,6 +303,34 @@ class CircuitBreakerRecoveryTests(unittest.TestCase):
         source = json.loads(asyncio.run(database.get_app_state(watchdog.LAST_MARKET_DATA_REFRESH_SOURCE_KEY)))
         self.assertEqual(source["source"], "scanner_bars")
         self.assertEqual(source["symbol"], "AAPL")
+
+        refreshed_status = asyncio.run(watchdog.get_watchdog_status())
+        self.assertTrue(refreshed_status["healthy"])
+        self.assertFalse(refreshed_status["trading_blocked"])
+        self.assertFalse(refreshed_status["stale_data"]["market_data"])
+        self.assertTrue(refreshed_status["market_data_feed_active"])
+
+    def test_active_ranking_refresh_clears_stale_market_data_state(self):
+        fresh = iso_delta(0)
+        stale = iso_delta(-600)
+        asyncio.run(seed_watchdog_inputs(connected=True, mirror_at=fresh, execution_at=fresh, market_at=None))
+        asyncio.run(database.set_app_state(watchdog.LAST_MARKET_DATA_AT_KEY, stale))
+        asyncio.run(database.set_app_state(watchdog.LAST_MARKET_DATA_REFRESH_SOURCE_KEY, json.dumps({"source": "scanner_bars", "refreshed_at": stale})))
+
+        with patch.object(watchdog, "is_ib_connected", return_value=True), \
+             patch.object(watchdog, "send_watchdog_alert", return_value=True):
+            stale_status = asyncio.run(watchdog.run_watchdog_once())
+        self.assertTrue(stale_status["trading_blocked"])
+        self.assertTrue(stale_status["stale_data"]["market_data"])
+
+        asyncio.run(watchdog.refresh_market_data_timestamp("ranking_engine", metadata={"fresh_symbols": 3}))
+        refreshed_status = asyncio.run(watchdog.get_watchdog_status())
+
+        self.assertTrue(refreshed_status["healthy"])
+        self.assertFalse(refreshed_status["trading_blocked"])
+        self.assertFalse(refreshed_status["stale_data"]["market_data"])
+        self.assertTrue(refreshed_status["market_data_feed_active"])
+        self.assertEqual(refreshed_status["last_market_data_refresh_source"]["source"], "ranking_engine")
 
     def test_stale_market_data_still_blocks_trading_after_refresh_ages_out(self):
         fresh = iso_delta(0)
