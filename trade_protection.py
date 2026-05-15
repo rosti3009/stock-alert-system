@@ -6,6 +6,8 @@ import math
 from execution_quality import evaluate_execution_quality
 from ib_insync import IB, Stock
 
+import watchdog
+
 log = logging.getLogger(__name__)
 
 MIN_PRICE = 2.0
@@ -59,6 +61,13 @@ def get_live_quote(
     )
 
     ib.cancelMktData(contract)
+
+    if any(value > 0 for value in (bid, ask, last, close, market_price)):
+        watchdog.refresh_market_data_timestamp_sync(
+            "quote_update",
+            symbol=symbol,
+            metadata={"bid": bid, "ask": ask, "last": last, "market_price": market_price},
+        )
 
     return {
         "symbol": symbol,

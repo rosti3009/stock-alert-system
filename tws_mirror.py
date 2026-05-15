@@ -10,7 +10,7 @@ from ib_insync import IB
 
 import config
 import database
-from circuit_breaker import record_ibkr_error
+from circuit_breaker import record_ibkr_error, reset_ibkr_error_count
 
 log = logging.getLogger(__name__)
 
@@ -447,6 +447,7 @@ async def run_tws_mirror_once() -> dict:
 
     if snapshot.get("connected"):
         await database.set_app_state("tws_mirror_last_success_at", snapshot.get("synced_at") or now_iso())
+        await reset_ibkr_error_count()
 
     log.info(
         "TWS MIRROR SYNC | connected=%s | account=%s | positions=%s | orders=%s",
