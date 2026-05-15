@@ -318,6 +318,7 @@ async def init_db() -> None:
             "profit_percent": "REAL",
             "closed_at": "TEXT",
             "source": "TEXT",
+            "recovery_source_position_id": "INTEGER",
         })
 
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_created_at ON signals(created_at)")
