@@ -157,6 +157,7 @@ def require_paper_auto_trading_allowed(action: str = "Trading") -> None:
         )
 
     require_circuit_breaker_clear(action)
+    require_watchdog_order_allowed(action)
 
 
 def _circuit_breaker_is_tripped_sync() -> tuple[bool, str | None]:
@@ -183,3 +184,9 @@ def require_circuit_breaker_clear(action: str = "Trading") -> None:
     tripped, reason = _circuit_breaker_is_tripped_sync()
     if tripped:
         raise RuntimeError(f"{action} blocked: circuit breaker tripped: {reason}")
+
+
+def require_watchdog_order_allowed(action: str = "Trading") -> None:
+    from watchdog import require_watchdog_order_allowed as _require_watchdog_order_allowed
+
+    _require_watchdog_order_allowed(action)

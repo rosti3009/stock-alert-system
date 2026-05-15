@@ -197,3 +197,15 @@ def send_position_alert(position: dict) -> bool:
     )
 
     return _send_message(text)
+
+# ==================================================
+# WATCHDOG ALERT
+# ==================================================
+
+def send_watchdog_alert(message: str) -> bool:
+    text = (
+        "🛡️ <b>TWS Watchdog</b>\n"
+        "━━━━━━━━━━━━━━━\n"
+        f"{_safe(message)}"
+    )
+    return _send_message(text)

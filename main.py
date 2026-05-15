@@ -19,6 +19,7 @@ import order_lifecycle
 import portfolio_risk_engine
 import startup_recovery
 import reconciliation_lifecycle
+import watchdog
 from circuit_breaker import get_circuit_breaker_state, reset_circuit_breaker
 import position_sizing_engine
 import position_exit_priority_engine
@@ -1057,6 +1058,20 @@ async def lifespan(app: FastAPI):
         config.RECOVERY_CHECK_INTERVAL_SECONDS,
     )
 
+    scheduler.add_job(
+        watchdog.run_watchdog_once,
+        "interval",
+        seconds=config.WATCHDOG_INTERVAL_SECONDS,
+        id="tws_api_watchdog",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    log.info(
+        "TWS/API watchdog started — every %s seconds",
+        config.WATCHDOG_INTERVAL_SECONDS,
+    )
+
     scheduler.start()
 
     if config.RUN_SCAN_ON_STARTUP and not _latest:
@@ -1098,6 +1113,22 @@ async def api_market_data_guard():
 
     return JSONResponse(
         result,
+        headers=no_cache_headers(),
+    )
+
+
+@app.get("/api/watchdog/status")
+async def api_watchdog_status():
+    return JSONResponse(
+        await watchdog.get_watchdog_status(),
+        headers=no_cache_headers(),
+    )
+
+
+@app.post("/api/watchdog/run-once")
+async def api_watchdog_run_once():
+    return JSONResponse(
+        await watchdog.run_watchdog_once(),
         headers=no_cache_headers(),
     )
 
@@ -1886,6 +1917,8 @@ async def api_trading_status():
 
     global_risk = await get_global_risk_status()
 
+    watchdog_status = await watchdog.get_watchdog_status()
+
     # ==========================================
     # ACCOUNT CALCULATIONS
     # ==========================================
@@ -2047,6 +2080,13 @@ async def api_trading_status():
         )
 
     # ==========================================
+    # WATCHDOG
+    # ==========================================
+
+    if watchdog_status.get("trading_blocked"):
+        blocked_reasons.extend(watchdog_status.get("blocking_reasons") or ["Watchdog blocked trading"])
+
+    # ==========================================
     # FINAL DECISION
     # ==========================================
 
@@ -2086,6 +2126,22 @@ async def api_trading_status():
             "market_hours_reason": market_hours.get("reason"),
 
             "market_hours": market_hours,
+
+            "watchdog": watchdog_status,
+
+            "connection_status": {
+                "tws_connected": watchdog_status.get("tws_connected"),
+                "shared_ib_connected": watchdog_status.get("shared_ib_connected"),
+                "heartbeat": watchdog_status.get("heartbeat"),
+            },
+
+            "stale_data_status": watchdog_status.get("stale_data"),
+
+            "last_heartbeat_at": watchdog_status.get("last_heartbeat_at"),
+
+            "last_reconnect_attempt_at": watchdog_status.get("last_reconnect_attempt_at"),
+
+            "last_reconnect_result": watchdog_status.get("last_reconnect_result"),
 
             # ==========================================
             # MARKET REGIME
