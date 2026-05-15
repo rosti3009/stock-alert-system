@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 import config
 import database
+import watchdog
 from reason_summarizer import summarize_reason_list
 import sector_intelligence
 from data_fetcher import fetch_stock_data
@@ -509,6 +510,16 @@ async def refresh_market_regime(candidates: list[dict] | None = None, positions:
     await database.set_app_state(STATE_KEY, snapshot["regime"])
     await database.set_app_state(LATEST_KEY, json.dumps(snapshot, ensure_ascii=False, default=str))
     await _append_history(snapshot)
+    if not snapshot.get("error"):
+        await watchdog.refresh_market_data_timestamp(
+            "market_snapshot_update",
+            metadata={
+                "regime": snapshot.get("regime"),
+                "risk_level": snapshot.get("risk_level"),
+                "candidate_count": len(candidates or []),
+                "position_count": len(positions or []),
+            },
+        )
 
     if previous_state and previous_state != snapshot["regime"]:
         await database.safe_record_trade_journal_event({

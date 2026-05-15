@@ -28,6 +28,7 @@ DEFAULT_DISCONNECT_CIRCUIT_SECONDS = 180
 DEFAULT_ALERT_COOLDOWN_SECONDS = 300
 DEFAULT_RECONNECT_BACKOFF_SECONDS = 30
 MAX_RECONNECT_BACKOFF_SECONDS = 300
+MARKET_DATA_STALE_REASON_PREFIX = "Market data stale"
 
 
 def now_utc() -> datetime:
@@ -117,27 +118,118 @@ async def _latest_daily_candidate_timestamp(db: aiosqlite.Connection) -> str | N
     return row[0] if row and row[0] else None
 
 
-async def refresh_market_data_timestamp(source: str, *, symbol: str | None = None, metadata: dict | None = None) -> str:
-    refreshed_at = now_iso()
+def _market_data_refresh_payload(source: str, refreshed_at: str, *, symbol: str | None = None, metadata: dict | None = None) -> dict:
     payload = {"source": source, "refreshed_at": refreshed_at}
     if symbol:
         payload["symbol"] = symbol
     if metadata:
         payload["metadata"] = metadata
+    return payload
+
+
+def _apply_market_data_refresh_to_status(status: dict, payload: dict, refreshed_at: str) -> tuple[dict, bool]:
+    stale_data = dict(status.get("stale_data") or {})
+    reasons = list(status.get("blocking_reasons") or [])
+    had_stale_market_data = bool(stale_data.get("market_data")) or any(
+        str(reason).startswith(MARKET_DATA_STALE_REASON_PREFIX)
+        for reason in reasons
+    )
+
+    reasons = [
+        reason
+        for reason in reasons
+        if not str(reason).startswith(MARKET_DATA_STALE_REASON_PREFIX)
+    ]
+    stale_data["market_data"] = False
+
+    status.update({
+        "last_market_data_at": refreshed_at,
+        "last_market_data_age_seconds": 0,
+        "last_market_data_refresh_source": payload,
+        "market_data_feed_active": True,
+        "stale_data": stale_data,
+        "blocking_reasons": reasons,
+        "trading_blocked": len(reasons) > 0,
+    })
+    status["healthy"] = bool(status.get("tws_connected")) and not status["trading_blocked"]
+    return status, had_stale_market_data
+
+
+async def _refresh_cached_watchdog_status(payload: dict, refreshed_at: str) -> bool:
+    raw = await database.get_app_state(WATCHDOG_STATUS_KEY)
+    if not raw:
+        return False
+    try:
+        status = json.loads(raw)
+    except Exception:
+        return False
+
+    status, stale_transition_cleared = _apply_market_data_refresh_to_status(status, payload, refreshed_at)
+    await database.set_app_state(WATCHDOG_STATUS_KEY, _json(status))
+    if stale_transition_cleared:
+        await _clear_alert("stale_market_data")
+    return stale_transition_cleared
+
+
+def _refresh_cached_watchdog_status_sync(payload: dict, refreshed_at: str) -> bool:
+    with closing(sqlite3.connect(config.DB_PATH)) as db:
+        db.execute(database.CREATE_APP_STATE)
+        row = db.execute("SELECT value FROM app_state WHERE key = ?", (WATCHDOG_STATUS_KEY,)).fetchone()
+        if not row:
+            return False
+        try:
+            status = json.loads(row[0])
+        except Exception:
+            return False
+
+        status, stale_transition_cleared = _apply_market_data_refresh_to_status(status, payload, refreshed_at)
+        db.execute(
+            """
+            INSERT INTO app_state (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (WATCHDOG_STATUS_KEY, _json(status)),
+        )
+        if stale_transition_cleared:
+            db.execute("DELETE FROM app_state WHERE key = ?", (f"{WATCHDOG_ALERT_STATE_PREFIX}stale_market_data",))
+        db.commit()
+    return stale_transition_cleared
+
+
+async def refresh_market_data_timestamp(source: str, *, symbol: str | None = None, metadata: dict | None = None) -> str:
+    refreshed_at = now_iso()
+    payload = _market_data_refresh_payload(source, refreshed_at, symbol=symbol, metadata=metadata)
     await database.set_app_state(LAST_MARKET_DATA_AT_KEY, refreshed_at)
     await database.set_app_state(LAST_MARKET_DATA_REFRESH_SOURCE_KEY, _json(payload))
+    stale_transition_cleared = await _refresh_cached_watchdog_status(payload, refreshed_at)
+    log.info(
+        "MARKET DATA refresh | source=%s symbol=%s refreshed_at=%s stale_transition_cleared=%s",
+        source,
+        symbol,
+        refreshed_at,
+        stale_transition_cleared,
+    )
+    if stale_transition_cleared:
+        log.info("WATCHDOG stale market-data transition cleared by source=%s refreshed_at=%s", source, refreshed_at)
     return refreshed_at
 
 
 def refresh_market_data_timestamp_sync(source: str, *, symbol: str | None = None, metadata: dict | None = None) -> str:
     refreshed_at = now_iso()
-    payload = {"source": source, "refreshed_at": refreshed_at}
-    if symbol:
-        payload["symbol"] = symbol
-    if metadata:
-        payload["metadata"] = metadata
+    payload = _market_data_refresh_payload(source, refreshed_at, symbol=symbol, metadata=metadata)
     database.set_app_state_sync(LAST_MARKET_DATA_AT_KEY, refreshed_at)
     database.set_app_state_sync(LAST_MARKET_DATA_REFRESH_SOURCE_KEY, _json(payload))
+    stale_transition_cleared = _refresh_cached_watchdog_status_sync(payload, refreshed_at)
+    log.info(
+        "MARKET DATA refresh | source=%s symbol=%s refreshed_at=%s stale_transition_cleared=%s",
+        source,
+        symbol,
+        refreshed_at,
+        stale_transition_cleared,
+    )
+    if stale_transition_cleared:
+        log.info("WATCHDOG stale market-data transition cleared by source=%s refreshed_at=%s", source, refreshed_at)
     return refreshed_at
 
 
@@ -285,7 +377,7 @@ def _blocking_reasons(status: dict, thresholds: dict) -> list[str]:
 
     market_age = status.get("last_market_data_age_seconds")
     if status.get("last_market_data_at") is not None and market_age is not None and market_age > thresholds["market_data_stale_seconds"]:
-        reasons.append(f"Market data stale ({market_age}s)")
+        reasons.append(f"{MARKET_DATA_STALE_REASON_PREFIX} ({market_age}s)")
 
     return reasons
 
