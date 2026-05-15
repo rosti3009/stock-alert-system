@@ -20,6 +20,7 @@ import config
 import database
 import order_lifecycle
 import portfolio_risk_engine
+import strategy_mode
 from execution_quality import evaluate_execution_quality
 from position_sizing_engine import (
     PositionSizingInput,
@@ -453,11 +454,16 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
         )
 
     market = get_market_regime()
+    active_strategy_mode = await strategy_mode.get_strategy_mode()
+    active_rules = strategy_mode.active_rules(active_strategy_mode)
 
     regime = market.get("regime")
     allow_new_buys = market.get("allow_new_buys", True)
     min_score_override = int(market.get("min_score_override", MIN_SCORE_TO_BUY))
     size_factor = float(market.get("position_size_factor", 1.0))
+    if strategy_mode.is_intraday_mode(active_strategy_mode):
+        min_score_override = int(active_rules["min_score_to_buy"])
+        size_factor *= float(active_rules["position_size_factor"])
 
     open_positions = await database.get_open_positions()
 
@@ -471,7 +477,7 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
     account_equity = float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0))
 
     current_open_count = len(open_positions)
-    max_positions = int(getattr(config, "MAX_OPEN_POSITIONS", 10))
+    max_positions = int(active_rules.get("max_open_positions", getattr(config, "MAX_OPEN_POSITIONS", 10)))
 
     log.info(
         "AUTO TRADER | regime=%s | allow_buys=%s | min_score=%s | equity=$%s | open=%s/%s",
@@ -486,7 +492,11 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
     for row in scan_results:
         symbol = str(row.get("symbol", "")).strip().upper()
         signal = row.get("signal")
-        score = int(row.get("weekly_score") or row.get("score") or 0)
+        if strategy_mode.is_intraday_mode(active_strategy_mode):
+            score, intraday_score_reasons = strategy_mode.calculate_intraday_technical_score(row)
+            row = {**row, "intraday_technical_score": score, "intraday_score_reasons": intraday_score_reasons}
+        else:
+            score = int(row.get("weekly_score") or row.get("score") or 0)
 
         if not symbol:
             continue
@@ -532,6 +542,21 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
                 )
                 continue
 
+            if strategy_mode.is_intraday_mode(active_strategy_mode):
+                intraday_decision = strategy_mode.validate_intraday_buy(row)
+                if not intraday_decision.get("allowed"):
+                    reason = "; ".join(intraday_decision.get("reasons") or ["Intraday BUY blocked"])
+                    log.info("AUTO BUY skipped for %s — %s", symbol, reason)
+                    await _journal_buy_decision(
+                        row,
+                        "INTRADAY_BUY_BLOCKED",
+                        "BLOCKED",
+                        reason,
+                        market,
+                        {"intraday_decision": intraday_decision},
+                    )
+                    continue
+
             if symbol in open_symbols:
                 log.info("AUTO BUY skipped for %s — position already open", symbol)
                 await _journal_buy_decision(
@@ -567,7 +592,7 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
                 open_positions=open_positions,
                 account_equity=account_equity,
                 size_factor=size_factor,
-                market=market,
+                market={**market, "strategy_mode": active_strategy_mode.value},
             )
 
             if opened:
@@ -903,7 +928,7 @@ async def auto_open_position(
         try:
             await database.add_position(
                 payload,
-                max_open_positions=int(getattr(config, "MAX_OPEN_POSITIONS", 10)),
+                max_open_positions=int(strategy_mode.active_rules((market or {}).get("strategy_mode")).get("max_open_positions", getattr(config, "MAX_OPEN_POSITIONS", 10))),
             )
 
             log.info(

@@ -154,7 +154,11 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
     risk_per_share = max(0.0, price - stop_loss)
     atr_percent = pct(atr, price) if atr > 0 and price > 0 else safe_float(row.get("atr_percent"))
 
-    max_risk_per_trade = account_equity * (threshold("MAX_RISK_PER_TRADE_PERCENT", 1.0) / 100.0)
+    risk_per_trade_percent = threshold("MAX_RISK_PER_TRADE_PERCENT", 1.0)
+    if str((context.market_regime or {}).get("strategy_mode") or "").upper() == "INTRADAY_TECHNICAL":
+        risk_per_trade_percent = threshold("INTRADAY_RISK_PER_TRADE_PERCENT", 0.5)
+
+    max_risk_per_trade = account_equity * (risk_per_trade_percent / 100.0)
     max_position_value = account_equity * (threshold("MAX_POSITION_PERCENT", 20.0) / 100.0)
 
     used = sum(
@@ -169,7 +173,7 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
     market_regime = context.market_regime or {}
     execution_quality = context.execution_quality or {}
     thresholds = {
-        "max_risk_per_trade_percent": threshold("MAX_RISK_PER_TRADE_PERCENT", 1.0),
+        "max_risk_per_trade_percent": risk_per_trade_percent,
         "max_position_percent": threshold("MAX_POSITION_PERCENT", 20.0),
         "max_sector_exposure_percent": threshold("MAX_SECTOR_EXPOSURE_PERCENT", 45.0),
         "max_single_symbol_exposure": threshold("MAX_SINGLE_SYMBOL_EXPOSURE", 25.0),

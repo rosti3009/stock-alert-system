@@ -189,3 +189,13 @@ def fetch_stock_data(symbol: str) -> dict | None:
     except Exception as exc:
         print(f"[data_fetcher] Unexpected error fetching {symbol}: {exc}")
         return None
+
+def fetch_intraday_bars(symbol: str, timeframe: str = "5m") -> list[dict] | None:
+    """Architecture hook for fresh 1m/5m/15m bars.
+
+    Providers can implement this later. Returning None is intentional: intraday
+    strategy mode must block BUYs instead of silently falling back to daily/swing
+    data when fresh intraday bars are unavailable.
+    """
+    _ = (_clean_symbol(symbol), timeframe)
+    return None

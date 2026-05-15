@@ -31,12 +31,13 @@ from circuit_breaker import (
 import position_sizing_engine
 import position_exit_priority_engine
 import sector_intelligence
+import strategy_mode
 from execution_quality import evaluate_execution_quality, summarize_execution_quality
 from auto_trader import process_auto_trading
 from trading_safety import get_market_hours_status
 from market_regime_engine import get_cached_market_regime, get_market_regime_history, refresh_market_regime
 from market_regime import get_market_regime
-from data_fetcher import fetch_stock_data
+from data_fetcher import fetch_intraday_bars, fetch_stock_data
 from indicators import compute_indicators
 from ranking_engine import calculate_weekly_score, rank_top_weekly_setups
 from signal_logic import evaluate_signal
@@ -211,8 +212,9 @@ def parse_dt(value: str | None) -> datetime | None:
         return None
 
 
-def get_max_open_positions() -> int:
-    return int(getattr(config, "MAX_OPEN_POSITIONS", 10))
+async def get_max_open_positions() -> int:
+    mode = await strategy_mode.get_strategy_mode()
+    return int(strategy_mode.active_rules(mode).get("max_open_positions", getattr(config, "MAX_OPEN_POSITIONS", 10)))
 
 
 def serve_html_file(filename: str, fallback_to_index: bool = False) -> HTMLResponse:
@@ -483,6 +485,24 @@ async def _scan_symbol_inner(symbol: str) -> dict:
     result["weekly_score"] = score
     result["weekly_reasons"] = weekly_reasons
 
+    active_mode = await strategy_mode.get_strategy_mode()
+    if strategy_mode.is_intraday_mode(active_mode):
+        intraday_bars = {}
+        for timeframe in ("1m", "5m", "15m"):
+            try:
+                bars = await loop.run_in_executor(None, fetch_intraday_bars, symbol, timeframe)
+            except Exception as exc:
+                bars = None
+                result.setdefault("intraday_errors", {})[timeframe] = str(exc)
+            if bars:
+                intraday_bars[timeframe] = bars
+        result["intraday_bars"] = intraday_bars
+        result["intraday_bars_available"] = bool(intraday_bars)
+        intraday_score, intraday_reasons = strategy_mode.calculate_intraday_technical_score(result)
+        result["intraday_technical_score"] = intraday_score
+        result["intraday_score_reasons"] = intraday_reasons
+        result["intraday_enrichment_status"] = strategy_mode.intraday_enrichment_status(result)
+
     await maybe_send_alert(symbol, signal_type, ind, risk, reasons, score)
 
     return result
@@ -567,7 +587,7 @@ async def refresh_open_positions() -> list[dict]:
             })
             continue
 
-        position_update = evaluate_position(position, scan_result)
+        position_update = evaluate_position(position, scan_result, mode=(await strategy_mode.get_strategy_mode()).value)
 
         previous_action = position.get("action")
         new_action = position_update.get("action")
@@ -1317,6 +1337,32 @@ async def api_paper_reset_session():
         )
 
 
+@app.get("/api/strategy-mode")
+async def api_strategy_mode():
+    mode = await strategy_mode.get_strategy_mode()
+    open_positions = await database.get_open_positions()
+    return JSONResponse(
+        strategy_mode.strategy_mode_payload(mode, open_positions_count=len(open_positions)),
+        headers=no_cache_headers(),
+    )
+
+
+@app.post("/api/strategy-mode/swing")
+async def api_strategy_mode_swing():
+    return JSONResponse(
+        await strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.SWING_DEFAULT),
+        headers=no_cache_headers(),
+    )
+
+
+@app.post("/api/strategy-mode/intraday")
+async def api_strategy_mode_intraday():
+    return JSONResponse(
+        await strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.INTRADAY_TECHNICAL),
+        headers=no_cache_headers(),
+    )
+
+
 @app.post("/api/auto-trading/enable")
 async def api_auto_trading_enable():
     safety = await _evaluate_auto_trading_enable_safety()
@@ -1997,13 +2043,12 @@ async def api_trading_status():
         - cash_reserve
     )
 
-    max_positions = int(
-        getattr(
-            config,
-            "MAX_OPEN_POSITIONS",
-            10,
-        )
+    active_strategy_mode = await strategy_mode.get_strategy_mode()
+    active_strategy_payload = strategy_mode.strategy_mode_payload(
+        active_strategy_mode,
+        open_positions_count=len(open_positions),
     )
+    max_positions = int(active_strategy_payload["rules"].get("max_open_positions", getattr(config, "MAX_OPEN_POSITIONS", 10)))
 
     open_count = len(open_positions)
 
@@ -2153,6 +2198,20 @@ async def api_trading_status():
             # ==========================================
 
             "trading_mode": config.TRADING_MODE,
+
+            "strategy_mode": active_strategy_payload["strategy_mode"],
+
+            "active_buy_engine": active_strategy_payload["active_buy_engine"],
+
+            "active_sell_engine": active_strategy_payload["active_sell_engine"],
+
+            "active_risk_profile": active_strategy_payload["active_risk_profile"],
+
+            "intraday_rules": active_strategy_payload["intraday_rules"],
+
+            "intraday_enrichment_status": active_strategy_payload["intraday_enrichment_status"],
+
+            "force_exit_before_close": active_strategy_payload["force_exit_before_close"],
 
             "auto_send_orders": config.AUTO_SEND_ORDERS,
 

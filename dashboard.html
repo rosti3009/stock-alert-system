@@ -52,6 +52,29 @@
       font-weight:800;
     }
 
+    .strategy-toggle{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin-top:10px;
+    }
+
+    .strategy-pill{
+      display:inline-block;
+      padding:4px 10px;
+      border-radius:999px;
+      background:#142033;
+      color:#93c5fd;
+      font-weight:800;
+    }
+
+    .strategy-warning{
+      color:#fbbf24;
+      font-size:13px;
+      margin-top:8px;
+    }
+
     @media(max-width:1100px){
 
       .mini-grid{
@@ -251,6 +274,17 @@
           <div class="value blue" id="diversificationScore">-</div>
         </div>
 
+      </div>
+
+      <div class="box" style="margin-bottom:16px;">
+        <h3>Strategy Mode</h3>
+        <div>Active mode: <span id="strategyModeLabel" class="strategy-pill">Loading...</span></div>
+        <div class="muted" id="strategyEngines">Loading engines...</div>
+        <div class="strategy-toggle">
+          <button id="swingModeBtn" onclick="switchStrategyMode('swing')">Swing Default</button>
+          <button id="intradayModeBtn" class="primary" onclick="switchStrategyMode('intraday')">Intraday Technical</button>
+        </div>
+        <div id="strategyWarning" class="strategy-warning" style="display:none;"></div>
       </div>
 
       <!-- ========================================= -->
@@ -494,6 +528,7 @@ let positions = [];
 let performance = {};
 let equityCurve = [];
 let portfolioRisk = {};
+let strategyMode = {};
 let equityChart;
 let isLoading = false;
 
@@ -612,7 +647,8 @@ async function loadDashboard(){
       positions,
       performance,
       equityCurve,
-      portfolioRisk
+      portfolioRisk,
+      strategyMode
     ] = await Promise.all([
 
       fetchNoCache("/api/stocks"),
@@ -625,11 +661,15 @@ async function loadDashboard(){
 
       fetchNoCache("/api/equity-curve"),
 
-      fetchNoCache("/api/portfolio-risk")
+      fetchNoCache("/api/portfolio-risk"),
+
+      fetchNoCache("/api/strategy-mode")
 
     ]);
 
     updateCards();
+
+    updateStrategyMode();
 
     updateScannerStatus();
 
@@ -659,6 +699,50 @@ async function loadDashboard(){
   }finally{
 
     isLoading = false;
+  }
+}
+
+function updateStrategyMode(){
+  const mode = strategyMode.strategy_mode || "SWING_DEFAULT";
+  document.getElementById("strategyModeLabel").textContent = mode;
+  document.getElementById("strategyEngines").textContent =
+    "BUY: " + (strategyMode.active_buy_engine || "-")
+    + " · SELL: " + (strategyMode.active_sell_engine || "-")
+    + " · Risk: " + (strategyMode.active_risk_profile || "-");
+
+  document.getElementById("swingModeBtn").disabled = mode === "SWING_DEFAULT";
+  document.getElementById("intradayModeBtn").disabled = mode === "INTRADAY_TECHNICAL";
+
+  const warning = document.getElementById("strategyWarning");
+  if(strategyMode.switch_warning){
+    warning.textContent = "⚠️ " + strategyMode.switch_warning;
+    warning.style.display = "block";
+  }else{
+    warning.style.display = "none";
+  }
+}
+
+async function switchStrategyMode(mode){
+  const openCount = positions.filter(p => (p.status || "OPEN") === "OPEN").length;
+  if(openCount > 0){
+    const ok = confirm(
+      "There are " + openCount + " open positions. Switching strategy mode will NOT close or reset them. Continue?"
+    );
+    if(!ok){
+      return;
+    }
+  }
+
+  try{
+    strategyMode = await fetchNoCache(
+      mode === "intraday"
+        ? "/api/strategy-mode/intraday"
+        : "/api/strategy-mode/swing",
+      { method:"POST" }
+    );
+    updateStrategyMode();
+  }catch(err){
+    showError("Strategy mode switch failed: " + err.message);
   }
 }
 
