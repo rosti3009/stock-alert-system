@@ -8,7 +8,9 @@ import account_sync
 import database
 import execution_sync
 from circuit_breaker import (
+    auto_clear_recoverable_circuit_breaker,
     get_circuit_breaker_state,
+    is_auto_recoverable_trip,
     reset_ibkr_error_count,
     trip_circuit_breaker,
     validate_buying_power,
@@ -133,6 +135,14 @@ async def run_startup_recovery() -> dict:
             raise RuntimeError(f"Critical reconciliation mismatches: {len(critical)}")
 
         circuit = await get_circuit_breaker_state()
+        if circuit.get("tripped") and is_auto_recoverable_trip(circuit):
+            recovery = await auto_clear_recoverable_circuit_breaker(
+                "Startup recovery passed with fresh account, execution, mirror, and reconciliation state",
+                source="startup_recovery.run_startup_recovery",
+            )
+            if recovery.get("cleared"):
+                circuit = await get_circuit_breaker_state()
+
         if circuit.get("tripped"):
             raise RuntimeError(circuit.get("reason") or "Circuit breaker is tripped")
 

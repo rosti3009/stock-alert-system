@@ -508,6 +508,19 @@ async def set_app_state(key: str, value: str) -> None:
         await db.commit()
 
 
+def set_app_state_sync(key: str, value: str) -> None:
+    sql = """
+    INSERT INTO app_state (key, value)
+    VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    """
+
+    with closing(sqlite3.connect(DB_PATH)) as db:
+        db.execute(CREATE_APP_STATE)
+        db.execute(sql, (key, value))
+        db.commit()
+
+
 async def delete_app_state(key: str) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM app_state WHERE key = ?", (key,))

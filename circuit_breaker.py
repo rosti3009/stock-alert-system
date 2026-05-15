@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 
 import aiosqlite
 
 import config
 import database
+
+log = logging.getLogger(__name__)
 
 CIRCUIT_BREAKER_STATE_KEY = "circuit_breaker_state"
 IBKR_ERROR_COUNT_KEY = "circuit_breaker_ibkr_error_count"
@@ -17,6 +20,8 @@ IBKR_ERROR_STATE_KEYS = (
     IBKR_LAST_ERROR_KEY,
     IBKR_THRESHOLD_STATE_KEY,
 )
+CIRCUIT_BREAKER_AUTO_RECOVERY_KEY = "circuit_breaker_last_auto_recovery"
+RECOVERABLE_IBKR_SOURCES = ("ibkr", "tws_mirror", "account_sync", "execution_sync")
 DEFAULT_MAX_IBKR_ERRORS = 3
 DEFAULT_MAX_DRAWDOWN_PERCENT = 20.0
 
@@ -83,6 +88,78 @@ async def reset_circuit_breaker(reason: str = "Manual circuit breaker reset") ->
         "source_module": "circuit_breaker.reset_circuit_breaker",
     })
     return await get_circuit_breaker_state()
+
+
+def _recoverable_source(source: str | None) -> bool:
+    value = str(source or "").lower()
+    return value == "watchdog" or any(value.startswith(prefix) for prefix in RECOVERABLE_IBKR_SOURCES)
+
+
+def _recoverable_reason(reason: str | None) -> bool:
+    value = str(reason or "").lower()
+    return "repeated ibkr error" in value or "prolonged tws/api disconnect" in value
+
+
+def is_auto_recoverable_trip(state: dict) -> bool:
+    return bool(state.get("tripped")) and (_recoverable_source(state.get("source")) or _recoverable_reason(state.get("reason")))
+
+
+async def get_ibkr_error_count() -> int:
+    raw = await database.get_app_state(IBKR_ERROR_COUNT_KEY, "0")
+    try:
+        return int(raw or 0)
+    except Exception:
+        return 0
+
+
+async def get_last_auto_recovery() -> dict | None:
+    raw = await database.get_app_state(CIRCUIT_BREAKER_AUTO_RECOVERY_KEY)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+async def auto_clear_recoverable_circuit_breaker(
+    reason: str,
+    *,
+    source: str = "circuit_breaker.auto_clear_recoverable_circuit_breaker",
+    force: bool = False,
+) -> dict:
+    state = await get_circuit_breaker_state()
+    previous_error_count = await get_ibkr_error_count()
+    if not state.get("tripped") and previous_error_count <= 0:
+        return {"cleared": False, "state": state, "previous_error_count": previous_error_count}
+    if state.get("tripped") and not force and not is_auto_recoverable_trip(state):
+        return {"cleared": False, "state": state, "previous_error_count": previous_error_count}
+
+    payload = {
+        "cleared": True,
+        "reason": reason,
+        "source": source,
+        "previous_error_count": previous_error_count,
+        "previous_circuit_breaker": state,
+        "cleared_at": now_iso(),
+    }
+    await database.delete_app_states([CIRCUIT_BREAKER_STATE_KEY, *IBKR_ERROR_STATE_KEYS])
+    await database.set_app_state(CIRCUIT_BREAKER_AUTO_RECOVERY_KEY, _json_payload(payload))
+    await database.safe_record_trade_journal_event({
+        "event_type": "CIRCUIT_BREAKER_AUTO_RECOVERED",
+        "decision": "AUTO_RECOVERED",
+        "reason": reason,
+        "source_module": source,
+        "raw_payload": payload,
+    })
+    log.warning(
+        "Circuit breaker auto-cleared | reason=%s previous_error_count=%s previous_source=%s",
+        reason,
+        previous_error_count,
+        state.get("source"),
+    )
+    payload["state"] = await get_circuit_breaker_state()
+    return payload
 
 
 async def record_ibkr_error(error: str, *, source: str = "ibkr") -> dict:

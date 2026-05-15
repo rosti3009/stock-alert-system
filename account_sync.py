@@ -10,7 +10,7 @@ import aiosqlite
 import config
 import database
 import execution_sync
-from circuit_breaker import record_ibkr_error
+from circuit_breaker import record_ibkr_error, reset_ibkr_error_count
 
 log = logging.getLogger(__name__)
 
@@ -357,6 +357,10 @@ async def run_account_sync_once() -> dict:
         }
 
     await save_account_snapshot(snapshot)
+    if snapshot.get("connected"):
+        synced_at = snapshot.get("synced_at") or now_iso()
+        await database.set_app_state("account_sync_last_success_at", synced_at)
+        await reset_ibkr_error_count()
     return snapshot
 
 

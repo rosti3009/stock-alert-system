@@ -20,7 +20,14 @@ import portfolio_risk_engine
 import startup_recovery
 import reconciliation_lifecycle
 import watchdog
-from circuit_breaker import get_circuit_breaker_state, reset_circuit_breaker
+from circuit_breaker import (
+    auto_clear_recoverable_circuit_breaker,
+    get_circuit_breaker_state,
+    get_ibkr_error_count,
+    get_last_auto_recovery,
+    is_auto_recoverable_trip,
+    reset_circuit_breaker,
+)
 import position_sizing_engine
 import position_exit_priority_engine
 import sector_intelligence
@@ -127,6 +134,7 @@ async def _evaluate_auto_trading_enable_safety() -> dict:
     startup_passed = bool(startup_status.get("ok")) and await startup_recovery.startup_recovery_passed()
     circuit = await get_circuit_breaker_state()
     reconciliation = await reconciliation_lifecycle.get_reconciliation_status()
+    watchdog_status = await watchdog.get_watchdog_status()
     market_hours = get_market_hours_status()
 
     blocked_reasons: list[str] = []
@@ -136,6 +144,27 @@ async def _evaluate_auto_trading_enable_safety() -> dict:
         blocked_reasons.append(
             startup_status.get("reason") or "Startup recovery has not passed"
         )
+
+    health_can_clear_ibkr_errors = (
+        startup_passed
+        and bool(watchdog_status.get("tws_connected"))
+        and not (watchdog_status.get("stale_data") or {}).get("tws_mirror")
+        and not (watchdog_status.get("stale_data") or {}).get("execution_sync")
+        and int(reconciliation.get("issues_count") or 0) == 0
+    )
+    if (
+        health_can_clear_ibkr_errors
+        and (
+            (circuit.get("tripped") and is_auto_recoverable_trip(circuit))
+            or await get_ibkr_error_count() > 0
+        )
+    ):
+        recovery = await auto_clear_recoverable_circuit_breaker(
+            "Startup recovery, TWS mirror sync, execution sync, and reconciliation are healthy",
+            source="main._evaluate_auto_trading_enable_safety",
+        )
+        if recovery.get("cleared"):
+            circuit = await get_circuit_breaker_state()
 
     if circuit.get("tripped"):
         blocked_reasons.append(
@@ -398,6 +427,12 @@ async def _scan_symbol_inner(symbol: str) -> dict:
             "weekly_reasons": ["Failed to fetch data"],
             "error": "Failed to fetch data",
         }
+
+    await watchdog.refresh_market_data_timestamp(
+        "scanner_bars",
+        symbol=symbol,
+        metadata={"bars": len(raw.get("closes") or [])},
+    )
 
     ind = compute_indicators(raw)
     ind["symbol"] = symbol
@@ -688,6 +723,11 @@ async def run_full_scan() -> dict:
                     await asyncio.sleep(config.REQUEST_DELAY_SECONDS)
 
             _top_weekly = rank_top_weekly_setups(all_results, limit=10)
+            if any(not row.get("error") and row.get("signal") != "ERROR" for row in all_results):
+                await watchdog.refresh_market_data_timestamp(
+                    "ranking_engine",
+                    metadata={"fresh_symbols": sum(1 for row in all_results if not row.get("error") and row.get("signal") != "ERROR")},
+                )
 
             await process_auto_trading(all_results)
 
@@ -708,6 +748,12 @@ async def run_full_scan() -> dict:
             await refresh_open_positions()
 
             await database.finish_scan_run(scan_run_id, stats, status="completed")
+            fresh_symbols = stats["scanned_count"] + stats["skipped_count"]
+            if fresh_symbols > 0:
+                await watchdog.refresh_market_data_timestamp(
+                    "scan_cycle_completed",
+                    metadata={"scan_run_id": scan_run_id, "fresh_symbols": fresh_symbols},
+                )
 
             log.info(
                 "✔ Scan finished | scanned=%s skipped=%s errors=%s BUY=%s SELL=%s TOP10=%s",
@@ -1918,6 +1964,7 @@ async def api_trading_status():
     global_risk = await get_global_risk_status()
 
     watchdog_status = await watchdog.get_watchdog_status()
+    circuit_breaker_auto_recovery = await get_last_auto_recovery()
 
     # ==========================================
     # ACCOUNT CALCULATIONS
@@ -2128,6 +2175,18 @@ async def api_trading_status():
             "market_hours": market_hours,
 
             "watchdog": watchdog_status,
+
+            "circuit_breaker_auto_recovered": bool(
+                watchdog_status.get("circuit_breaker_auto_recovered")
+                or (
+                    circuit_breaker_auto_recovery
+                    and not (watchdog_status.get("circuit_breaker") or {}).get("tripped")
+                )
+            ),
+
+            "last_market_data_refresh_source": watchdog_status.get("last_market_data_refresh_source"),
+
+            "market_data_feed_active": bool(watchdog_status.get("market_data_feed_active")),
 
             "connection_status": {
                 "tws_connected": watchdog_status.get("tws_connected"),

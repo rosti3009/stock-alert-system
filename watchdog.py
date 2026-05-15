@@ -12,7 +12,7 @@ import aiosqlite
 
 import config
 import database
-from circuit_breaker import get_circuit_breaker_state, reset_circuit_breaker, trip_circuit_breaker
+from circuit_breaker import auto_clear_recoverable_circuit_breaker, get_circuit_breaker_state, trip_circuit_breaker
 from telegram_notifier import send_watchdog_alert
 from tws_connection_manager import disconnect_ib_sync, get_ib_sync, is_ib_connected
 
@@ -21,6 +21,8 @@ log = logging.getLogger(__name__)
 WATCHDOG_STATUS_KEY = "watchdog_status"
 WATCHDOG_ALERT_STATE_PREFIX = "watchdog_alert_sent:"
 WATCHDOG_CIRCUIT_SOURCE = "watchdog"
+LAST_MARKET_DATA_AT_KEY = "last_market_data_at"
+LAST_MARKET_DATA_REFRESH_SOURCE_KEY = "last_market_data_refresh_source"
 DEFAULT_STALE_SECONDS = 120
 DEFAULT_DISCONNECT_CIRCUIT_SECONDS = 180
 DEFAULT_ALERT_COOLDOWN_SECONDS = 300
@@ -115,10 +117,52 @@ async def _latest_daily_candidate_timestamp(db: aiosqlite.Connection) -> str | N
     return row[0] if row and row[0] else None
 
 
+async def refresh_market_data_timestamp(source: str, *, symbol: str | None = None, metadata: dict | None = None) -> str:
+    refreshed_at = now_iso()
+    payload = {"source": source, "refreshed_at": refreshed_at}
+    if symbol:
+        payload["symbol"] = symbol
+    if metadata:
+        payload["metadata"] = metadata
+    await database.set_app_state(LAST_MARKET_DATA_AT_KEY, refreshed_at)
+    await database.set_app_state(LAST_MARKET_DATA_REFRESH_SOURCE_KEY, _json(payload))
+    return refreshed_at
+
+
+def refresh_market_data_timestamp_sync(source: str, *, symbol: str | None = None, metadata: dict | None = None) -> str:
+    refreshed_at = now_iso()
+    payload = {"source": source, "refreshed_at": refreshed_at}
+    if symbol:
+        payload["symbol"] = symbol
+    if metadata:
+        payload["metadata"] = metadata
+    database.set_app_state_sync(LAST_MARKET_DATA_AT_KEY, refreshed_at)
+    database.set_app_state_sync(LAST_MARKET_DATA_REFRESH_SOURCE_KEY, _json(payload))
+    return refreshed_at
+
+
+async def _read_market_data_timestamp(db: aiosqlite.Connection) -> tuple[str | None, dict | None]:
+    explicit_at = await database.get_app_state(LAST_MARKET_DATA_AT_KEY)
+    source_raw = await database.get_app_state(LAST_MARKET_DATA_REFRESH_SOURCE_KEY)
+    source_payload = None
+    if source_raw:
+        try:
+            source_payload = json.loads(source_raw)
+        except Exception:
+            source_payload = {"source": str(source_raw)}
+    candidate_at = await _latest_daily_candidate_timestamp(db)
+
+    values = [v for v in (explicit_at, candidate_at) if parse_dt(v)]
+    latest_at = max(values, key=lambda v: parse_dt(v)) if values else None
+    if latest_at and latest_at != explicit_at and candidate_at == latest_at:
+        source_payload = {"source": "daily_candidates", "refreshed_at": latest_at}
+    return latest_at, source_payload
+
+
 async def _read_observed_state() -> dict:
     async with aiosqlite.connect(config.DB_PATH) as db:
         heartbeat = await _get_tws_heartbeat(db)
-        market_data_at = await _latest_daily_candidate_timestamp(db)
+        market_data_at, market_data_source = await _read_market_data_timestamp(db)
 
     last_mirror_success_at = await database.get_app_state("tws_mirror_last_success_at")
     last_execution_success_at = await database.get_app_state("execution_sync_last_success_at")
@@ -133,6 +177,8 @@ async def _read_observed_state() -> dict:
         "last_execution_sync_age_seconds": _age_seconds(last_execution_success_at),
         "last_market_data_at": market_data_at,
         "last_market_data_age_seconds": _age_seconds(market_data_at),
+        "last_market_data_refresh_source": market_data_source,
+        "market_data_feed_active": market_data_at is not None and (_age_seconds(market_data_at) is None or _age_seconds(market_data_at) <= _thresholds()["market_data_stale_seconds"]),
     }
 
 
@@ -263,7 +309,12 @@ async def _apply_circuit_breaker(status: dict, thresholds: dict) -> None:
     if status.get("healthy"):
         circuit = await get_circuit_breaker_state()
         if circuit.get("tripped") and circuit.get("source") == WATCHDOG_CIRCUIT_SOURCE:
-            await reset_circuit_breaker("Watchdog cleared after reconnect and sync validation")
+            await auto_clear_recoverable_circuit_breaker(
+                "Watchdog healthy after reconnect and sync validation",
+                source="watchdog.run_watchdog_once",
+                force=True,
+            )
+            status["circuit_breaker_auto_recovered"] = True
 
 
 async def run_watchdog_once() -> dict:
@@ -304,6 +355,8 @@ async def run_watchdog_once() -> dict:
         "execution_sync": any("Execution sync stale" in r or "No successful execution" in r for r in status["blocking_reasons"]),
         "market_data": any("Market data stale" in r for r in status["blocking_reasons"]),
     }
+    status["market_data_feed_active"] = not status["stale_data"]["market_data"] and status.get("last_market_data_at") is not None
+    status.setdefault("circuit_breaker_auto_recovered", False)
     status["healthy"] = bool(status.get("tws_connected")) and not status["trading_blocked"]
 
     if status["stale_data"]["market_data"]:

@@ -15,7 +15,7 @@ from ib_insync import IB
 import config
 import database
 import order_lifecycle
-from circuit_breaker import record_ibkr_error
+from circuit_breaker import record_ibkr_error, reset_ibkr_error_count
 
 log = logging.getLogger(__name__)
 
@@ -293,6 +293,7 @@ async def sync_executions():
             "synced_at": now_iso(),
         }
         await database.set_app_state("execution_sync_last_success_at", result["synced_at"])
+        await reset_ibkr_error_count()
 
         log.info(
             "Execution sync complete | fetched=%s inserted=%s duplicates=%s",
