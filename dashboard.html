@@ -512,6 +512,14 @@
         </div>
       </div>
 
+      <div class="box">
+        <h3>Trade Review</h3>
+        <div class="muted">
+          Review-only replay of completed trades. This section does not place orders or change strategy.
+        </div>
+        <div id="tradeReviewRows" class="muted">Loading...</div>
+      </div>
+
       <!-- ========================================= -->
       <!-- TABLES -->
       <!-- ========================================= -->
@@ -626,6 +634,7 @@ let learningSummary = {};
 let rejectedSetups = [];
 let setupPerformance = [];
 let tradeOutcomes = [];
+let tradeReviews = [];
 let equityChart;
 let isLoading = false;
 
@@ -763,7 +772,8 @@ async function loadDashboard(){
       learningSummary,
       rejectedSetups,
       setupPerformance,
-      tradeOutcomes
+      tradeOutcomes,
+      tradeReviews
     ] = await Promise.all([
 
       fetchNoCache("/api/stocks"),
@@ -788,7 +798,9 @@ async function loadDashboard(){
 
       fetchNoCache("/api/analytics/setup-performance"),
 
-      fetchNoCache("/api/analytics/outcomes?limit=25")
+      fetchNoCache("/api/analytics/outcomes?limit=25"),
+
+      fetchNoCache("/api/trade-reviews?limit=10")
 
     ]);
 
@@ -807,6 +819,8 @@ async function loadDashboard(){
     drawSectorIntelligence();
 
     drawTradingIntelligence();
+
+    drawTradeReviews();
 
     document.getElementById(
       "updated"
@@ -890,6 +904,32 @@ function drawTradingIntelligence(){
     {key:'exit_reason', label:'Exit'},
     {key:'profit_amount', label:'PnL', format:v=>money(v)},
     {key:'profit_percent', label:'PnL %', format:v=>pct(v)}
+  ]);
+}
+
+function lessonText(review){
+  const lessons = review.lessons || [];
+  if(!lessons.length){
+    return '-';
+  }
+  return lessons
+    .slice(0,2)
+    .map(item => item.lesson || item.topic || '-')
+    .join(' · ');
+}
+
+function drawTradeReviews(){
+  const target = document.getElementById('tradeReviewRows');
+  if(!target){
+    return;
+  }
+  target.innerHTML = metricRows((tradeReviews || []).slice(0,10), [
+    {key:'symbol', label:'Symbol'},
+    {key:'entry_reason', label:'Entry Reason'},
+    {key:'exit_reason', label:'Exit Reason'},
+    {key:'profit_amount', label:'PnL', format:v=>money(v)},
+    {key:'hold_minutes', label:'Hold', format:v=>v === null || v === undefined ? '-' : Number(v || 0).toFixed(1) + 'm'},
+    {key:'lessons', label:'Lessons', format:(_v,item)=>lessonText(item)}
   ]);
 }
 
