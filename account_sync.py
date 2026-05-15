@@ -441,7 +441,7 @@ async def get_equity_curve(limit: int = 500, session_only: bool = True) -> list[
     baseline_timestamp = (session or {}).get("equity_curve_start_timestamp")
     session_start_equity = safe_float(
         (session or {}).get("session_start_equity"),
-        safe_float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0), 5000.0),
+        safe_float(config.effective_virtual_trading_capital(), 5000.0),
     )
     realized_baseline = safe_float((session or {}).get("realized_pnl_baseline"))
 

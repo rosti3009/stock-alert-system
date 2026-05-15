@@ -53,7 +53,7 @@ def is_intraday_mode(mode: StrategyMode | str | None) -> bool:
 
 
 def intraday_rules() -> dict[str, Any]:
-    return {
+    rules = {
         "min_score_to_buy": int(getattr(config, "INTRADAY_MIN_SCORE_TO_BUY", 85)),
         "max_open_positions": int(getattr(config, "INTRADAY_MAX_OPEN_POSITIONS", 3)),
         "position_size_factor": float(getattr(config, "INTRADAY_POSITION_SIZE_FACTOR", 0.25)),
@@ -69,6 +69,12 @@ def intraday_rules() -> dict[str, Any]:
         "require_vwap_when_available": True,
         "required_timeframes": ["1m", "5m", "15m"],
     }
+    profile_rules = config.active_paper_training_profile_rules()
+    rules.update(profile_rules.get("intraday") or {})
+    rules["training_profile"] = profile_rules["profile"]
+    rules["hard_protections_kept"] = profile_rules["hard_protections_kept"]
+    rules["allow_overnight"] = False
+    return rules
 
 
 def swing_rules() -> dict[str, Any]:
@@ -278,7 +284,16 @@ def strategy_mode_payload(
         "previous_strategy_mode": normalize_strategy_mode(previous_mode).value if previous_mode else None,
         "active_buy_engine": "intraday_technical" if is_intraday_mode(normalized) else "swing_default",
         "active_sell_engine": "intraday_exit" if is_intraday_mode(normalized) else "swing_position_manager",
-        "active_risk_profile": "intraday_conservative" if is_intraday_mode(normalized) else "swing_default",
+        "active_risk_profile": (
+            f"intraday_{config.active_paper_training_profile().lower()}"
+            if is_intraday_mode(normalized) else "swing_default"
+        ),
+        "active_training_profile": config.active_paper_training_profile(),
+        "profile_rules": config.active_paper_training_profile_rules(),
+        "effective_max_positions": int(rules.get("max_open_positions", 0)),
+        "effective_score_threshold": int(rules.get("min_score_to_buy", 0)),
+        "effective_risk_factor": float(rules.get("position_size_factor", 1.0)),
+        "effective_max_daily_trades": int(rules.get("max_daily_trades", 0)) if "max_daily_trades" in rules else None,
         "rules": rules,
         "intraday_rules": intraday_rules(),
         "intraday_enrichment_status": intraday_enrichment_status(),

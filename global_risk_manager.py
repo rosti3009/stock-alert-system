@@ -25,7 +25,7 @@ async def get_global_risk_status():
     )
 
     account_balance = float(
-        getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0)
+        config.effective_virtual_trading_capital()
     )
 
     total_pnl = (

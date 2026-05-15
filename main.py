@@ -2204,7 +2204,7 @@ async def api_trading_status():
     account_equity = float(
         (active_paper_session or {}).get(
             "session_start_equity",
-            getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0),
+            config.effective_virtual_trading_capital(),
         )
     ) + float(realized_pnl)
 
@@ -2394,6 +2394,18 @@ async def api_trading_status():
 
             "intraday_rules": active_strategy_payload["intraday_rules"],
 
+            "active_training_profile": active_strategy_payload["active_training_profile"],
+
+            "profile_rules": active_strategy_payload["profile_rules"],
+
+            "effective_max_positions": active_strategy_payload["effective_max_positions"],
+
+            "effective_score_threshold": active_strategy_payload["effective_score_threshold"],
+
+            "effective_risk_factor": active_strategy_payload["effective_risk_factor"],
+
+            "effective_max_daily_trades": active_strategy_payload["effective_max_daily_trades"],
+
             "intraday_enrichment_status": active_strategy_payload["intraday_enrichment_status"],
 
             "force_exit_before_close": active_strategy_payload["force_exit_before_close"],
@@ -2468,9 +2480,9 @@ async def api_trading_status():
             # ACCOUNT
             # ==========================================
 
-            "account_balance": float(config.ACCOUNT_BALANCE),
+            "account_balance": float(config.effective_account_balance()),
 
-            "virtual_trading_capital": float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0)),
+            "virtual_trading_capital": float(config.effective_virtual_trading_capital()),
 
             "active_paper_session": active_paper_session,
 

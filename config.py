@@ -186,8 +186,10 @@ print("✅ DB PATH:", DB_PATH)
 IBKR_HOST = get_str("IBKR_HOST", "127.0.0.1")
 IBKR_PORT = get_int("IBKR_PORT", 7497)
 IBKR_CLIENT_ID = get_int("IBKR_CLIENT_ID", 20)
-IBKR_PAPER_TRADING = get_bool("IBKR_PAPER_TRADING", True)
-IBKR_ENABLE_REAL_TRADING = get_bool("IBKR_ENABLE_REAL_TRADING", False)
+IBKR_PAPER_TRADING = get_bool("PAPER_TRADING", get_bool("IBKR_PAPER_TRADING", True))
+IBKR_ENABLE_REAL_TRADING = get_bool("REAL_TRADING_ENABLED", get_bool("IBKR_ENABLE_REAL_TRADING", False))
+PAPER_TRADING = IBKR_PAPER_TRADING
+REAL_TRADING_ENABLED = IBKR_ENABLE_REAL_TRADING
 IBKR_MARKET_DATA_TYPE = get_int("IBKR_MARKET_DATA_TYPE", 3)
 
 # ==============================
@@ -255,3 +257,95 @@ INTRADAY_FORCE_EXIT_MINUTES_BEFORE_CLOSE = get_int("INTRADAY_FORCE_EXIT_MINUTES_
 INTRADAY_ALLOW_OVERNIGHT = get_bool("INTRADAY_ALLOW_OVERNIGHT", False)
 INTRADAY_BREAK_EVEN_PROFIT_PERCENT = get_float("INTRADAY_BREAK_EVEN_PROFIT_PERCENT", 1.0)
 INTRADAY_TIME_EXIT_MINUTES = get_int("INTRADAY_TIME_EXIT_MINUTES", 30)
+
+
+# ==============================
+# PAPER TRAINING PROFILES
+# ==============================
+PAPER_TRAINING_PROFILE = get_str("PAPER_TRAINING_PROFILE", "AGGRESSIVE_LEARNING").upper()
+PAPER_TRAINING_PROFILES = {
+    "CONSERVATIVE": {
+        "paper_capital": VIRTUAL_TRADING_CAPITAL_USD,
+        "intraday": {
+            "max_open_positions": INTRADAY_MAX_OPEN_POSITIONS if "INTRADAY_MAX_OPEN_POSITIONS" in globals() else 3,
+        },
+    },
+    "BALANCED": {
+        "paper_capital": 100000.0,
+        "intraday": {
+            "max_open_positions": 5,
+            "position_size_factor": 0.35,
+            "min_score_to_buy": 82,
+            "min_relative_volume": 1.35,
+            "min_dollar_volume": 4000000.0,
+            "max_daily_trades": 10,
+            "max_consecutive_losses": 3,
+            "max_daily_loss_percent": 2.5,
+        },
+    },
+    "AGGRESSIVE_LEARNING": {
+        "paper_capital": 500000.0,
+        "intraday": {
+            "max_open_positions": 8,
+            "position_size_factor": 0.5,
+            "min_score_to_buy": 78,
+            "min_relative_volume": 1.2,
+            "min_dollar_volume": 3000000.0,
+            "max_daily_trades": 15,
+            "max_consecutive_losses": 4,
+            "max_daily_loss_percent": 3.0,
+        },
+    },
+}
+
+
+def normalize_paper_training_profile(profile: str | None = None) -> str:
+    normalized = str(profile or PAPER_TRAINING_PROFILE or "CONSERVATIVE").strip().upper()
+    return normalized if normalized in PAPER_TRAINING_PROFILES else "CONSERVATIVE"
+
+
+def is_paper_training_mode() -> bool:
+    return bool(IBKR_PAPER_TRADING) and not bool(IBKR_ENABLE_REAL_TRADING)
+
+
+def active_paper_training_profile() -> str:
+    if not is_paper_training_mode():
+        return "CONSERVATIVE"
+    return normalize_paper_training_profile()
+
+
+def active_paper_training_profile_rules() -> dict:
+    profile = active_paper_training_profile()
+    rules = PAPER_TRAINING_PROFILES.get(profile, PAPER_TRAINING_PROFILES["CONSERVATIVE"])
+    return {
+        "profile": profile,
+        "requested_profile": normalize_paper_training_profile(),
+        "available_profiles": list(PAPER_TRAINING_PROFILES.keys()),
+        "paper_training_mode": is_paper_training_mode(),
+        "paper_only_required": True,
+        "live_profile_blocked": bool(IBKR_ENABLE_REAL_TRADING),
+        "paper_capital": float(rules.get("paper_capital", VIRTUAL_TRADING_CAPITAL_USD)),
+        "intraday": dict(rules.get("intraday") or {}),
+        "hard_protections_kept": [
+            "market_hours_guard",
+            "watchdog",
+            "circuit_breaker",
+            "stale_market_data_block",
+            "tws_reconciliation_block",
+            "slippage_spread_block",
+            "liquidity_block",
+            "no_overnight_holding",
+        ],
+    }
+
+
+def effective_virtual_trading_capital() -> float:
+    if is_paper_training_mode():
+        return float(active_paper_training_profile_rules()["paper_capital"])
+    return float(VIRTUAL_TRADING_CAPITAL_USD)
+
+
+def effective_account_balance() -> float:
+    if is_paper_training_mode():
+        return effective_virtual_trading_capital()
+    return float(ACCOUNT_BALANCE)

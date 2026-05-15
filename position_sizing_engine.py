@@ -58,7 +58,7 @@ def threshold(name: str, default: float) -> float:
 
 
 def effective_account_equity() -> float:
-    return max(0.0, safe_float(getattr(config, "VIRTUAL_TRADING_CAPITAL_USD", 5000.0), 5000.0))
+    return max(0.0, safe_float(config.effective_virtual_trading_capital(), 5000.0))
 
 
 def _entry_price(row: dict[str, Any]) -> float:

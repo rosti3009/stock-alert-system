@@ -28,11 +28,13 @@ class PortfolioRiskEngineTests(unittest.TestCase):
             "MAX_ACCOUNT_UTILIZATION_PERCENT": config.MAX_ACCOUNT_UTILIZATION_PERCENT,
             "ACCOUNT_BALANCE": config.ACCOUNT_BALANCE,
             "VIRTUAL_TRADING_CAPITAL_USD": config.VIRTUAL_TRADING_CAPITAL_USD,
+            "PAPER_TRAINING_PROFILE": config.PAPER_TRAINING_PROFILE,
         }
         config.DB_PATH = self.tmp.name
         database.DB_PATH = self.tmp.name
         config.ACCOUNT_BALANCE = 10000.0
         config.VIRTUAL_TRADING_CAPITAL_USD = 5000.0
+        config.PAPER_TRAINING_PROFILE = "CONSERVATIVE"
         config.MAX_TOTAL_EXPOSURE_PERCENT = 80.0
         config.MAX_SYMBOL_EXPOSURE_PERCENT = 25.0
         config.MAX_SECTOR_EXPOSURE_PERCENT = 45.0

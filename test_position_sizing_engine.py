@@ -23,7 +23,9 @@ class PositionSizingEngineTests(unittest.TestCase):
             "ask": 100.05,
         }
         self.original_virtual_capital = config.VIRTUAL_TRADING_CAPITAL_USD
+        self.original_training_profile = config.PAPER_TRAINING_PROFILE
         config.VIRTUAL_TRADING_CAPITAL_USD = 5000.0
+        config.PAPER_TRAINING_PROFILE = "CONSERVATIVE"
         self.base_context = {
             "open_positions": [],
             "account_equity": 10_000.0,
@@ -41,6 +43,7 @@ class PositionSizingEngineTests(unittest.TestCase):
 
     def tearDown(self):
         config.VIRTUAL_TRADING_CAPITAL_USD = self.original_virtual_capital
+        config.PAPER_TRAINING_PROFILE = self.original_training_profile
 
     def build(self, row=None, **overrides):
         payload = dict(self.base_context)
