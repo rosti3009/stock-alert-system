@@ -74,6 +74,7 @@ def _thresholds() -> dict:
         "mirror_stale_seconds": _config_int("WATCHDOG_TWS_MIRROR_STALE_SECONDS", DEFAULT_STALE_SECONDS),
         "execution_stale_seconds": _config_int("WATCHDOG_EXECUTION_SYNC_STALE_SECONDS", DEFAULT_STALE_SECONDS),
         "market_data_stale_seconds": _config_int("WATCHDOG_MARKET_DATA_STALE_SECONDS", 300),
+        "position_tracking_stale_seconds": _config_int("WATCHDOG_POSITION_TRACKING_STALE_SECONDS", max(60, _config_int("POSITION_TRACK_INTERVAL_SECONDS", 15) * 4)),
         "disconnect_circuit_seconds": _config_int("WATCHDOG_DISCONNECT_CIRCUIT_SECONDS", DEFAULT_DISCONNECT_CIRCUIT_SECONDS),
         "alert_cooldown_seconds": _config_int("WATCHDOG_ALERT_COOLDOWN_SECONDS", DEFAULT_ALERT_COOLDOWN_SECONDS),
         "reconnect_backoff_seconds": _config_int("WATCHDOG_RECONNECT_BACKOFF_SECONDS", DEFAULT_RECONNECT_BACKOFF_SECONDS),
@@ -251,6 +252,38 @@ async def _read_market_data_timestamp(db: aiosqlite.Connection) -> tuple[str | N
     return latest_at, source_payload
 
 
+async def _read_live_position_tracking_state() -> dict:
+    raw = await database.get_app_state("live_position_tracker_status")
+    open_positions = await database.get_open_positions()
+    if not raw:
+        return {
+            "open_position_count": len(open_positions),
+            "tracked_count": 0,
+            "tracked_symbols": [],
+            "last_refresh_at": None,
+            "last_refresh_age_seconds": None,
+            "healthy": len(open_positions) == 0,
+            "source": "live_position_tracker",
+        }
+    try:
+        status = json.loads(raw)
+    except Exception as exc:
+        return {
+            "open_position_count": len(open_positions),
+            "tracked_count": 0,
+            "tracked_symbols": [],
+            "last_refresh_at": None,
+            "last_refresh_age_seconds": None,
+            "healthy": False,
+            "source": "live_position_tracker",
+            "error": f"status unreadable: {exc}",
+        }
+    status["open_position_count"] = len(open_positions)
+    status["last_refresh_age_seconds"] = _age_seconds(status.get("last_refresh_at"))
+    status.setdefault("source", "live_position_tracker")
+    return status
+
+
 async def _read_observed_state() -> dict:
     async with aiosqlite.connect(config.DB_PATH) as db:
         heartbeat = await _get_tws_heartbeat(db)
@@ -258,6 +291,7 @@ async def _read_observed_state() -> dict:
 
     last_mirror_success_at = await database.get_app_state("tws_mirror_last_success_at")
     last_execution_success_at = await database.get_app_state("execution_sync_last_success_at")
+    live_position_tracking = await _read_live_position_tracking_state()
 
     return {
         "tws_connected": bool(is_ib_connected() or heartbeat.get("connected")),
@@ -271,6 +305,9 @@ async def _read_observed_state() -> dict:
         "last_market_data_age_seconds": _age_seconds(market_data_at),
         "last_market_data_refresh_source": market_data_source,
         "market_data_feed_active": market_data_at is not None and (_age_seconds(market_data_at) is None or _age_seconds(market_data_at) <= _thresholds()["market_data_stale_seconds"]),
+        "live_position_tracking": live_position_tracking,
+        "last_position_tracking_at": live_position_tracking.get("last_refresh_at"),
+        "last_position_tracking_age_seconds": live_position_tracking.get("last_refresh_age_seconds"),
     }
 
 
@@ -379,6 +416,20 @@ def _blocking_reasons(status: dict, thresholds: dict) -> list[str]:
     if status.get("last_market_data_at") is not None and market_age is not None and market_age > thresholds["market_data_stale_seconds"]:
         reasons.append(f"{MARKET_DATA_STALE_REASON_PREFIX} ({market_age}s)")
 
+    live_tracking = status.get("live_position_tracking") or {}
+    open_count = int(live_tracking.get("open_position_count") or 0)
+    tracked_count = int(live_tracking.get("tracked_count") or 0)
+    tracking_age = live_tracking.get("last_refresh_age_seconds")
+    if open_count > 0:
+        if not live_tracking.get("last_refresh_at"):
+            reasons.append("No live position tracking refresh for open positions")
+        elif tracking_age is not None and tracking_age > thresholds["position_tracking_stale_seconds"]:
+            reasons.append(f"Live position tracking stale ({tracking_age}s)")
+        if tracked_count < open_count:
+            reasons.append(f"Live position tracker missing open positions ({tracked_count}/{open_count})")
+        if live_tracking.get("healthy") is False:
+            reasons.append("Live position tracking unhealthy")
+
     return reasons
 
 
@@ -446,6 +497,7 @@ async def run_watchdog_once() -> dict:
         "tws_mirror": any("TWS mirror sync stale" in r or "No successful TWS mirror" in r for r in status["blocking_reasons"]),
         "execution_sync": any("Execution sync stale" in r or "No successful execution" in r for r in status["blocking_reasons"]),
         "market_data": any("Market data stale" in r for r in status["blocking_reasons"]),
+        "live_position_tracking": any("live position" in r.lower() for r in status["blocking_reasons"]),
     }
     status["market_data_feed_active"] = not status["stale_data"]["market_data"] and status.get("last_market_data_at") is not None
     status.setdefault("circuit_breaker_auto_recovered", False)

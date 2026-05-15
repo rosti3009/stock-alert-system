@@ -218,6 +218,7 @@
                 <th>Action</th>
                 <th>Reason</th>
                 <th>Updated</th>
+                <th>Live Tracking</th>
                 <th>Close</th>
               </tr>
 
@@ -226,7 +227,7 @@
             <tbody id="positionsTable">
 
               <tr>
-                <td colspan="16">
+                <td colspan="17">
                   Loading positions...
                 </td>
               </tr>
@@ -367,7 +368,7 @@ async function loadPositions(){
     console.error(err);
 
     document.getElementById("positionsTable").innerHTML =
-      `<tr><td colspan="16">Error loading positions</td></tr>`;
+      `<tr><td colspan="17">Error loading positions</td></tr>`;
 
     document.getElementById("updated").textContent =
       "Update failed";
@@ -555,6 +556,16 @@ function renderTradingStatus(){
     </tr>
 
     <tr>
+      <td><b>Live Tracker</b></td>
+      <td>
+        ${(tradingStatusData.live_position_tracker || {}).tracked_count || 0}
+        tracked · last refresh
+        ${(tradingStatusData.live_position_tracker || {}).last_refresh_at || "-"}
+        · source ${(tradingStatusData.live_position_tracker || {}).source || "-"}
+      </td>
+    </tr>
+
+    <tr>
       <td><b>Account Equity</b></td>
       <td>${money(tradingStatusData.account_equity)}</td>
     </tr>
@@ -592,7 +603,7 @@ function renderTable(){
   if(!open.length){
 
     tbody.innerHTML =
-      `<tr><td colspan="16">אין פוזיציות פתוחות כרגע</td></tr>`;
+      `<tr><td colspan="17">אין פוזיציות פתוחות כרגע</td></tr>`;
 
     return;
   }
@@ -666,6 +677,16 @@ function renderTable(){
 
           <td>
             ${p.updated_at || "-"}
+          </td>
+
+          <td>
+            <span class="badge">
+              ${p.live_tracking ? "LIVE" : "-"}
+            </span>
+            <div class="muted">
+              ${p.live_tracking_source || "-"}
+              ${p.live_tracking_last_refresh_at ? " · " + p.live_tracking_last_refresh_at : ""}
+            </div>
           </td>
 
           <td>
