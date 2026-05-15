@@ -92,16 +92,44 @@ async def _journal_buy_decision(
     market: dict | None = None,
     extra: dict | None = None,
 ) -> None:
-    await database.safe_record_trade_journal_event(
-        _base_journal_event(
-            row=row,
-            event_type=event_type,
-            decision=decision,
-            reason=reason,
-            market=market,
-            extra=extra,
-        )
+    event = _base_journal_event(
+        row=row,
+        event_type=event_type,
+        decision=decision,
+        reason=reason,
+        market=market,
+        extra=extra,
     )
+    strategy_value = (market or {}).get("strategy_mode")
+    if hasattr(strategy_value, "value"):
+        strategy_value = strategy_value.value
+    analytics_payload = {
+        **(row or {}),
+        **(extra or {}),
+        "event_type": event_type,
+        "decision": decision,
+        "reason": reason,
+        "rejection_reason": reason,
+        "entry_reason": reason,
+        "market_regime": event.get("market_regime"),
+        "strategy_mode": strategy_value,
+        "timestamp": event.get("timestamp") or database.now_iso(),
+    }
+    await database.safe_record_trade_journal_event(event)
+    try:
+        if decision == "ACCEPTED" or event_type == "BUY_CANDIDATE_ACCEPTED":
+            await database.record_trade_decision(analytics_payload)
+        elif decision in {"REJECTED", "BLOCKED"} or event_type in {
+            "BUY_CANDIDATE_REJECTED",
+            "INTRADAY_BUY_BLOCKED",
+            "EXECUTION_BLOCK_BUY",
+            "POSITION_SIZE_BLOCKED",
+            "RISK_BLOCK_BUY",
+            "BUY_BLOCKED_BY_SAFETY_GATE",
+        }:
+            await database.record_rejected_setup(analytics_payload)
+    except Exception as exc:
+        log.warning("Trading intelligence analytics insert failed: %s", exc)
 
 
 def is_us_regular_market_open() -> bool:

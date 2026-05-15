@@ -7,6 +7,8 @@ from contextlib import closing
 from datetime import datetime, timezone
 import aiosqlite
 
+import learning_analytics
+
 from config import DB_PATH, ACCOUNT_BALANCE, VIRTUAL_TRADING_CAPITAL_USD
 
 log = logging.getLogger(__name__)
@@ -245,6 +247,91 @@ RESETTABLE_SESSION_STATE_KEYS = {
 }
 
 
+
+CREATE_TRADE_DECISIONS = """
+CREATE TABLE IF NOT EXISTS trade_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    setup_type TEXT DEFAULT 'UNKNOWN',
+    entry_reason TEXT,
+    score_breakdown TEXT,
+    rvol REAL,
+    vwap_status TEXT,
+    breakout_status TEXT,
+    momentum_score REAL,
+    market_regime TEXT,
+    sector TEXT,
+    strategy_mode TEXT,
+    entry_time TEXT,
+    entry_price REAL,
+    created_at TEXT
+)
+"""
+
+CREATE_REJECTED_SETUPS = """
+CREATE TABLE IF NOT EXISTS rejected_setups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    strategy_mode TEXT,
+    rejection_reason TEXT,
+    failed_filter TEXT,
+    score REAL,
+    rvol REAL,
+    vwap_status TEXT,
+    momentum_score REAL,
+    spread_percent REAL,
+    slippage_estimate REAL,
+    market_regime TEXT,
+    sector TEXT,
+    time_of_day TEXT,
+    raw_json TEXT
+)
+"""
+
+CREATE_SETUP_PERFORMANCE = """
+CREATE TABLE IF NOT EXISTS setup_performance (
+    setup_type TEXT PRIMARY KEY,
+    total_trades INTEGER DEFAULT 0,
+    wins INTEGER DEFAULT 0,
+    losses INTEGER DEFAULT 0,
+    win_rate REAL DEFAULT 0,
+    avg_profit_amount REAL DEFAULT 0,
+    avg_profit_percent REAL DEFAULT 0,
+    total_profit_amount REAL DEFAULT 0,
+    avg_hold_minutes REAL DEFAULT 0,
+    updated_at TEXT
+)
+"""
+
+CREATE_TRADE_OUTCOMES = """
+CREATE TABLE IF NOT EXISTS trade_outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    setup_type TEXT DEFAULT 'UNKNOWN',
+    entry_time TEXT,
+    exit_time TEXT,
+    entry_price REAL,
+    exit_price REAL,
+    exit_reason TEXT,
+    exit_engine TEXT,
+    hold_minutes REAL,
+    profit_amount REAL,
+    profit_percent REAL,
+    max_favorable_excursion REAL,
+    max_adverse_excursion REAL,
+    trailing_stop_used INTEGER DEFAULT 0,
+    force_exit_used INTEGER DEFAULT 0,
+    rvol REAL,
+    rvol_range TEXT,
+    market_regime TEXT,
+    sector TEXT,
+    time_of_day TEXT,
+    raw_json TEXT,
+    created_at TEXT
+)
+"""
+
 CREATE_ORDER_LIFECYCLE_EVENTS = """
 CREATE TABLE IF NOT EXISTS order_lifecycle_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -289,6 +376,10 @@ async def init_db() -> None:
         await db.execute(CREATE_EXECUTION_HISTORY)
         await db.execute(CREATE_EQUITY_CURVE)
         await db.execute(CREATE_ORDER_LIFECYCLE_EVENTS)
+        await db.execute(CREATE_TRADE_DECISIONS)
+        await db.execute(CREATE_REJECTED_SETUPS)
+        await db.execute(CREATE_SETUP_PERFORMANCE)
+        await db.execute(CREATE_TRADE_OUTCOMES)
 
         await _ensure_columns(db, "signals", {
             "score": "REAL",
@@ -337,6 +428,11 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_order_lifecycle_symbol ON order_lifecycle_events(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_order_lifecycle_order_id ON order_lifecycle_events(order_id)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_order_lifecycle_perm_id ON order_lifecycle_events(perm_id)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_rejected_setups_timestamp ON rejected_setups(timestamp)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_rejected_setups_symbol ON rejected_setups(symbol)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_trade_decisions_symbol ON trade_decisions(symbol)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_trade_outcomes_symbol ON trade_outcomes(symbol)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_trade_outcomes_setup_type ON trade_outcomes(setup_type)")
         await db.commit()
 
 
@@ -983,6 +1079,19 @@ async def close_position(symbol: str, reason: str = "Closed manually") -> dict |
         except Exception as exc:
             log.warning("Live position tracker prune failed after close: %s", exc)
 
+    if updated:
+        try:
+            await record_trade_outcome({
+                **updated,
+                "symbol": symbol,
+                "exit_reason": reason,
+                "exit_engine": "auto_trader" if str(reason or "").upper().startswith("AUTO:") else "manual",
+                "trailing_stop_used": "TRAIL" in str(reason or "").upper(),
+                "force_exit_used": "FORCE" in str(reason or "").upper() or "EMERGENCY" in str(reason or "").upper(),
+            })
+        except Exception as exc:
+            log.warning("Trade outcome analytics insert failed after close: %s", exc)
+
     if updated and not str(reason or "").upper().startswith("AUTO:"):
         await safe_record_trade_journal_event({
             "symbol": symbol,
@@ -1294,3 +1403,309 @@ async def get_priority_symbols(limit: int = 200) -> list[str]:
         for row in rows
         if row and row[0]
     ]
+
+def _analytics_json(data: dict | None) -> str:
+    try:
+        return json.dumps(data or {}, ensure_ascii=False, default=str)
+    except Exception:
+        return json.dumps({"repr": repr(data)}, ensure_ascii=False)
+
+
+def _failed_filter(reason: str | None, fallback: str | None = None) -> str | None:
+    text = str(reason or fallback or "").lower()
+    mapping = [
+        ("score", "score"),
+        ("regime", "market_regime"),
+        ("position", "position_limit"),
+        ("sizing", "position_sizing"),
+        ("execution", "execution_quality"),
+        ("risk", "risk"),
+        ("vwap", "vwap"),
+        ("rvol", "rvol"),
+        ("spread", "spread"),
+        ("slippage", "slippage"),
+        ("market", "market_hours"),
+        ("watchdog", "watchdog"),
+    ]
+    for needle, value in mapping:
+        if needle in text:
+            return value
+    return fallback or "unknown"
+
+
+def _symbol(value) -> str | None:
+    symbol = str(value or "").strip().upper()
+    return symbol or None
+
+
+def _score_breakdown(row: dict) -> str:
+    payload = {
+        "score": row.get("score"),
+        "weekly_score": row.get("weekly_score"),
+        "intraday_technical_score": row.get("intraday_technical_score"),
+        "reasons": row.get("reasons"),
+        "intraday_score_reasons": row.get("intraday_score_reasons"),
+    }
+    return _analytics_json(payload)
+
+
+async def record_rejected_setup(data: dict) -> None:
+    symbol = _symbol(data.get("symbol"))
+    if not symbol:
+        return
+    timestamp = data.get("timestamp") or now_iso()
+    row = {
+        "symbol": symbol,
+        "timestamp": timestamp,
+        "strategy_mode": data.get("strategy_mode"),
+        "rejection_reason": data.get("rejection_reason") or data.get("reason"),
+        "failed_filter": data.get("failed_filter") or _failed_filter(data.get("rejection_reason") or data.get("reason"), data.get("event_type")),
+        "score": data.get("score") or data.get("signal_score") or data.get("weekly_score"),
+        "rvol": learning_analytics.rvol(data),
+        "vwap_status": learning_analytics.vwap_status(data),
+        "momentum_score": learning_analytics.momentum_score(data),
+        "spread_percent": data.get("spread_percent") or (data.get("execution_quality") or {}).get("spread_percent"),
+        "slippage_estimate": data.get("slippage_estimate") or (data.get("execution_quality") or {}).get("slippage_estimate"),
+        "market_regime": data.get("market_regime"),
+        "sector": data.get("sector"),
+        "time_of_day": data.get("time_of_day") or learning_analytics.time_of_day(timestamp),
+        "raw_json": _analytics_json(data),
+    }
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_REJECTED_SETUPS)
+        await db.execute("""
+            INSERT INTO rejected_setups (
+                symbol, timestamp, strategy_mode, rejection_reason, failed_filter, score, rvol,
+                vwap_status, momentum_score, spread_percent, slippage_estimate, market_regime,
+                sector, time_of_day, raw_json
+            ) VALUES (
+                :symbol, :timestamp, :strategy_mode, :rejection_reason, :failed_filter, :score, :rvol,
+                :vwap_status, :momentum_score, :spread_percent, :slippage_estimate, :market_regime,
+                :sector, :time_of_day, :raw_json
+            )
+        """, row)
+        await db.commit()
+
+
+async def record_trade_decision(data: dict) -> None:
+    symbol = _symbol(data.get("symbol"))
+    if not symbol:
+        return
+    entry_time = data.get("entry_time") or data.get("timestamp") or now_iso()
+    row = {
+        "symbol": symbol,
+        "setup_type": learning_analytics.classify_setup_type(data),
+        "entry_reason": data.get("entry_reason") or data.get("reason"),
+        "score_breakdown": data.get("score_breakdown") if isinstance(data.get("score_breakdown"), str) else _score_breakdown(data),
+        "rvol": learning_analytics.rvol(data),
+        "vwap_status": learning_analytics.vwap_status(data),
+        "breakout_status": data.get("breakout_status"),
+        "momentum_score": learning_analytics.momentum_score(data),
+        "market_regime": data.get("market_regime"),
+        "sector": data.get("sector"),
+        "strategy_mode": data.get("strategy_mode"),
+        "entry_time": entry_time,
+        "entry_price": data.get("entry_price") or data.get("price") or data.get("buy_price"),
+        "created_at": now_iso(),
+    }
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_TRADE_DECISIONS)
+        await db.execute("""
+            INSERT INTO trade_decisions (
+                symbol, setup_type, entry_reason, score_breakdown, rvol, vwap_status, breakout_status,
+                momentum_score, market_regime, sector, strategy_mode, entry_time, entry_price, created_at
+            ) VALUES (
+                :symbol, :setup_type, :entry_reason, :score_breakdown, :rvol, :vwap_status, :breakout_status,
+                :momentum_score, :market_regime, :sector, :strategy_mode, :entry_time, :entry_price, :created_at
+            )
+        """, row)
+        await db.commit()
+
+
+async def _latest_trade_decision(symbol: str) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_TRADE_DECISIONS)
+        db.row_factory = aiosqlite.Row
+        async with db.execute("""
+            SELECT * FROM trade_decisions
+            WHERE symbol = ?
+            ORDER BY entry_time DESC, id DESC
+            LIMIT 1
+        """, (symbol,)) as cursor:
+            row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def record_trade_outcome(data: dict) -> None:
+    symbol = _symbol(data.get("symbol"))
+    if not symbol:
+        return
+    decision = await _latest_trade_decision(symbol) or {}
+    exit_time = data.get("exit_time") or data.get("closed_at") or data.get("updated_at") or now_iso()
+    entry_time = data.get("entry_time") or decision.get("entry_time") or data.get("buy_date") or data.get("created_at")
+    profit_amount = data.get("profit_amount")
+    profit_percent = data.get("profit_percent")
+    row = {
+        "symbol": symbol,
+        "setup_type": data.get("setup_type") or decision.get("setup_type") or "UNKNOWN",
+        "entry_time": entry_time,
+        "exit_time": exit_time,
+        "entry_price": data.get("entry_price") or data.get("buy_price") or decision.get("entry_price"),
+        "exit_price": data.get("exit_price") or data.get("current_price"),
+        "exit_reason": data.get("exit_reason") or data.get("reason"),
+        "exit_engine": data.get("exit_engine") or data.get("source_module") or "database.close_position",
+        "hold_minutes": data.get("hold_minutes") or learning_analytics.hold_minutes(entry_time, exit_time),
+        "profit_amount": profit_amount,
+        "profit_percent": profit_percent,
+        "max_favorable_excursion": data.get("max_favorable_excursion") or data.get("mfe"),
+        "max_adverse_excursion": data.get("max_adverse_excursion") or data.get("mae"),
+        "trailing_stop_used": 1 if data.get("trailing_stop_used") else 0,
+        "force_exit_used": 1 if data.get("force_exit_used") else 0,
+        "rvol": data.get("rvol") or decision.get("rvol"),
+        "rvol_range": learning_analytics.rvol_range(data.get("rvol") or decision.get("rvol")),
+        "market_regime": data.get("market_regime") or decision.get("market_regime"),
+        "sector": data.get("sector") or decision.get("sector"),
+        "time_of_day": data.get("time_of_day") or learning_analytics.time_of_day(entry_time),
+        "raw_json": _analytics_json({"outcome": data, "decision": decision}),
+        "created_at": now_iso(),
+    }
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_TRADE_OUTCOMES)
+        await db.execute("""
+            INSERT INTO trade_outcomes (
+                symbol, setup_type, entry_time, exit_time, entry_price, exit_price, exit_reason, exit_engine,
+                hold_minutes, profit_amount, profit_percent, max_favorable_excursion, max_adverse_excursion,
+                trailing_stop_used, force_exit_used, rvol, rvol_range, market_regime, sector, time_of_day, raw_json, created_at
+            ) VALUES (
+                :symbol, :setup_type, :entry_time, :exit_time, :entry_price, :exit_price, :exit_reason, :exit_engine,
+                :hold_minutes, :profit_amount, :profit_percent, :max_favorable_excursion, :max_adverse_excursion,
+                :trailing_stop_used, :force_exit_used, :rvol, :rvol_range, :market_regime, :sector, :time_of_day, :raw_json, :created_at
+            )
+        """, row)
+        await db.commit()
+    await refresh_setup_performance()
+
+
+async def refresh_setup_performance() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_SETUP_PERFORMANCE)
+        await db.execute(CREATE_TRADE_OUTCOMES)
+        await db.execute("DELETE FROM setup_performance")
+        await db.execute("""
+            INSERT INTO setup_performance (
+                setup_type, total_trades, wins, losses, win_rate, avg_profit_amount,
+                avg_profit_percent, total_profit_amount, avg_hold_minutes, updated_at
+            )
+            SELECT
+                COALESCE(setup_type, 'UNKNOWN') AS setup_type,
+                COUNT(*) AS total_trades,
+                SUM(CASE WHEN COALESCE(profit_amount, 0) > 0 THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN COALESCE(profit_amount, 0) < 0 THEN 1 ELSE 0 END) AS losses,
+                ROUND(100.0 * SUM(CASE WHEN COALESCE(profit_amount, 0) > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 2) AS win_rate,
+                ROUND(AVG(COALESCE(profit_amount, 0)), 2) AS avg_profit_amount,
+                ROUND(AVG(COALESCE(profit_percent, 0)), 2) AS avg_profit_percent,
+                ROUND(SUM(COALESCE(profit_amount, 0)), 2) AS total_profit_amount,
+                ROUND(AVG(COALESCE(hold_minutes, 0)), 2) AS avg_hold_minutes,
+                ?
+            FROM trade_outcomes
+            GROUP BY COALESCE(setup_type, 'UNKNOWN')
+        """, (now_iso(),))
+        await db.commit()
+    return await get_setup_performance()
+
+
+async def get_rejected_setups(limit: int = 200) -> list[dict]:
+    limit = max(1, min(int(limit or 200), 1000))
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_REJECTED_SETUPS)
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM rejected_setups ORDER BY timestamp DESC, id DESC LIMIT ?", (limit,)) as cursor:
+            rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def get_trade_outcomes(limit: int = 200) -> list[dict]:
+    limit = max(1, min(int(limit or 200), 1000))
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_TRADE_OUTCOMES)
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM trade_outcomes ORDER BY exit_time DESC, id DESC LIMIT ?", (limit,)) as cursor:
+            rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def get_setup_performance() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_SETUP_PERFORMANCE)
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM setup_performance ORDER BY win_rate DESC, avg_profit_amount DESC") as cursor:
+            rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def get_learning_summary() -> dict:
+    await refresh_setup_performance()
+    performance = await get_setup_performance()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_TRADE_OUTCOMES)
+        await db.execute(CREATE_REJECTED_SETUPS)
+        db.row_factory = aiosqlite.Row
+        queries = {
+            "best_rejection_reasons": """
+                SELECT rs.rejection_reason, COUNT(*) AS rejection_count,
+                       ROUND(AVG(CASE WHEN t.profit_amount > 0 THEN 1.0 ELSE 0 END) * 100, 2) AS later_win_rate
+                FROM rejected_setups rs LEFT JOIN trade_outcomes t ON t.symbol = rs.symbol AND t.exit_time >= rs.timestamp
+                GROUP BY rs.rejection_reason ORDER BY later_win_rate ASC, rejection_count DESC LIMIT 10
+            """,
+            "worst_rejection_reasons": """
+                SELECT rejection_reason, COUNT(*) AS rejection_count FROM rejected_setups
+                GROUP BY rejection_reason ORDER BY rejection_count DESC LIMIT 10
+            """,
+            "rvol_ranges": """
+                SELECT rvol_range, COUNT(*) AS total_trades, ROUND(AVG(profit_amount), 2) AS avg_profit_amount,
+                       ROUND(100.0 * SUM(CASE WHEN profit_amount > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 2) AS win_rate
+                FROM trade_outcomes GROUP BY rvol_range ORDER BY avg_profit_amount DESC LIMIT 10
+            """,
+            "intraday_hours": """
+                SELECT time_of_day, COUNT(*) AS total_trades, ROUND(AVG(profit_amount), 2) AS avg_profit_amount,
+                       ROUND(100.0 * SUM(CASE WHEN profit_amount > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 2) AS win_rate
+                FROM trade_outcomes GROUP BY time_of_day ORDER BY avg_profit_amount DESC LIMIT 10
+            """,
+            "sectors": """
+                SELECT COALESCE(sector, 'UNKNOWN') AS sector, COUNT(*) AS total_trades, ROUND(AVG(profit_amount), 2) AS avg_profit_amount,
+                       ROUND(100.0 * SUM(CASE WHEN profit_amount > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 2) AS win_rate
+                FROM trade_outcomes GROUP BY COALESCE(sector, 'UNKNOWN') ORDER BY avg_profit_amount DESC LIMIT 10
+            """,
+            "market_regimes": """
+                SELECT COALESCE(market_regime, 'UNKNOWN') AS market_regime, COUNT(*) AS total_trades, ROUND(AVG(profit_amount), 2) AS avg_profit_amount,
+                       ROUND(100.0 * SUM(CASE WHEN profit_amount > 0 THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0), 2) AS win_rate
+                FROM trade_outcomes GROUP BY COALESCE(market_regime, 'UNKNOWN') ORDER BY avg_profit_amount DESC LIMIT 10
+            """,
+            "loss_reasons": """
+                SELECT COALESCE(exit_reason, 'UNKNOWN') AS exit_reason, COUNT(*) AS losses
+                FROM trade_outcomes WHERE COALESCE(profit_amount, 0) < 0
+                GROUP BY COALESCE(exit_reason, 'UNKNOWN') ORDER BY losses DESC LIMIT 10
+            """,
+        }
+        results = {}
+        for name, sql in queries.items():
+            async with db.execute(sql) as cursor:
+                results[name] = [dict(row) for row in await cursor.fetchall()]
+        async with db.execute("SELECT ROUND(AVG(COALESCE(hold_minutes, 0)), 2) AS average_hold_time FROM trade_outcomes") as cursor:
+            hold = await cursor.fetchone()
+    breakout_vs_reversal = [row for row in performance if row.get("setup_type") in {"BREAKOUT", "REVERSAL"}]
+    return {
+        "informational_only": True,
+        "safety": "Analytics layer records and summarizes data only; it does not place orders or change strategy automatically.",
+        "win_rate_by_setup_type": performance,
+        "avg_profit_by_setup_type": performance,
+        "best_rejection_reasons": results["best_rejection_reasons"],
+        "worst_rejection_reasons": results["worst_rejection_reasons"],
+        "breakout_vs_reversal_performance": breakout_vs_reversal,
+        "best_rvol_ranges": results["rvol_ranges"],
+        "best_intraday_hours": results["intraday_hours"],
+        "best_sectors": results["sectors"],
+        "market_regime_performance": results["market_regimes"],
+        "average_hold_time": (dict(hold).get("average_hold_time") if hold else 0) or 0,
+        "most_common_loss_reasons": results["loss_reasons"],
+    }
