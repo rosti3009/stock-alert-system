@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
@@ -28,6 +29,7 @@ from circuit_breaker import (
     get_last_auto_recovery,
     is_auto_recoverable_trip,
     reset_circuit_breaker,
+    trip_circuit_breaker,
 )
 import position_sizing_engine
 import position_exit_priority_engine
@@ -67,6 +69,68 @@ scheduler = AsyncIOScheduler()
 SCANNER_JOB_ID = "scanner_scan"
 SWING_SCAN_OFFSET_KEY = "scan_offset"
 INTRADAY_SCAN_OFFSET_KEY = "intraday_scan_offset"
+
+OPERATION_STATE_KEY = "dashboard_last_operations"
+WATCHDOG_JOB_ID = "tws_api_watchdog"
+
+
+def _json_payload(data: dict) -> str:
+    return json.dumps(data, ensure_ascii=False, default=str)
+
+
+async def _ensure_app_state_table() -> None:
+    async with aiosqlite.connect(database.DB_PATH) as db:
+        await db.execute(database.CREATE_APP_STATE)
+        await db.commit()
+
+
+async def _record_dashboard_operation(
+    action: str,
+    status: str,
+    *,
+    message: str | None = None,
+    details: dict | None = None,
+) -> dict:
+    payload = {
+        "action": action,
+        "status": status,
+        "message": message,
+        "details": details or {},
+        "timestamp": utc_now().isoformat(),
+    }
+    await _ensure_app_state_table()
+    raw = await database.get_app_state(OPERATION_STATE_KEY)
+    try:
+        operations = json.loads(raw) if raw else {}
+        if not isinstance(operations, dict):
+            operations = {}
+    except Exception:
+        operations = {}
+    operations[action] = payload
+    await database.set_app_state(OPERATION_STATE_KEY, _json_payload(operations))
+    await database.safe_record_trade_journal_event({
+        "event_type": "DASHBOARD_OPERATION",
+        "decision": status.upper(),
+        "reason": message or action,
+        "source_module": "dashboard_control_center",
+        "raw_payload": payload,
+    })
+    log.info("Dashboard operation %s | status=%s | message=%s", action, status, message)
+    return payload
+
+
+async def _operation_response(action: str, status: str, payload: dict, *, message: str | None = None, status_code: int = 200) -> JSONResponse:
+    operation = await _record_dashboard_operation(action, status, message=message, details=payload)
+    return JSONResponse({**payload, "operation": operation}, status_code=status_code, headers=no_cache_headers())
+
+
+async def _get_dashboard_operations() -> dict:
+    await _ensure_app_state_table()
+    raw = await database.get_app_state(OPERATION_STATE_KEY)
+    try:
+        return json.loads(raw) if raw else {}
+    except Exception:
+        return {}
 
 
 def no_cache_headers() -> dict:
@@ -1227,7 +1291,7 @@ async def lifespan(app: FastAPI):
         watchdog.run_watchdog_once,
         "interval",
         seconds=config.WATCHDOG_INTERVAL_SECONDS,
-        id="tws_api_watchdog",
+        id=WATCHDOG_JOB_ID,
         replace_existing=True,
         max_instances=1,
     )
@@ -1296,6 +1360,142 @@ async def api_watchdog_run_once():
         await watchdog.run_watchdog_once(),
         headers=no_cache_headers(),
     )
+
+
+def _scheduler_job_count(job_id: str) -> int:
+    return sum(1 for job in scheduler.get_jobs() if job.id == job_id)
+
+
+async def _restart_watchdog_job() -> dict:
+    while scheduler.get_job(WATCHDOG_JOB_ID):
+        scheduler.remove_job(WATCHDOG_JOB_ID)
+
+    scheduler.add_job(
+        watchdog.run_watchdog_once,
+        "interval",
+        seconds=config.WATCHDOG_INTERVAL_SECONDS,
+        id=WATCHDOG_JOB_ID,
+        replace_existing=True,
+        max_instances=1,
+    )
+    return {
+        "status": "restarted",
+        "job_id": WATCHDOG_JOB_ID,
+        "job_count": _scheduler_job_count(WATCHDOG_JOB_ID),
+        "watchdog": await watchdog.run_watchdog_once(),
+    }
+
+
+@app.get("/api/dashboard/operations")
+async def api_dashboard_operations():
+    return JSONResponse(await _get_dashboard_operations(), headers=no_cache_headers())
+
+
+@app.post("/api/tws/reconnect")
+async def api_tws_reconnect():
+    reconnect_result = await asyncio.to_thread(watchdog._attempt_reconnect_sync)
+    status = await watchdog.run_watchdog_once()
+    status["last_reconnect_attempt_at"] = utc_now().isoformat()
+    status["last_reconnect_result"] = reconnect_result
+    await database.set_app_state(watchdog.WATCHDOG_STATUS_KEY, _json_payload(status))
+    payload = {
+        "status": "connected" if status.get("tws_connected") else "reconnect_attempted",
+        "tws_connected": bool(status.get("tws_connected")),
+        "watchdog": status,
+        "last_reconnect_attempt_at": status.get("last_reconnect_attempt_at"),
+        "last_reconnect_result": status.get("last_reconnect_result"),
+    }
+    return await _operation_response(
+        "reconnect_tws",
+        "success" if payload["tws_connected"] else "failed",
+        payload,
+        message="TWS reconnect completed" if payload["tws_connected"] else "TWS reconnect attempted but connection is not healthy",
+        status_code=200 if payload["tws_connected"] else 503,
+    )
+
+
+@app.post("/api/scanner/restart")
+async def api_scanner_restart():
+    scanner = await configure_scanner_job()
+    payload = {
+        "status": "restarted",
+        "scanner": scanner,
+        "job_id": SCANNER_JOB_ID,
+        "job_count": _scheduler_job_count(SCANNER_JOB_ID),
+    }
+    return await _operation_response("restart_scanner", "success", payload, message="Scanner scheduler restarted")
+
+
+@app.post("/api/watchdog/restart")
+async def api_watchdog_restart():
+    try:
+        payload = await _restart_watchdog_job()
+        return await _operation_response("restart_watchdog", "success", payload, message="Watchdog scheduler restarted")
+    except Exception as exc:
+        payload = {"status": "failed", "reason": str(exc), "job_id": WATCHDOG_JOB_ID}
+        return await _operation_response("restart_watchdog", "failed", payload, message=str(exc), status_code=500)
+
+
+@app.post("/api/live-position-tracker/refresh")
+async def api_live_position_tracker_refresh():
+    try:
+        refreshed = await refresh_open_positions()
+        payload = {
+            "status": "refreshed",
+            "refreshed_count": len(refreshed),
+            "positions": refreshed,
+            "tracker": await live_position_tracker.get_tracker_status(),
+        }
+        return await _operation_response("refresh_live_tracker", "success", payload, message="Live tracker refreshed")
+    except Exception as exc:
+        payload = {"status": "failed", "reason": str(exc)}
+        return await _operation_response("refresh_live_tracker", "failed", payload, message=str(exc), status_code=500)
+
+
+@app.post("/api/startup-recovery/run")
+async def api_startup_recovery_run():
+    result = await startup_recovery.run_startup_recovery()
+    ok = bool(result.get("ok"))
+    return await _operation_response(
+        "run_startup_recovery",
+        "success" if ok else "failed",
+        result,
+        message=result.get("reason") or ("Startup recovery passed" if ok else "Startup recovery failed"),
+        status_code=200 if ok else 409,
+    )
+
+
+@app.post("/api/reconciliation/reconcile-positions")
+async def api_reconcile_positions_control():
+    from reconciliation import run_reconciliation_once
+
+    result = await run_reconciliation_once()
+    status = "failed" if result.get("status") == "failed" or result.get("error") else "success"
+    return await _operation_response(
+        "reconcile_positions",
+        status,
+        result,
+        message="Position reconciliation completed" if status == "success" else result.get("error") or "Position reconciliation failed",
+        status_code=200 if status == "success" else 500,
+    )
+
+
+@app.post("/api/emergency-stop")
+async def api_emergency_stop(reason: str = Body("Dashboard emergency stop", embed=True)):
+    await _set_auto_trading_state(False, source="api_emergency_stop", reason=reason)
+    circuit = await trip_circuit_breaker(
+        reason,
+        source="dashboard_emergency_stop",
+        details={"auto_trading_enabled": False},
+    )
+    payload = {
+        "status": "stopped",
+        "auto_trading_enabled": False,
+        "orders_cancelled": 0,
+        "circuit_breaker": circuit,
+        "reason": reason,
+    }
+    return await _operation_response("emergency_stop", "success", payload, message=reason)
 
 # ==========================================
 # RECONCILIATION API
@@ -1401,19 +1601,24 @@ async def api_paper_liquidate_all(
                 dry_run=dry_run,
             ),
         )
-        return JSONResponse(
+        return await _operation_response(
+            "close_all_positions",
+            "success" if result.get("status") != "blocked" else "failed",
             result,
-            headers=no_cache_headers(),
+            message=result.get("reason") or "Paper liquidation completed",
+            status_code=200 if result.get("status") != "blocked" else 403,
         )
 
     except RuntimeError as exc:
-        return JSONResponse(
+        return await _operation_response(
+            "close_all_positions",
+            "failed",
             {
                 "status": "blocked",
                 "reason": str(exc),
             },
+            message=str(exc),
             status_code=403,
-            headers=no_cache_headers(),
         )
 
 
@@ -1466,6 +1671,110 @@ async def api_strategy_mode_intraday():
     )
 
 
+@app.post("/api/strategy-mode/switch")
+async def api_strategy_mode_switch(mode: str = Body(..., embed=True)):
+    normalized = strategy_mode.normalize_strategy_mode(mode)
+    payload = await strategy_mode.set_strategy_mode(normalized)
+    scanner = await configure_scanner_job()
+    result = {**payload, "scanner": scanner}
+    return await _operation_response(
+        "switch_strategy_mode",
+        "success",
+        result,
+        message=f"Strategy mode switched to {normalized.value}",
+    )
+
+
+@app.post("/api/training-profile/switch")
+async def api_training_profile_switch(profile: str = Body(..., embed=True)):
+    normalized = config.normalize_paper_training_profile(profile)
+    requested = str(profile or "").strip().upper()
+    if requested and requested != normalized:
+        payload = {
+            "status": "blocked",
+            "reason": f"Unknown training profile: {requested}",
+            "available_profiles": list(config.PAPER_TRAINING_PROFILES.keys()),
+        }
+        return await _operation_response("switch_training_profile", "failed", payload, message=payload["reason"], status_code=400)
+
+    config.PAPER_TRAINING_PROFILE = normalized
+    await _ensure_app_state_table()
+    await database.set_app_state("paper_training_profile", normalized)
+    mode = await strategy_mode.get_strategy_mode()
+    payload = strategy_mode.strategy_mode_payload(mode)
+    payload["status"] = "switched"
+    payload["requested_profile"] = normalized
+    return await _operation_response(
+        "switch_training_profile",
+        "success",
+        payload,
+        message=f"Training profile switched to {normalized}",
+    )
+
+
+@app.post("/api/strategy-mode/toggle-intraday-swing")
+async def api_strategy_toggle_intraday_swing():
+    current = await strategy_mode.get_strategy_mode()
+    target = (
+        strategy_mode.StrategyMode.SWING_DEFAULT
+        if strategy_mode.is_intraday_mode(current)
+        else strategy_mode.StrategyMode.INTRADAY_TECHNICAL
+    )
+    payload = await strategy_mode.set_strategy_mode(target)
+    scanner = await configure_scanner_job()
+    result = {**payload, "scanner": scanner}
+    return await _operation_response(
+        "toggle_intraday_swing",
+        "success",
+        result,
+        message=f"Strategy mode toggled to {target.value}",
+    )
+
+
+@app.get("/api/dashboard/health")
+async def api_dashboard_health():
+    trading = await api_trading_status()
+    trading_payload = json.loads(trading.body.decode())
+    scanner = await get_scanner_status()
+    startup_status = await startup_recovery.get_startup_recovery_status()
+    circuit = await get_circuit_breaker_state()
+    watchdog_status = trading_payload.get("watchdog") or await watchdog.get_watchdog_status()
+    tracker = trading_payload.get("live_position_tracker") or await live_position_tracker.get_tracker_status()
+    blocked = bool(
+        trading_payload.get("blocked_reasons")
+        or watchdog_status.get("trading_blocked")
+        or circuit.get("tripped")
+        or not trading_payload.get("auto_trading_enabled")
+    )
+    degraded = bool(
+        not watchdog_status.get("healthy")
+        or not tracker.get("healthy")
+        or (watchdog_status.get("stale_data") or {}).get("market_data")
+    )
+    system_status = "BLOCKED" if blocked else "DEGRADED" if degraded else "ACTIVE"
+    return JSONResponse(
+        {
+            "system_status": system_status,
+            "tws_connection": trading_payload.get("connection_status"),
+            "watchdog_health": watchdog_status,
+            "scanner_health": scanner,
+            "live_tracker_health": tracker,
+            "market_data_freshness": {
+                "last_market_data_at": trading_payload.get("last_market_data_at"),
+                "last_market_data_age_seconds": trading_payload.get("last_market_data_age_seconds"),
+                "market_data_feed_active": trading_payload.get("market_data_feed_active"),
+                "stale_data_status": trading_payload.get("stale_data_status"),
+            },
+            "circuit_breaker_state": circuit,
+            "startup_recovery_state": startup_status,
+            "auto_trading_enabled": trading_payload.get("auto_trading_enabled"),
+            "blocked_reasons": trading_payload.get("blocked_reasons") or watchdog_status.get("blocking_reasons") or [],
+            "last_operations": await _get_dashboard_operations(),
+        },
+        headers=no_cache_headers(),
+    )
+
+
 @app.post("/api/auto-trading/enable")
 async def api_auto_trading_enable():
     safety = await _evaluate_auto_trading_enable_safety()
@@ -1476,27 +1785,31 @@ async def api_auto_trading_enable():
             source="api_auto_trading_enable",
             reason=reason,
         )
-        return JSONResponse(
+        return await _operation_response(
+            "enable_auto_trading",
+            "failed",
             {
                 "status": "blocked",
                 "auto_trading_enabled": False,
                 "reason": reason,
                 **safety,
             },
+            message=reason,
             status_code=403,
-            headers=no_cache_headers(),
         )
 
     reason = "Auto trading enabled after safety checks passed"
     await _set_auto_trading_state(True, source="api_auto_trading_enable", reason=reason)
-    return JSONResponse(
+    return await _operation_response(
+        "enable_auto_trading",
+        "success",
         {
             "status": "enabled",
             "auto_trading_enabled": True,
             "reason": reason,
             **safety,
         },
-        headers=no_cache_headers(),
+        message=reason,
     )
 
 
@@ -1504,14 +1817,16 @@ async def api_auto_trading_enable():
 async def api_auto_trading_disable():
     reason = "Auto trading disabled by API request; existing TWS orders were not cancelled"
     await _set_auto_trading_state(False, source="api_auto_trading_disable", reason=reason)
-    return JSONResponse(
+    return await _operation_response(
+        "disable_auto_trading",
+        "success",
         {
             "status": "disabled",
             "auto_trading_enabled": False,
             "reason": reason,
             "orders_cancelled": 0,
         },
-        headers=no_cache_headers(),
+        message=reason,
     )
 
 
@@ -1712,9 +2027,12 @@ async def api_reconciliation_status_v2():
 
 @app.post("/api/circuit-breaker/reset")
 async def api_circuit_breaker_reset(reason: str = Body("Manual API reset", embed=True)):
-    return JSONResponse(
-        await reset_circuit_breaker(reason=reason),
-        headers=no_cache_headers(),
+    result = await reset_circuit_breaker(reason=reason)
+    return await _operation_response(
+        "reset_circuit_breaker",
+        "success",
+        result,
+        message=reason,
     )
 
 
@@ -1944,9 +2262,12 @@ async def api_trade_reviews_symbol(symbol: str, limit: int = 200):
 
 @app.post("/api/trade-reviews/rebuild")
 async def api_trade_reviews_rebuild():
-    return JSONResponse(
-        await database.rebuild_trade_reviews(),
-        headers=no_cache_headers(),
+    result = await database.rebuild_trade_reviews()
+    return await _operation_response(
+        "rebuild_trade_reviews",
+        "success",
+        result,
+        message="Trade reviews rebuilt",
     )
 
 

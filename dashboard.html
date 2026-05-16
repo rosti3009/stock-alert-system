@@ -75,6 +75,87 @@
       margin-top:8px;
     }
 
+    .control-center{
+      display:grid;
+      grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
+      gap:14px;
+      margin-bottom:16px;
+    }
+
+    .control-group{
+      background:#0b111b;
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:14px;
+    }
+
+    .control-group h4{
+      margin:0 0 10px 0;
+    }
+
+    .control-actions{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+    }
+
+    .danger-btn{
+      background:#7f1d1d;
+      color:#fee2e2;
+      border-color:#991b1b;
+    }
+
+    .status-banner{
+      display:flex;
+      justify-content:space-between;
+      gap:12px;
+      align-items:center;
+      padding:12px 14px;
+      border-radius:14px;
+      border:1px solid var(--line);
+      margin-bottom:14px;
+      background:#0b111b;
+    }
+
+    .system-active{color:#22c55e;}
+    .system-blocked{color:#ef4444;}
+    .system-degraded{color:#f59e0b;}
+
+    .operation-message{
+      margin-bottom:14px;
+      padding:10px 12px;
+      border-radius:12px;
+      border:1px solid var(--line);
+      background:#111827;
+      display:none;
+    }
+
+    .confirm-modal{
+      position:fixed;
+      inset:0;
+      background:rgba(0,0,0,.7);
+      display:none;
+      align-items:center;
+      justify-content:center;
+      z-index:50;
+      padding:18px;
+    }
+
+    .confirm-dialog{
+      width:min(520px,100%);
+      background:#0b111b;
+      border:1px solid var(--line);
+      border-radius:18px;
+      padding:18px;
+      box-shadow:0 20px 60px rgba(0,0,0,.45);
+    }
+
+    .last-op{
+      margin-top:8px;
+      color:var(--muted);
+      font-size:12px;
+    }
+
     @media(max-width:1100px){
 
       .mini-grid{
@@ -285,6 +366,67 @@
           <button id="intradayModeBtn" class="primary" onclick="switchStrategyMode('intraday')">Intraday Technical</button>
         </div>
         <div id="strategyWarning" class="strategy-warning" style="display:none;"></div>
+      </div>
+
+
+      <div id="operationMessage" class="operation-message"></div>
+
+      <div class="box" style="margin-bottom:16px;">
+        <h3>Operations Control Center</h3>
+        <div class="status-banner">
+          <div>System Status: <b id="systemStatus" class="system-degraded">Loading...</b></div>
+          <div class="muted" id="lastOperationSummary">Last operation: -</div>
+        </div>
+        <div class="scan-status" style="margin-bottom:14px;">
+          <div class="status-card"><div class="status-label">TWS Connection</div><div class="status-value" id="healthTws">-</div></div>
+          <div class="status-card"><div class="status-label">Watchdog</div><div class="status-value" id="healthWatchdog">-</div></div>
+          <div class="status-card"><div class="status-label">Scanner</div><div class="status-value" id="healthScanner">-</div></div>
+          <div class="status-card"><div class="status-label">Live Tracker</div><div class="status-value" id="healthTracker">-</div></div>
+          <div class="status-card"><div class="status-label">Market Data</div><div class="status-value" id="healthMarketData">-</div></div>
+          <div class="status-card"><div class="status-label">Circuit Breaker</div><div class="status-value" id="healthCircuit">-</div></div>
+          <div class="status-card"><div class="status-label">Startup Recovery</div><div class="status-value" id="healthStartup">-</div></div>
+        </div>
+        <div class="control-center">
+          <div class="control-group">
+            <h4>System Controls</h4>
+            <div class="control-actions">
+              <button onclick="runOperation('reconnect_tws')">Connect / Reconnect TWS</button>
+              <button onclick="runOperation('restart_scanner')">Restart Scanner</button>
+              <button onclick="runOperation('restart_watchdog')">Restart Watchdog</button>
+              <button onclick="runOperation('refresh_live_tracker')">Refresh Live Tracker</button>
+            </div>
+            <div class="last-op" id="lastOpSystem">-</div>
+          </div>
+          <div class="control-group">
+            <h4>Trading Controls</h4>
+            <div class="control-actions">
+              <button class="primary" onclick="runOperation('enable_auto_trading')">Enable Auto Trading</button>
+              <button onclick="runOperation('disable_auto_trading')">Disable Auto Trading</button>
+              <button onclick="runOperation('switch_strategy_mode')">Switch Strategy Mode</button>
+              <button onclick="runOperation('switch_training_profile')">Switch Training Profile</button>
+              <button onclick="runOperation('toggle_intraday_swing')">Toggle Intraday/Swing</button>
+            </div>
+            <div class="last-op" id="lastOpTrading">-</div>
+          </div>
+          <div class="control-group">
+            <h4>Recovery Controls</h4>
+            <div class="control-actions">
+              <button onclick="runOperation('reset_circuit_breaker')">Reset Circuit Breaker</button>
+              <button onclick="runOperation('run_startup_recovery')">Run Startup Recovery</button>
+              <button onclick="runOperation('reconcile_positions')">Reconcile Positions</button>
+              <button onclick="runOperation('rebuild_trade_reviews')">Rebuild Trade Reviews</button>
+            </div>
+            <div class="last-op" id="lastOpRecovery">-</div>
+          </div>
+          <div class="control-group">
+            <h4>Emergency Controls</h4>
+            <div class="control-actions">
+              <button class="danger-btn" onclick="runOperation('close_all_positions')">Close All Positions (paper only)</button>
+              <button class="danger-btn" onclick="runOperation('emergency_stop')">Emergency STOP</button>
+            </div>
+            <div class="last-op" id="lastOpEmergency">Paper-only protections remain enforced by API.</div>
+          </div>
+        </div>
       </div>
 
       <!-- ========================================= -->
@@ -620,6 +762,18 @@
 
 </div>
 
+<div id="confirmModal" class="confirm-modal">
+  <div class="confirm-dialog">
+    <h3 id="confirmTitle">Confirm operation</h3>
+    <p id="confirmText" class="muted"></p>
+    <div class="control-actions" style="justify-content:flex-end;">
+      <button onclick="closeConfirmModal(false)">Cancel</button>
+      <button id="confirmButton" class="danger-btn" onclick="closeConfirmModal(true)">Confirm</button>
+    </div>
+  </div>
+</div>
+
+
 <script>
 
 let stocks = [];
@@ -635,8 +789,10 @@ let rejectedSetups = [];
 let setupPerformance = [];
 let tradeOutcomes = [];
 let tradeReviews = [];
+let dashboardHealth = {};
 let equityChart;
 let isLoading = false;
+let pendingConfirmResolve = null;
 
 async function fetchNoCache(
   url,
@@ -773,7 +929,8 @@ async function loadDashboard(){
       rejectedSetups,
       setupPerformance,
       tradeOutcomes,
-      tradeReviews
+      tradeReviews,
+      dashboardHealth
     ] = await Promise.all([
 
       fetchNoCache("/api/stocks"),
@@ -800,7 +957,9 @@ async function loadDashboard(){
 
       fetchNoCache("/api/analytics/outcomes?limit=25"),
 
-      fetchNoCache("/api/trade-reviews?limit=10")
+      fetchNoCache("/api/trade-reviews?limit=10"),
+
+      fetchNoCache("/api/dashboard/health")
 
     ]);
 
@@ -809,6 +968,8 @@ async function loadDashboard(){
     updateStrategyMode();
 
     updateScannerStatus();
+
+    updateOperationalHealth();
 
     drawEquityChart();
 
@@ -933,6 +1094,127 @@ function drawTradeReviews(){
   ]);
 }
 
+
+function statusText(ok, healthyText, badText){
+  return ok ? healthyText : badText;
+}
+
+function updateOperationalHealth(){
+  const status = dashboardHealth.system_status || "DEGRADED";
+  const statusEl = document.getElementById("systemStatus");
+  statusEl.textContent = status;
+  statusEl.className = status === "ACTIVE" ? "system-active" : status === "BLOCKED" ? "system-blocked" : "system-degraded";
+
+  const tws = dashboardHealth.tws_connection || {};
+  const watchdogHealth = dashboardHealth.watchdog_health || {};
+  const tracker = dashboardHealth.live_tracker_health || {};
+  const scanner = dashboardHealth.scanner_health || {};
+  const market = dashboardHealth.market_data_freshness || {};
+  const circuit = dashboardHealth.circuit_breaker_state || {};
+  const startup = dashboardHealth.startup_recovery_state || {};
+
+  document.getElementById("healthTws").textContent = statusText(tws.tws_connected, "CONNECTED", "OFFLINE");
+  document.getElementById("healthWatchdog").textContent = statusText(watchdogHealth.healthy, "HEALTHY", watchdogHealth.trading_blocked ? "BLOCKED" : "DEGRADED");
+  document.getElementById("healthScanner").textContent = scanner.scan_running ? "RUNNING" : "READY";
+  document.getElementById("healthTracker").textContent = statusText(tracker.healthy, "HEALTHY", "DEGRADED");
+  document.getElementById("healthMarketData").textContent = market.market_data_feed_active ? "FRESH" : "STALE";
+  document.getElementById("healthCircuit").textContent = circuit.tripped ? "TRIPPED" : "CLEAR";
+  document.getElementById("healthStartup").textContent = startup.ok ? "PASSED" : "PENDING";
+
+  const operations = dashboardHealth.last_operations || {};
+  const latest = Object.values(operations).sort((a,b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")))[0];
+  document.getElementById("lastOperationSummary").textContent = latest
+    ? "Last operation: " + latest.action + " · " + latest.status + " · " + shortDateTime(latest.timestamp)
+    : "Last operation: -";
+  document.getElementById("lastOpSystem").textContent = lastOperationText(operations, ["reconnect_tws","restart_scanner","restart_watchdog","refresh_live_tracker"]);
+  document.getElementById("lastOpTrading").textContent = lastOperationText(operations, ["enable_auto_trading","disable_auto_trading","switch_strategy_mode","switch_training_profile","toggle_intraday_swing"]);
+  document.getElementById("lastOpRecovery").textContent = lastOperationText(operations, ["reset_circuit_breaker","run_startup_recovery","reconcile_positions","rebuild_trade_reviews"]);
+  document.getElementById("lastOpEmergency").textContent = lastOperationText(operations, ["close_all_positions","emergency_stop"]) || "Paper-only protections remain enforced by API.";
+}
+
+function lastOperationText(operations, keys){
+  const rows = keys.map(key => operations[key]).filter(Boolean)
+    .sort((a,b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")));
+  if(!rows.length){
+    return "Last operation: -";
+  }
+  const op = rows[0];
+  return "Last operation: " + op.action + " · " + op.status + " · " + shortDateTime(op.timestamp);
+}
+
+function showOperationMessage(message, ok = true){
+  const box = document.getElementById("operationMessage");
+  box.textContent = message;
+  box.style.display = "block";
+  box.style.color = ok ? "#86efac" : "#fecaca";
+}
+
+function confirmDanger(title, text){
+  return new Promise(resolve => {
+    pendingConfirmResolve = resolve;
+    document.getElementById("confirmTitle").textContent = title;
+    document.getElementById("confirmText").textContent = text;
+    document.getElementById("confirmModal").style.display = "flex";
+  });
+}
+
+function closeConfirmModal(result){
+  document.getElementById("confirmModal").style.display = "none";
+  if(pendingConfirmResolve){
+    pendingConfirmResolve(result);
+    pendingConfirmResolve = null;
+  }
+}
+
+async function runOperation(action){
+  const dangerText = {
+    close_all_positions:"This paper-only action will submit liquidation requests for all paper positions. Continue?",
+    emergency_stop:"Emergency STOP disables auto trading and trips the circuit breaker. Continue?",
+    disable_auto_trading:"Auto trading will be disabled. Existing broker orders are not cancelled by this action. Continue?",
+    reset_circuit_breaker:"Protections are not disabled, but the circuit breaker state will be reset. Continue?"
+  };
+  if(dangerText[action]){
+    const ok = await confirmDanger("Confirm " + action.replaceAll("_", " "), dangerText[action]);
+    if(!ok){
+      return;
+    }
+  }
+
+  const mode = strategyMode.strategy_mode === "INTRADAY_TECHNICAL" ? "SWING_DEFAULT" : "INTRADAY_TECHNICAL";
+  const nextProfile = strategyMode.active_training_profile === "AGGRESSIVE_LEARNING" ? "CONSERVATIVE" : "AGGRESSIVE_LEARNING";
+  const endpoints = {
+    reconnect_tws:["/api/tws/reconnect", {}],
+    reset_circuit_breaker:["/api/circuit-breaker/reset", {reason:"Dashboard reset"}],
+    run_startup_recovery:["/api/startup-recovery/run", {}],
+    enable_auto_trading:["/api/auto-trading/enable", {}],
+    disable_auto_trading:["/api/auto-trading/disable", {}],
+    restart_scanner:["/api/scanner/restart", {}],
+    restart_watchdog:["/api/watchdog/restart", {}],
+    refresh_live_tracker:["/api/live-position-tracker/refresh", {}],
+    reconcile_positions:["/api/reconciliation/reconcile-positions", {}],
+    rebuild_trade_reviews:["/api/trade-reviews/rebuild", {}],
+    close_all_positions:["/api/paper/liquidate-all", {restart_auto_trading_after:false,dry_run:false}],
+    emergency_stop:["/api/emergency-stop", {reason:"Dashboard emergency stop"}],
+    switch_strategy_mode:["/api/strategy-mode/switch", {mode}],
+    switch_training_profile:["/api/training-profile/switch", {profile:nextProfile}],
+    toggle_intraday_swing:["/api/strategy-mode/toggle-intraday-swing", {}]
+  };
+
+  const [url, body] = endpoints[action];
+  try{
+    const result = await fetchNoCache(url, {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(body)
+    });
+    showOperationMessage((result.operation && result.operation.message) || result.status || "Operation completed", true);
+    await loadDashboard();
+  }catch(err){
+    showOperationMessage("Operation failed: " + err.message, false);
+    showError("Operation failed: " + err.message);
+  }
+}
+
 function updateStrategyMode(){
   const mode = strategyMode.strategy_mode || "SWING_DEFAULT";
   document.getElementById("strategyModeLabel").textContent = mode;
@@ -966,10 +1248,12 @@ async function switchStrategyMode(mode){
 
   try{
     strategyMode = await fetchNoCache(
-      mode === "intraday"
-        ? "/api/strategy-mode/intraday"
-        : "/api/strategy-mode/swing",
-      { method:"POST" }
+      "/api/strategy-mode/switch",
+      {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({mode: mode === "intraday" ? "INTRADAY_TECHNICAL" : "SWING_DEFAULT"})
+      }
     );
     scannerStatus = strategyMode.scanner || scannerStatus;
     updateStrategyMode();
