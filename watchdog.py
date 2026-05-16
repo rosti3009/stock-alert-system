@@ -29,6 +29,11 @@ DEFAULT_ALERT_COOLDOWN_SECONDS = 300
 DEFAULT_RECONNECT_BACKOFF_SECONDS = 30
 MAX_RECONNECT_BACKOFF_SECONDS = 300
 MARKET_DATA_STALE_REASON_PREFIX = "Market data stale"
+LIVE_POSITION_TRACKER_STATE_KEY = "live_position_tracker_status"
+LIVE_POSITION_TRACKER_MISSING_REASON_PREFIX = "Live position tracker missing open positions"
+LIVE_POSITION_TRACKING_STALE_REASON_PREFIX = "Live position tracking stale"
+LIVE_POSITION_TRACKING_NO_REFRESH_REASON = "No live position tracking refresh for open positions"
+LIVE_POSITION_TRACKING_UNHEALTHY_REASON = "Live position tracking unhealthy"
 
 
 def now_utc() -> datetime:
@@ -253,7 +258,7 @@ async def _read_market_data_timestamp(db: aiosqlite.Connection) -> tuple[str | N
 
 
 async def _read_live_position_tracking_state() -> dict:
-    raw = await database.get_app_state("live_position_tracker_status")
+    raw = await database.get_app_state(LIVE_POSITION_TRACKER_STATE_KEY)
     open_positions = await database.get_open_positions()
     if not raw:
         return {
@@ -283,6 +288,119 @@ async def _read_live_position_tracking_state() -> dict:
     status.setdefault("source", "live_position_tracker")
     return status
 
+
+
+def _sync_age_seconds(value: Any) -> int | None:
+    return _age_seconds(value)
+
+
+def _read_live_position_tracking_state_sync() -> dict:
+    with closing(sqlite3.connect(config.DB_PATH)) as db:
+        db.execute(database.CREATE_APP_STATE)
+        if _sync_table_exists(db, "positions"):
+            open_rows = db.execute(
+                """
+                SELECT symbol
+                FROM positions
+                WHERE UPPER(TRIM(COALESCE(status, ''))) = 'OPEN'
+                """
+            ).fetchall()
+        else:
+            open_rows = []
+        open_position_count = len(open_rows)
+        row = db.execute(
+            "SELECT value FROM app_state WHERE key = ?",
+            (LIVE_POSITION_TRACKER_STATE_KEY,),
+        ).fetchone()
+
+    if not row:
+        return {
+            "open_position_count": open_position_count,
+            "tracked_count": 0,
+            "tracked_symbols": [],
+            "last_refresh_at": None,
+            "last_refresh_age_seconds": None,
+            "healthy": open_position_count == 0,
+            "source": "live_position_tracker",
+        }
+
+    try:
+        status = json.loads(row[0])
+    except Exception as exc:
+        return {
+            "open_position_count": open_position_count,
+            "tracked_count": 0,
+            "tracked_symbols": [],
+            "last_refresh_at": None,
+            "last_refresh_age_seconds": None,
+            "healthy": False,
+            "source": "live_position_tracker",
+            "error": f"status unreadable: {exc}",
+        }
+
+    status["open_position_count"] = open_position_count
+    status["last_refresh_age_seconds"] = _sync_age_seconds(status.get("last_refresh_at"))
+    status.setdefault("source", "live_position_tracker")
+    return status
+
+
+def _is_live_position_tracker_reason(reason: Any) -> bool:
+    text = str(reason).lower()
+    return "live position track" in text or "live-position-tracker" in text
+
+
+def _live_position_tracker_recovered(live_tracking: dict) -> bool:
+    try:
+        open_count = int(live_tracking.get("open_position_count") or 0)
+        tracked_count = int(live_tracking.get("tracked_count") or 0)
+    except Exception:
+        return False
+    return bool(live_tracking.get("healthy") is True and tracked_count >= open_count)
+
+
+def _apply_live_position_tracking_snapshot(status: dict, live_tracking: dict, thresholds: dict) -> tuple[dict, bool]:
+    previous_reasons = list(status.get("blocking_reasons") or [])
+    had_live_tracking_block = any(_is_live_position_tracker_reason(reason) for reason in previous_reasons)
+
+    refreshed = dict(status)
+    refreshed["live_position_tracking"] = live_tracking
+    refreshed["last_position_tracking_at"] = live_tracking.get("last_refresh_at")
+    refreshed["last_position_tracking_age_seconds"] = live_tracking.get("last_refresh_age_seconds")
+
+    non_live_reasons = [
+        reason for reason in previous_reasons
+        if not _is_live_position_tracker_reason(reason)
+    ]
+    probe_status = dict(refreshed)
+    probe_status["blocking_reasons"] = []
+    current_live_reasons = [
+        reason for reason in _blocking_reasons(probe_status, thresholds)
+        if _is_live_position_tracker_reason(reason)
+    ]
+    refreshed["blocking_reasons"] = non_live_reasons + current_live_reasons
+
+    stale_data = dict(refreshed.get("stale_data") or {})
+    stale_data["live_position_tracking"] = bool(current_live_reasons)
+    refreshed["stale_data"] = stale_data
+    refreshed["trading_blocked"] = len(refreshed["blocking_reasons"]) > 0
+    refreshed["healthy"] = bool(refreshed.get("tws_connected")) and not refreshed["trading_blocked"]
+
+    recovered = had_live_tracking_block and not current_live_reasons and _live_position_tracker_recovered(live_tracking)
+    return refreshed, recovered
+
+
+def _persist_watchdog_status_sync(status: dict) -> None:
+    with closing(sqlite3.connect(config.DB_PATH)) as db:
+        db.execute(database.CREATE_APP_STATE)
+        db.execute(
+            """
+            INSERT INTO app_state (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (WATCHDOG_STATUS_KEY, _json(status)),
+        )
+        db.commit()
 
 async def _read_observed_state() -> dict:
     async with aiosqlite.connect(config.DB_PATH) as db:
@@ -422,13 +540,13 @@ def _blocking_reasons(status: dict, thresholds: dict) -> list[str]:
     tracking_age = live_tracking.get("last_refresh_age_seconds")
     if open_count > 0:
         if not live_tracking.get("last_refresh_at"):
-            reasons.append("No live position tracking refresh for open positions")
+            reasons.append(LIVE_POSITION_TRACKING_NO_REFRESH_REASON)
         elif tracking_age is not None and tracking_age > thresholds["position_tracking_stale_seconds"]:
-            reasons.append(f"Live position tracking stale ({tracking_age}s)")
+            reasons.append(f"{LIVE_POSITION_TRACKING_STALE_REASON_PREFIX} ({tracking_age}s)")
         if tracked_count < open_count:
-            reasons.append(f"Live position tracker missing open positions ({tracked_count}/{open_count})")
+            reasons.append(f"{LIVE_POSITION_TRACKER_MISSING_REASON_PREFIX} ({tracked_count}/{open_count})")
         if live_tracking.get("healthy") is False:
-            reasons.append("Live position tracking unhealthy")
+            reasons.append(LIVE_POSITION_TRACKING_UNHEALTHY_REASON)
 
     return reasons
 
@@ -492,12 +610,19 @@ async def run_watchdog_once() -> dict:
         await _clear_alert("tws_disconnected")
 
     status["blocking_reasons"] = _blocking_reasons(status, thresholds)
+    live_position_tracker_recovered = (
+        any(_is_live_position_tracker_reason(reason) for reason in previous.get("blocking_reasons") or [])
+        and not any(_is_live_position_tracker_reason(reason) for reason in status["blocking_reasons"])
+        and _live_position_tracker_recovered(status.get("live_position_tracking") or {})
+    )
+    if live_position_tracker_recovered:
+        log.info("Live position tracker recovered")
     status["trading_blocked"] = len(status["blocking_reasons"]) > 0
     status["stale_data"] = {
         "tws_mirror": any("TWS mirror sync stale" in r or "No successful TWS mirror" in r for r in status["blocking_reasons"]),
         "execution_sync": any("Execution sync stale" in r or "No successful execution" in r for r in status["blocking_reasons"]),
         "market_data": any("Market data stale" in r for r in status["blocking_reasons"]),
-        "live_position_tracking": any("live position" in r.lower() for r in status["blocking_reasons"]),
+        "live_position_tracking": any(_is_live_position_tracker_reason(r) for r in status["blocking_reasons"]),
     }
     status["market_data_feed_active"] = not status["stale_data"]["market_data"] and status.get("last_market_data_at") is not None
     status.setdefault("circuit_breaker_auto_recovered", False)
@@ -531,9 +656,21 @@ async def get_watchdog_status() -> dict:
     raw = await database.get_app_state(WATCHDOG_STATUS_KEY)
     if raw:
         try:
-            return json.loads(raw)
+            status = json.loads(raw)
         except Exception:
-            pass
+            status = None
+        if status is not None:
+            live_position_tracking = await _read_live_position_tracking_state()
+            refreshed, recovered = _apply_live_position_tracking_snapshot(
+                status,
+                live_position_tracking,
+                status.get("thresholds") or _thresholds(),
+            )
+            if recovered:
+                log.info("Live position tracker recovered")
+            if refreshed != status:
+                await database.set_app_state(WATCHDOG_STATUS_KEY, _json(refreshed))
+            return refreshed
     return await run_watchdog_once()
 
 
@@ -553,9 +690,21 @@ def get_watchdog_status_sync() -> dict:
     if not row:
         return {"trading_blocked": True, "blocking_reasons": ["Watchdog has not reported status"]}
     try:
-        return json.loads(row[0])
+        status = json.loads(row[0])
     except Exception as exc:
         return {"trading_blocked": True, "blocking_reasons": [f"Watchdog status unreadable: {exc}"]}
+
+    live_position_tracking = _read_live_position_tracking_state_sync()
+    refreshed, recovered = _apply_live_position_tracking_snapshot(
+        status,
+        live_position_tracking,
+        status.get("thresholds") or _thresholds(),
+    )
+    if recovered:
+        log.info("Live position tracker recovered")
+    if refreshed != status:
+        _persist_watchdog_status_sync(refreshed)
+    return refreshed
 
 
 def require_watchdog_order_allowed(action: str = "Trading") -> None:

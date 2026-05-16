@@ -87,6 +87,124 @@ class WatchdogTests(unittest.TestCase):
             p.stop()
         self.tmp.cleanup()
 
+
+    def _add_open_position(self, symbol: str = "AAPL") -> None:
+        async def add() -> None:
+            async with aiosqlite.connect(config.DB_PATH) as db:
+                await db.execute(
+                    """
+                    INSERT INTO positions (symbol, buy_price, quantity, status, created_at, updated_at)
+                    VALUES (?, 100, 1, 'OPEN', ?, ?)
+                    """,
+                    (symbol, iso_delta(0), iso_delta(0)),
+                )
+                await db.commit()
+
+        asyncio.run(add())
+
+    def _seed_cached_live_tracker_mismatch(self, symbol: str = "AAPL") -> str:
+        fresh = iso_delta(0)
+        self._add_open_position(symbol)
+        asyncio.run(database.set_app_state(
+            watchdog.LIVE_POSITION_TRACKER_STATE_KEY,
+            json.dumps({
+                "source": "live_position_tracker",
+                "last_refresh_at": fresh,
+                "tracked_count": 1,
+                "tracked_symbols": [symbol],
+                "positions": [{"symbol": symbol, "last_refresh_at": fresh}],
+                "healthy": True,
+            }),
+        ))
+        asyncio.run(database.set_app_state(
+            watchdog.WATCHDOG_STATUS_KEY,
+            json.dumps({
+                "tws_connected": True,
+                "shared_ib_connected": True,
+                "blocking_reasons": ["Live position tracker missing open positions (0/1)"],
+                "trading_blocked": True,
+                "stale_data": {"live_position_tracking": True},
+                "healthy": False,
+                "thresholds": watchdog._thresholds(),
+                "live_position_tracking": {
+                    "source": "live_position_tracker",
+                    "open_position_count": 1,
+                    "tracked_count": 0,
+                    "healthy": False,
+                    "last_refresh_at": fresh,
+                    "last_refresh_age_seconds": 0,
+                },
+            }),
+        ))
+        return fresh
+
+    def test_cached_live_tracker_mismatch_clears_after_recovery(self):
+        self._seed_cached_live_tracker_mismatch()
+
+        with self.assertLogs("watchdog", level="INFO") as logs:
+            status = asyncio.run(watchdog.get_watchdog_status())
+
+        self.assertFalse(status["trading_blocked"])
+        self.assertTrue(status["healthy"])
+        self.assertEqual(status["blocking_reasons"], [])
+        self.assertFalse(status["stale_data"]["live_position_tracking"])
+        self.assertEqual(status["live_position_tracking"]["open_position_count"], 1)
+        self.assertEqual(status["live_position_tracking"]["tracked_count"], 1)
+        self.assertTrue(status["live_position_tracking"]["healthy"])
+        self.assertIn("Live position tracker recovered", "\n".join(logs.output))
+
+        cached = json.loads(asyncio.run(database.get_app_state(watchdog.WATCHDOG_STATUS_KEY)))
+        self.assertFalse(cached["trading_blocked"])
+        self.assertNotIn("Live position tracker missing open positions", ";".join(cached["blocking_reasons"]))
+
+    def test_sync_watchdog_order_guard_unblocks_after_live_tracker_recovery(self):
+        self._seed_cached_live_tracker_mismatch()
+
+        require_watchdog_order_allowed("BUY")
+        status = watchdog.get_watchdog_status_sync()
+
+        self.assertFalse(status["trading_blocked"])
+        self.assertEqual(status["blocking_reasons"], [])
+        self.assertFalse(status["stale_data"]["live_position_tracking"])
+
+    def test_watchdog_run_refreshes_live_tracker_cache_and_removes_stale_reason(self):
+        fresh = iso_delta(0)
+        self._add_open_position("AAPL")
+        asyncio.run(seed_watchdog_inputs(connected=True, mirror_at=fresh, execution_at=fresh, market_at=fresh))
+        asyncio.run(database.set_app_state(
+            watchdog.WATCHDOG_STATUS_KEY,
+            json.dumps({
+                "tws_connected": True,
+                "blocking_reasons": ["Live position tracker missing open positions (0/1)"],
+                "trading_blocked": True,
+                "stale_data": {"live_position_tracking": True},
+                "healthy": False,
+            }),
+        ))
+        asyncio.run(database.set_app_state(
+            watchdog.LIVE_POSITION_TRACKER_STATE_KEY,
+            json.dumps({
+                "source": "live_position_tracker",
+                "last_refresh_at": fresh,
+                "tracked_count": 1,
+                "tracked_symbols": ["AAPL"],
+                "positions": [{"symbol": "AAPL", "last_refresh_at": fresh}],
+                "healthy": True,
+            }),
+        ))
+
+        with patch.object(watchdog, "is_ib_connected", return_value=True), \
+             patch.object(watchdog, "send_watchdog_alert", return_value=True), \
+             self.assertLogs("watchdog", level="INFO") as logs:
+            status = asyncio.run(watchdog.run_watchdog_once())
+
+        self.assertFalse(status["trading_blocked"])
+        self.assertEqual(status["blocking_reasons"], [])
+        self.assertFalse(status["stale_data"]["live_position_tracking"])
+        self.assertEqual(status["live_position_tracking"]["tracked_count"], 1)
+        self.assertEqual(status["live_position_tracking"]["open_position_count"], 1)
+        self.assertIn("Live position tracker recovered", "\n".join(logs.output))
+
     def test_disconnected_tws_blocks_trading(self):
         sent_alerts = []
         fresh = iso_delta(0)
