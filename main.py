@@ -2432,7 +2432,7 @@ async def api_trading_status():
 
             "watchdog": watchdog_status,
 
-            "live_position_tracker": await live_position_tracker.get_tracker_status(),
+            "live_position_tracker": watchdog_status.get("live_position_tracking") or await live_position_tracker.get_tracker_status(),
 
             "circuit_breaker_auto_recovered": bool(
                 watchdog_status.get("circuit_breaker_auto_recovered")
