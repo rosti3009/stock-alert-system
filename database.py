@@ -409,6 +409,10 @@ async def init_db() -> None:
         await db.execute(CREATE_SETUP_PERFORMANCE)
         await db.execute(CREATE_TRADE_OUTCOMES)
         await db.execute(CREATE_TRADE_REVIEWS)
+        await db.execute(CREATE_BROKER_SYNC_SNAPSHOTS)
+        await db.execute(CREATE_ORDERS)
+        await db.execute(CREATE_EXECUTIONS_V2)
+        await db.execute(CREATE_RECONCILIATION_EVENTS)
 
         await _ensure_columns(db, "signals", {
             "score": "REAL",
@@ -1811,6 +1815,10 @@ async def build_trade_review(position: dict) -> dict | None:
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(CREATE_TRADE_REVIEWS)
+        await db.execute(CREATE_BROKER_SYNC_SNAPSHOTS)
+        await db.execute(CREATE_ORDERS)
+        await db.execute(CREATE_EXECUTIONS_V2)
+        await db.execute(CREATE_RECONCILIATION_EVENTS)
         db.row_factory = aiosqlite.Row
         outcome = await _latest_trade_outcome_for_review(db, symbol, position) or {}
         entry_time = _first_present(outcome.get("entry_time"), position.get("buy_date"), position.get("created_at"))
@@ -1913,6 +1921,10 @@ async def upsert_trade_review_for_position(position: dict) -> dict | None:
     """
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(CREATE_TRADE_REVIEWS)
+        await db.execute(CREATE_BROKER_SYNC_SNAPSHOTS)
+        await db.execute(CREATE_ORDERS)
+        await db.execute(CREATE_EXECUTIONS_V2)
+        await db.execute(CREATE_RECONCILIATION_EVENTS)
         await db.execute(sql, row)
         await db.commit()
     return row
@@ -1977,6 +1989,10 @@ async def get_trade_reviews(limit: int = 200, symbol: str | None = None) -> list
         params = (limit,)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(CREATE_TRADE_REVIEWS)
+        await db.execute(CREATE_BROKER_SYNC_SNAPSHOTS)
+        await db.execute(CREATE_ORDERS)
+        await db.execute(CREATE_EXECUTIONS_V2)
+        await db.execute(CREATE_RECONCILIATION_EVENTS)
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cursor:
             rows = await cursor.fetchall()
@@ -2058,3 +2074,123 @@ async def get_learning_summary() -> dict:
         "average_hold_time": (dict(hold).get("average_hold_time") if hold else 0) or 0,
         "most_common_loss_reasons": results["loss_reasons"],
     }
+
+CREATE_BROKER_SYNC_SNAPSHOTS = """
+CREATE TABLE IF NOT EXISTS broker_sync_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    synced_at TEXT,
+    ok INTEGER,
+    connected INTEGER,
+    account TEXT,
+    net_liquidation REAL,
+    total_cash REAL,
+    available_funds REAL,
+    buying_power REAL,
+    positions_json TEXT,
+    open_orders_json TEXT,
+    executions_json TEXT,
+    errors_json TEXT
+)
+"""
+
+CREATE_ORDERS = """
+CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    broker_order_id INTEGER,
+    broker_perm_id INTEGER,
+    symbol TEXT,
+    action TEXT,
+    order_type TEXT,
+    quantity REAL,
+    filled_quantity REAL,
+    remaining_quantity REAL,
+    limit_price REAL,
+    stop_price REAL,
+    status TEXT,
+    source TEXT,
+    reason TEXT,
+    created_at TEXT,
+    updated_at TEXT,
+    submitted_at TEXT,
+    filled_at TEXT,
+    cancelled_at TEXT,
+    rejected_at TEXT
+)
+"""
+CREATE_EXECUTIONS_V2 = """
+CREATE TABLE IF NOT EXISTS executions_v2 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    execution_id TEXT UNIQUE,
+    broker_order_id INTEGER,
+    broker_perm_id INTEGER,
+    symbol TEXT,
+    side TEXT,
+    shares REAL,
+    price REAL,
+    commission REAL,
+    execution_time TEXT,
+    account TEXT,
+    created_at TEXT
+)
+"""
+CREATE_RECONCILIATION_EVENTS = """
+CREATE TABLE IF NOT EXISTS reconciliation_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT,
+    severity TEXT,
+    symbol TEXT,
+    details_json TEXT,
+    status TEXT,
+    created_at TEXT,
+    resolved_at TEXT
+)
+"""
+
+async def save_broker_sync_snapshot(snapshot: dict) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_BROKER_SYNC_SNAPSHOTS)
+        eq=snapshot.get('equity') or {}
+        await db.execute("""INSERT INTO broker_sync_snapshots (synced_at,ok,connected,account,net_liquidation,total_cash,available_funds,buying_power,positions_json,open_orders_json,executions_json,errors_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
+            snapshot.get('synced_at'), 1 if snapshot.get('ok') else 0, 1 if snapshot.get('connected') else 0, snapshot.get('account'), eq.get('net_liquidation'), eq.get('total_cash'), eq.get('available_funds'), eq.get('buying_power'), json.dumps(snapshot.get('positions',[])), json.dumps(snapshot.get('open_orders',[])), json.dumps(snapshot.get('executions',[])), json.dumps(snapshot.get('errors',[]))
+        ))
+        await db.commit()
+
+async def get_latest_broker_sync_snapshot() -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory=aiosqlite.Row
+        await db.execute(CREATE_BROKER_SYNC_SNAPSHOTS)
+        async with db.execute("SELECT * FROM broker_sync_snapshots ORDER BY id DESC LIMIT 1") as c:
+            r=await c.fetchone()
+    return dict(r) if r else None
+
+async def upsert_position(data: dict) -> dict:
+    return await add_position(data, max_open_positions=999999)
+
+async def insert_reconciliation_event(event_type: str, severity: str, symbol: str | None, details: dict, status: str='OPEN') -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_RECONCILIATION_EVENTS)
+        await db.execute("INSERT INTO reconciliation_events (event_type,severity,symbol,details_json,status,created_at) VALUES (?,?,?,?,?,?)", (event_type,severity,symbol,json.dumps(details),status,now_iso()))
+        await db.commit()
+
+async def get_open_reconciliation_issues() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory=aiosqlite.Row
+        await db.execute(CREATE_RECONCILIATION_EVENTS)
+        async with db.execute("SELECT * FROM reconciliation_events WHERE status='OPEN' ORDER BY id DESC LIMIT 500") as c:
+            rows=await c.fetchall()
+    return [dict(r) for r in rows]
+
+async def reconcile_orders_and_executions(snapshot: dict) -> dict:
+    events=[]
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory=aiosqlite.Row
+        await db.execute(CREATE_ORDERS); await db.execute(CREATE_EXECUTIONS_V2)
+        for o in snapshot.get('open_orders',[]):
+            cur=await db.execute("SELECT id FROM orders WHERE broker_order_id=? OR broker_perm_id=?", (o.get('order_id'), o.get('perm_id')))
+            if not await cur.fetchone():
+                await db.execute("INSERT INTO orders (broker_order_id,broker_perm_id,symbol,action,order_type,quantity,filled_quantity,remaining_quantity,limit_price,stop_price,status,source,reason,created_at,updated_at,submitted_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (o.get('order_id'),o.get('perm_id'),o.get('symbol'),o.get('action'),o.get('order_type'),o.get('quantity'),o.get('filled_quantity'),o.get('remaining_quantity'),o.get('limit_price'),o.get('stop_price'),o.get('status'),'IBKR_OPEN_ORDER_ADOPTED','IBKR_OPEN_ORDER_ADOPTED',now_iso(),now_iso(),now_iso()))
+                events.append({'event_type':'IBKR_OPEN_ORDER_ADOPTED','severity':'INFO','symbol':o.get('symbol')})
+        for ex in snapshot.get('executions',[]):
+            await db.execute("INSERT OR IGNORE INTO executions_v2 (execution_id,broker_order_id,broker_perm_id,symbol,side,shares,price,commission,execution_time,account,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (ex.get('execution_id'),ex.get('order_id'),ex.get('perm_id'),ex.get('symbol'),ex.get('side'),ex.get('shares'),ex.get('price'),ex.get('commission'),ex.get('time'),ex.get('account'),now_iso()))
+        await db.commit()
+    return {'events':events}

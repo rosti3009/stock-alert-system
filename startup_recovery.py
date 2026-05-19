@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 import account_sync
 import database
 import execution_sync
+import broker_sync
+import reconciliation_engine
 from circuit_breaker import (
     auto_clear_recoverable_circuit_breaker,
     get_circuit_breaker_state,
@@ -101,9 +103,10 @@ async def run_startup_recovery() -> dict:
     await save_startup_recovery_status(status)
 
     try:
-        tws_snapshot = await step("connect_tws_sync_positions_open_orders", run_tws_mirror_once)
-        if not tws_snapshot.get("connected"):
-            raise RuntimeError(f"TWS connection failed: {tws_snapshot.get('error')}")
+        broker_snapshot = await step("broker_source_of_truth_sync", broker_sync.run_broker_sync_once)
+        await step("save_broker_snapshot", lambda: database.save_broker_sync_snapshot(broker_snapshot))
+        if not broker_snapshot.get("connected"):
+            raise RuntimeError(f"TWS connection failed: {(broker_snapshot.get('errors') or [None])[0]}")
 
         account_snapshot = await step("sync_account_open_orders_executions", account_sync.run_account_sync_once)
         if not account_snapshot.get("connected"):
@@ -112,7 +115,7 @@ async def run_startup_recovery() -> dict:
         execution_result = await step("sync_executions_and_commissions", execution_sync.sync_executions)
         await step("adopt_missing_tws_positions", adopt_tws_positions_as_baseline)
         await step("close_stale_db_positions", lambda: close_db_positions_flat_in_tws(dry_run=False))
-        reconciliation = await step("reconcile_db", run_reconciliation_once)
+        reconciliation = await step("reconcile_db", lambda: reconciliation_engine.run_reconciliation(broker_snapshot))
 
         buying_power = (account_snapshot.get("equity") or {}).get("buying_power")
         if buying_power is None:

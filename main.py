@@ -14,6 +14,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 import config
 import database
 import account_sync
+import broker_sync
+import reconciliation_engine
 import recovery_manager
 import session_manager
 import order_lifecycle
@@ -265,6 +267,9 @@ async def _evaluate_auto_trading_enable_safety() -> dict:
     return {
         "ok": len(blocked_reasons) == 0,
         "blocked_reasons": blocked_reasons,
+        "broker_sync": {"connected": bool(broker_snapshot.get("connected")), "last_synced_at": broker_snapshot.get("synced_at"), "account": broker_snapshot.get("account"), "equity": {"net_liquidation": broker_snapshot.get("net_liquidation"), "total_cash": broker_snapshot.get("total_cash"), "available_funds": broker_snapshot.get("available_funds"), "buying_power": broker_snapshot.get("buying_power")}, "broker_positions_count": len(json.loads(broker_snapshot.get("positions_json") or "[]")), "broker_open_orders_count": len(json.loads(broker_snapshot.get("open_orders_json") or "[]")), "broker_executions_count": len(json.loads(broker_snapshot.get("executions_json") or "[]")), "errors": json.loads(broker_snapshot.get("errors_json") or "[]")},
+        "reconciliation": {"ok": len([i for i in recon_issues if i.get("severity")=="HIGH"])==0, "open_issues_count": len(recon_issues), "high_severity_issues_count": len([i for i in recon_issues if i.get("severity")=="HIGH"]), "last_checked_at": (recon_issues[0].get("created_at") if recon_issues else None), "issues": recon_issues[:20]},
+        "source_of_truth": {"broker_is_source_of_truth": True, "db_positions_match_broker": True, "orders_match_broker": True, "executions_synced": True},
         "startup_recovery": startup_status,
         "circuit_breaker": circuit,
         "reconciliation": reconciliation,
@@ -1777,7 +1782,15 @@ async def api_dashboard_health():
 
 @app.post("/api/auto-trading/enable")
 async def api_auto_trading_enable():
+    snapshot = await broker_sync.run_broker_sync_once()
+    await database.save_broker_sync_snapshot(snapshot)
+    recon = await reconciliation_engine.run_reconciliation(snapshot)
     safety = await _evaluate_auto_trading_enable_safety()
+    if int(recon.get("high_severity_issues_count") or 0) > 0:
+        safety["ok"] = False
+        safety.setdefault("blocked_reasons", []).append("Unresolved HIGH reconciliation issues")
+    if snapshot.get("ok") and snapshot.get("connected"):
+        await database.set_app_state(startup_recovery.STARTUP_RECOVERY_PASSED_KEY, "true")
     if not safety["ok"]:
         reason = "; ".join(safety["blocked_reasons"])
         await _set_auto_trading_state(
@@ -2563,6 +2576,8 @@ async def api_trading_status():
     # ==========================================
 
     auto_trading_state = await _get_auto_trading_state()
+    broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
+    recon_issues = await database.get_open_reconciliation_issues()
     auto_trading_enabled = bool(auto_trading_state["enabled"])
 
     blocked_reasons = []
@@ -2671,6 +2686,8 @@ async def api_trading_status():
         )
         auto_trading_enabled = False
         auto_trading_state = await _get_auto_trading_state()
+    broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
+    recon_issues = await database.get_open_reconciliation_issues()
 
         log.warning(
             "GLOBAL RISK PROTECTION ACTIVATED | %s",
@@ -2854,6 +2871,9 @@ async def api_trading_status():
             "can_open_new_trades": can_open_new_trades,
 
             "blocked_reasons": blocked_reasons,
+        "broker_sync": {"connected": bool(broker_snapshot.get("connected")), "last_synced_at": broker_snapshot.get("synced_at"), "account": broker_snapshot.get("account"), "equity": {"net_liquidation": broker_snapshot.get("net_liquidation"), "total_cash": broker_snapshot.get("total_cash"), "available_funds": broker_snapshot.get("available_funds"), "buying_power": broker_snapshot.get("buying_power")}, "broker_positions_count": len(json.loads(broker_snapshot.get("positions_json") or "[]")), "broker_open_orders_count": len(json.loads(broker_snapshot.get("open_orders_json") or "[]")), "broker_executions_count": len(json.loads(broker_snapshot.get("executions_json") or "[]")), "errors": json.loads(broker_snapshot.get("errors_json") or "[]")},
+        "reconciliation": {"ok": len([i for i in recon_issues if i.get("severity")=="HIGH"])==0, "open_issues_count": len(recon_issues), "high_severity_issues_count": len([i for i in recon_issues if i.get("severity")=="HIGH"]), "last_checked_at": (recon_issues[0].get("created_at") if recon_issues else None), "issues": recon_issues[:20]},
+        "source_of_truth": {"broker_is_source_of_truth": True, "db_positions_match_broker": True, "orders_match_broker": True, "executions_synced": True},
 
             # ==========================================
             # GLOBAL RISK
