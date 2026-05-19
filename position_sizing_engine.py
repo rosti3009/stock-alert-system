@@ -155,7 +155,7 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
     atr_percent = pct(atr, price) if atr > 0 and price > 0 else safe_float(row.get("atr_percent"))
 
     risk_per_trade_percent = threshold("MAX_RISK_PER_TRADE_PERCENT", 1.0)
-    if str((context.market_regime or {}).get("strategy_mode") or "").upper() == "INTRADAY_TECHNICAL":
+    if str((context.market_regime or {}).get("strategy_mode") or "").upper() == "INTRADAY_MOMENTUM":
         risk_per_trade_percent = threshold("INTRADAY_RISK_PER_TRADE_PERCENT", 0.5)
 
     max_risk_per_trade = account_equity * (risk_per_trade_percent / 100.0)

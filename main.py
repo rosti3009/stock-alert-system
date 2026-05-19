@@ -1668,7 +1668,7 @@ async def api_strategy_mode_swing():
 
 @app.post("/api/strategy-mode/intraday")
 async def api_strategy_mode_intraday():
-    payload = await strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.INTRADAY_TECHNICAL)
+    payload = await strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.INTRADAY_MOMENTUM)
     scanner = await configure_scanner_job()
     return JSONResponse(
         {**payload, "scanner": scanner},
@@ -1723,7 +1723,7 @@ async def api_strategy_toggle_intraday_swing():
     target = (
         strategy_mode.StrategyMode.SWING_DEFAULT
         if strategy_mode.is_intraday_mode(current)
-        else strategy_mode.StrategyMode.INTRADAY_TECHNICAL
+        else strategy_mode.StrategyMode.INTRADAY_MOMENTUM
     )
     payload = await strategy_mode.set_strategy_mode(target)
     scanner = await configure_scanner_job()
@@ -2173,7 +2173,26 @@ async def serve_history_route():
 
 @app.get("/api/stocks")
 async def api_stocks():
-    return JSONResponse(list(_latest.values()), headers=no_cache_headers())
+    rows = []
+    for row in _latest.values():
+        rows.append({
+            **row,
+            "intraday_momentum_score": row.get("intraday_momentum_score", row.get("intraday_technical_score", 0)),
+            "intraday_signal": row.get("intraday_signal"),
+            "intraday_entry_allowed": row.get("entry_allowed"),
+            "intraday_rejection_reasons": row.get("rejection_reasons", []),
+            "intraday_exit_signal": row.get("intraday_exit_signal"),
+            "intraday_exit_reasons": row.get("intraday_exit_reasons", []),
+            "vwap": row.get("vwap"),
+            "ema9": row.get("ema9"),
+            "ema20": row.get("ema20"),
+            "relative_volume": row.get("relative_volume"),
+            "dollar_volume": row.get("dollar_volume"),
+            "gap_percent": row.get("gap_percent"),
+            "opening_range_high": row.get("opening_range_high"),
+            "opening_range_low": row.get("opening_range_low"),
+        })
+    return JSONResponse(rows, headers=no_cache_headers())
 
 
 @app.get("/api/top-weekly")
@@ -2706,6 +2725,19 @@ async def api_trading_status():
         len(blocked_reasons) == 0
     )
 
+    intraday_engine = {
+        "active": strategy_mode.is_intraday_mode(active_strategy_mode),
+        "mode": active_strategy_payload["strategy_mode"],
+        "intraday_regime": market.get("regime"),
+        "buy_threshold": active_strategy_payload["effective_score_threshold"],
+        "max_daily_trades": active_strategy_payload["intraday_rules"].get("max_daily_trades"),
+        "max_consecutive_losses": active_strategy_payload["intraday_rules"].get("max_consecutive_losses"),
+        "max_daily_loss_percent": active_strategy_payload["intraday_rules"].get("max_daily_loss_percent"),
+        "force_exit_before_close": True,
+        "allow_overnight": False,
+        "required_timeframes": ["1m", "5m", "15m"],
+    }
+
     # ==========================================
     # RESPONSE
     # ==========================================
@@ -2728,6 +2760,8 @@ async def api_trading_status():
             "active_risk_profile": active_strategy_payload["active_risk_profile"],
 
             "intraday_rules": active_strategy_payload["intraday_rules"],
+
+            "intraday_engine": intraday_engine,
 
             "active_training_profile": active_strategy_payload["active_training_profile"],
 
