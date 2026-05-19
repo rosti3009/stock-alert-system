@@ -363,7 +363,7 @@
         <div class="muted" id="strategyEngines">Loading engines...</div>
         <div class="strategy-toggle">
           <button id="swingModeBtn" onclick="switchStrategyMode('swing')">Swing Default</button>
-          <button id="intradayModeBtn" class="primary" onclick="switchStrategyMode('intraday')">Intraday Technical</button>
+          <button id="intradayModeBtn" class="primary" onclick="switchStrategyMode('intraday')">Day Trading / Intraday</button>
         </div>
         <div id="strategyWarning" class="strategy-warning" style="display:none;"></div>
       </div>
@@ -1180,7 +1180,7 @@ async function runOperation(action){
     }
   }
 
-  const mode = strategyMode.strategy_mode === "INTRADAY_TECHNICAL" ? "SWING_DEFAULT" : "INTRADAY_TECHNICAL";
+  const mode = strategyMode.strategy_mode === "INTRADAY_MOMENTUM" ? "SWING_DEFAULT" : "INTRADAY_MOMENTUM";
   const nextProfile = strategyMode.active_training_profile === "AGGRESSIVE_LEARNING" ? "CONSERVATIVE" : "AGGRESSIVE_LEARNING";
   const endpoints = {
     reconnect_tws:["/api/tws/reconnect", {}],
@@ -1224,7 +1224,7 @@ function updateStrategyMode(){
     + " · Risk: " + (strategyMode.active_risk_profile || "-");
 
   document.getElementById("swingModeBtn").disabled = mode === "SWING_DEFAULT";
-  document.getElementById("intradayModeBtn").disabled = mode === "INTRADAY_TECHNICAL";
+  document.getElementById("intradayModeBtn").disabled = mode === "INTRADAY_MOMENTUM";
 
   const warning = document.getElementById("strategyWarning");
   if(strategyMode.switch_warning){
@@ -1252,7 +1252,7 @@ async function switchStrategyMode(mode){
       {
         method:"POST",
         headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({mode: mode === "intraday" ? "INTRADAY_TECHNICAL" : "SWING_DEFAULT"})
+        body:JSON.stringify({mode: mode === "intraday" ? "INTRADAY_MOMENTUM" : "SWING_DEFAULT"})
       }
     );
     scannerStatus = strategyMode.scanner || scannerStatus;
