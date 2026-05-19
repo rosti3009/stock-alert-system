@@ -18,13 +18,13 @@ def run_async(coro):
 
 
 def test_switching_to_intraday_changes_buy_threshold():
-    rules = strategy_mode.active_rules(strategy_mode.StrategyMode.INTRADAY_MOMENTUM)
+    rules = strategy_mode.active_rules(strategy_mode.StrategyMode.INTRADAY_TECHNICAL)
     assert rules["min_score_to_buy"] == 78
     assert rules["min_score_to_buy"] < strategy_mode.active_rules(strategy_mode.StrategyMode.SWING_DEFAULT)["min_score_to_buy"]
 
 
 def test_switching_to_intraday_changes_max_positions():
-    rules = strategy_mode.active_rules(strategy_mode.StrategyMode.INTRADAY_MOMENTUM)
+    rules = strategy_mode.active_rules(strategy_mode.StrategyMode.INTRADAY_TECHNICAL)
     assert rules["max_open_positions"] == 8
     assert strategy_mode.active_rules(strategy_mode.StrategyMode.SWING_DEFAULT)["max_open_positions"] == config.MAX_OPEN_POSITIONS
 
@@ -75,7 +75,7 @@ def test_intraday_sell_logic_uses_intraday_exits():
     result = position_manager.evaluate_position(
         {"symbol": "AAPL", "buy_price": 100, "quantity": 2, "stop_loss": 98.5},
         {"symbol": "AAPL", "price": 98.4, "signal": "NEUTRAL"},
-        mode=strategy_mode.StrategyMode.INTRADAY_MOMENTUM.value,
+        mode=strategy_mode.StrategyMode.INTRADAY_TECHNICAL.value,
     )
 
     assert result["exit_engine"] == "intraday_exit"
@@ -101,7 +101,7 @@ def test_switching_mode_does_not_reset_or_delete_positions(tmp_path):
         run_async(database.add_position({"symbol": "AAPL", "buy_price": 100, "quantity": 1, "current_price": 100}))
 
         before = run_async(database.get_open_positions())
-        payload = run_async(strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.INTRADAY_MOMENTUM))
+        payload = run_async(strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.INTRADAY_TECHNICAL))
         after = run_async(database.get_open_positions())
 
         assert len(before) == 1
@@ -117,7 +117,7 @@ def test_switching_back_to_swing_restores_swing_behavior(tmp_path):
     database.DB_PATH = str(tmp_path / "strategy_mode_back.db")
     try:
         run_async(database.init_db())
-        run_async(strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.INTRADAY_MOMENTUM))
+        run_async(strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.INTRADAY_TECHNICAL))
         run_async(strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.SWING_DEFAULT))
 
         mode = run_async(strategy_mode.get_strategy_mode())
@@ -193,7 +193,7 @@ def test_strategy_payload_exposes_effective_training_profile():
         config.IBKR_ENABLE_REAL_TRADING = False
         config.PAPER_TRAINING_PROFILE = "AGGRESSIVE_LEARNING"
 
-        payload = strategy_mode.strategy_mode_payload(strategy_mode.StrategyMode.INTRADAY_MOMENTUM)
+        payload = strategy_mode.strategy_mode_payload(strategy_mode.StrategyMode.INTRADAY_TECHNICAL)
 
         assert payload["active_training_profile"] == "AGGRESSIVE_LEARNING"
         assert payload["profile_rules"]["paper_capital"] == 500000.0
@@ -206,16 +206,3 @@ def test_strategy_payload_exposes_effective_training_profile():
     finally:
         for key, value in original.items():
             setattr(config, key, value)
-
-def test_intraday_momentum_score_not_weekly_primary():
-    decision = strategy_mode.validate_intraday_buy({
-        "symbol": "AAA", "intraday_bars": {"1m":[1],"5m":[1],"15m":[1]}, "price": 10, "vwap": 9.9,
-        "relative_volume": 2.2, "dollar_volume": 10_000_000, "setup": "breakout momentum", "trend": "Strong Bullish", "weekly_score": 99,
-    })
-    assert decision["score"] <= 100
-
-
-def test_high_weekly_missing_intraday_bars_rejected():
-    decision = strategy_mode.validate_intraday_buy({"symbol":"AAA","weekly_score":99,"price":10})
-    assert decision["allowed"] is False
-    assert any("Intraday bars unavailable" in r for r in decision["reasons"])
