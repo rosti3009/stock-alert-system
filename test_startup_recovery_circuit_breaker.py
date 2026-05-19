@@ -106,6 +106,18 @@ class StartupRecoveryCircuitBreakerTests(unittest.TestCase):
                 "equity": {"buying_power": 10000, "net_liquidation": 5000},
                 "error": None,
             }
+        async def fake_broker_sync():
+            return {
+                "ok": True,
+                "connected": True,
+                "account": "DU1",
+                "synced_at": "2026-05-13T00:00:00+00:00",
+                "equity": {"buying_power": 10000, "net_liquidation": 5000},
+                "positions": [],
+                "open_orders": [],
+                "executions": [],
+                "errors": [],
+            }
 
         async def ok(*args, **kwargs):
             return {"ok": True, "issues": [], "issues_count": 0}
@@ -138,6 +150,7 @@ class StartupRecoveryCircuitBreakerTests(unittest.TestCase):
             self.assertIsNone(await database.get_app_state(IBKR_THRESHOLD_STATE_KEY))
 
             with patch("startup_recovery.run_tws_mirror_once", fake_tws), \
+                patch("startup_recovery.broker_sync.run_broker_sync_once", fake_broker_sync), \
                 patch("startup_recovery.account_sync.run_account_sync_once", fake_account), \
                 patch("startup_recovery.execution_sync.sync_executions", ok), \
                 patch("startup_recovery.adopt_tws_positions_as_baseline", ok), \
@@ -304,6 +317,18 @@ class StartupRecoveryCircuitBreakerTests(unittest.TestCase):
 
         async def fake_tws():
             return {"connected": True, "positions": [], "orders": [], "account": "DU1", "error": None}
+        async def fake_broker_sync():
+            return {
+                "ok": True,
+                "connected": True,
+                "account": "DU1",
+                "synced_at": "2026-05-13T00:00:00+00:00",
+                "equity": {"buying_power": 10000, "net_liquidation": 5000},
+                "positions": [],
+                "open_orders": [],
+                "executions": [],
+                "errors": [],
+            }
 
         async def ok(*args, **kwargs):
             return {"ok": True, "issues": [], "issues_count": 0}
@@ -312,6 +337,7 @@ class StartupRecoveryCircuitBreakerTests(unittest.TestCase):
             await reset_circuit_breaker()
             with patch("ib_insync.IB", FakeIB), \
                 patch("startup_recovery.run_tws_mirror_once", fake_tws), \
+                patch("startup_recovery.broker_sync.run_broker_sync_once", fake_broker_sync), \
                 patch("startup_recovery.execution_sync.sync_executions", ok), \
                 patch("startup_recovery.adopt_tws_positions_as_baseline", ok), \
                 patch("startup_recovery.close_db_positions_flat_in_tws", ok), \
@@ -320,8 +346,13 @@ class StartupRecoveryCircuitBreakerTests(unittest.TestCase):
 
             self.assertTrue(status["ok"], status)
             self.assertEqual(status["state"], "PASSED", status)
-            self.assertEqual(status["steps"][1]["name"], "sync_account_open_orders_executions", status)
-            self.assertEqual(status["steps"][1]["result"]["execution_history"][0]["exec_id"], "RAW1")
+            step_names = [step["name"] for step in status["steps"]]
+            self.assertIn("sync_account_open_orders_executions", step_names, status)
+            sync_step = next(
+                step for step in status["steps"]
+                if step["name"] == "sync_account_open_orders_executions"
+            )
+            self.assertEqual(sync_step["result"]["execution_history"][0]["exec_id"], "RAW1")
             executions = await startup_recovery.account_sync.get_executions(symbol="")
             self.assertEqual(len(executions), 1, executions)
             self.assertEqual(executions[0]["exec_id"], "RAW1")
@@ -451,6 +482,18 @@ class StartupRecoveryCircuitBreakerTests(unittest.TestCase):
                 "equity": {"buying_power": 10000, "net_liquidation": 5000},
                 "error": None,
             }
+        async def fake_broker_sync():
+            return {
+                "ok": True,
+                "connected": True,
+                "account": "DU1",
+                "synced_at": "2026-05-13T00:00:00+00:00",
+                "equity": {"buying_power": 10000, "net_liquidation": 5000},
+                "positions": [],
+                "open_orders": [],
+                "executions": [],
+                "errors": [],
+            }
 
         async def ok(*args, **kwargs):
             return {"ok": True, "issues": [], "issues_count": 0}
@@ -458,6 +501,7 @@ class StartupRecoveryCircuitBreakerTests(unittest.TestCase):
         async def scenario():
             await reset_circuit_breaker()
             with patch("startup_recovery.run_tws_mirror_once", fake_tws), \
+                patch("startup_recovery.broker_sync.run_broker_sync_once", fake_broker_sync), \
                 patch("startup_recovery.account_sync.run_account_sync_once", fake_account), \
                 patch("startup_recovery.execution_sync.sync_executions", ok), \
                 patch("startup_recovery.adopt_tws_positions_as_baseline", ok), \
