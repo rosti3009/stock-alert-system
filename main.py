@@ -215,6 +215,15 @@ async def _evaluate_auto_trading_enable_safety() -> dict:
     reconciliation = await reconciliation_lifecycle.get_reconciliation_status()
     watchdog_status = await watchdog.get_watchdog_status()
     market_hours = get_market_hours_status()
+    broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
+    recon_issues = await database.get_open_reconciliation_issues()
+
+    def _safe_json_array(value) -> list:
+        try:
+            parsed = json.loads(value or "[]")
+        except (TypeError, ValueError):
+            return []
+        return parsed if isinstance(parsed, list) else []
 
     blocked_reasons: list[str] = []
     trading_mode = str(getattr(config, "TRADING_MODE", "")).upper()
@@ -267,7 +276,7 @@ async def _evaluate_auto_trading_enable_safety() -> dict:
     return {
         "ok": len(blocked_reasons) == 0,
         "blocked_reasons": blocked_reasons,
-        "broker_sync": {"connected": bool(broker_snapshot.get("connected")), "last_synced_at": broker_snapshot.get("synced_at"), "account": broker_snapshot.get("account"), "equity": {"net_liquidation": broker_snapshot.get("net_liquidation"), "total_cash": broker_snapshot.get("total_cash"), "available_funds": broker_snapshot.get("available_funds"), "buying_power": broker_snapshot.get("buying_power")}, "broker_positions_count": len(json.loads(broker_snapshot.get("positions_json") or "[]")), "broker_open_orders_count": len(json.loads(broker_snapshot.get("open_orders_json") or "[]")), "broker_executions_count": len(json.loads(broker_snapshot.get("executions_json") or "[]")), "errors": json.loads(broker_snapshot.get("errors_json") or "[]")},
+        "broker_sync": {"connected": bool(broker_snapshot.get("connected")), "last_synced_at": broker_snapshot.get("synced_at"), "account": broker_snapshot.get("account"), "equity": {"net_liquidation": broker_snapshot.get("net_liquidation"), "total_cash": broker_snapshot.get("total_cash"), "available_funds": broker_snapshot.get("available_funds"), "buying_power": broker_snapshot.get("buying_power")}, "broker_positions_count": len(_safe_json_array(broker_snapshot.get("positions_json"))), "broker_open_orders_count": len(_safe_json_array(broker_snapshot.get("open_orders_json"))), "broker_executions_count": len(_safe_json_array(broker_snapshot.get("executions_json"))), "errors": _safe_json_array(broker_snapshot.get("errors_json"))},
         "reconciliation": {"ok": len([i for i in recon_issues if i.get("severity")=="HIGH"])==0, "open_issues_count": len(recon_issues), "high_severity_issues_count": len([i for i in recon_issues if i.get("severity")=="HIGH"]), "last_checked_at": (recon_issues[0].get("created_at") if recon_issues else None), "issues": recon_issues[:20]},
         "source_of_truth": {"broker_is_source_of_truth": True, "db_positions_match_broker": True, "orders_match_broker": True, "executions_synced": True},
         "startup_recovery": startup_status,
