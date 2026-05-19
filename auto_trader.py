@@ -21,7 +21,6 @@ import database
 import order_lifecycle
 import portfolio_risk_engine
 import strategy_mode
-import intraday_momentum_engine as ime
 from execution_quality import evaluate_execution_quality
 from position_sizing_engine import (
     PositionSizingInput,
@@ -522,9 +521,8 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
         symbol = str(row.get("symbol", "")).strip().upper()
         signal = row.get("signal")
         if strategy_mode.is_intraday_mode(active_strategy_mode):
-            entry = ime.evaluate_intraday_entry(row, threshold=min_score_override)
-            score = int(entry.get("intraday_momentum_score") or 0)
-            row = {**row, **entry, "intraday_score_reasons": entry.get("score_reasons", [])}
+            score, intraday_score_reasons = strategy_mode.calculate_intraday_technical_score(row)
+            row = {**row, "intraday_technical_score": score, "intraday_score_reasons": intraday_score_reasons}
         else:
             score = int(row.get("weekly_score") or row.get("score") or 0)
 
@@ -574,8 +572,8 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
 
             if strategy_mode.is_intraday_mode(active_strategy_mode):
                 intraday_decision = strategy_mode.validate_intraday_buy(row)
-                if (not intraday_decision.get("allowed")) or (not row.get("entry_allowed", False)):
-                    reason = "; ".join((row.get("rejection_reasons") or []) + (intraday_decision.get("reasons") or ["Intraday BUY blocked"]))
+                if not intraday_decision.get("allowed"):
+                    reason = "; ".join(intraday_decision.get("reasons") or ["Intraday BUY blocked"])
                     log.info("AUTO BUY skipped for %s — %s", symbol, reason)
                     await _journal_buy_decision(
                         row,

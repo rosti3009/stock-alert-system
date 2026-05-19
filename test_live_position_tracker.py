@@ -209,7 +209,7 @@ class LivePositionTrackerTests(unittest.TestCase):
 
     def test_intraday_positions_refresh_continuously_without_swing_throttle(self):
         self.add_position("AAPL")
-        asyncio.run(database.set_app_state(strategy_mode.STRATEGY_MODE_KEY, strategy_mode.StrategyMode.INTRADAY_MOMENTUM.value))
+        asyncio.run(database.set_app_state(strategy_mode.STRATEGY_MODE_KEY, strategy_mode.StrategyMode.INTRADAY_TECHNICAL.value))
         calls: list[str] = []
 
         async def fake_scan(symbol: str) -> dict:
