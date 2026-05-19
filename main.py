@@ -2667,23 +2667,27 @@ async def api_trading_status():
             "Available cash below minimum trade amount"
         )
 
-    # ==========================================
+     # ==========================================
     # GLOBAL RISK ENGINE
     # ==========================================
 
     if global_risk.get("risk_triggered"):
-
-        blocked_reasons.append(
-            global_risk.get("risk_message")
-        )
-
-        # AUTO DISABLE TRADING
+        blocked_reasons.append(global_risk.get("risk_message"))
 
         await _set_auto_trading_state(
             False,
             source="global_risk_manager",
             reason=global_risk.get("risk_message") or "Global risk protection activated",
         )
+
+        auto_trading_enabled = False
+        auto_trading_state = await _get_auto_trading_state()
+
+        log.warning(
+            "GLOBAL RISK PROTECTION ACTIVATED | %s",
+            global_risk.get("risk_message"),
+        )
+
         auto_trading_enabled = False
         auto_trading_state = await _get_auto_trading_state()
     broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
