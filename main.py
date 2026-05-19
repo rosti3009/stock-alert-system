@@ -2667,7 +2667,7 @@ async def api_trading_status():
             "Available cash below minimum trade amount"
         )
 
-     # ==========================================
+    # ==========================================
     # GLOBAL RISK ENGINE
     # ==========================================
 
@@ -2688,15 +2688,8 @@ async def api_trading_status():
             global_risk.get("risk_message"),
         )
 
-        auto_trading_enabled = False
-        auto_trading_state = await _get_auto_trading_state()
     broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
     recon_issues = await database.get_open_reconciliation_issues()
-
-        log.warning(
-            "GLOBAL RISK PROTECTION ACTIVATED | %s",
-            global_risk.get("risk_message"),
-        )
 
     # ==========================================
     # WATCHDOG
