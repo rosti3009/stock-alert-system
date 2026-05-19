@@ -35,7 +35,7 @@ def test_rejected_setups_are_recorded():
             await database.init_db()
             await database.record_rejected_setup({
                 "symbol": "aapl",
-                "strategy_mode": "INTRADAY_TECHNICAL",
+                "strategy_mode": "INTRADAY_MOMENTUM",
                 "rejection_reason": "Score too low (72 < 80)",
                 "score": 72,
                 "volume": 2000,
@@ -206,7 +206,7 @@ def test_strategy_learning_analytics_records_decisions_with_aggressive_profile()
             config.PAPER_TRAINING_PROFILE = "AGGRESSIVE_LEARNING"
             await database.record_trade_decision({
                 "symbol": "amd",
-                "strategy_mode": "INTRADAY_TECHNICAL",
+                "strategy_mode": "INTRADAY_MOMENTUM",
                 "setup_type": "BREAKOUT",
                 "entry_reason": "Aggressive learning profile candidate accepted",
                 "score": 88,
@@ -227,5 +227,5 @@ def test_strategy_learning_analytics_records_decisions_with_aggressive_profile()
     assert len(rows) == 1
     row = dict(rows[0])
     assert row["symbol"] == "AMD"
-    assert row["strategy_mode"] == "INTRADAY_TECHNICAL"
+    assert row["strategy_mode"] == "INTRADAY_MOMENTUM"
     assert row["entry_reason"] == "Aggressive learning profile candidate accepted"

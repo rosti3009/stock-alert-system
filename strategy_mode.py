@@ -8,11 +8,12 @@ from zoneinfo import ZoneInfo
 import config
 import database
 from execution_quality import evaluate_execution_quality
+import intraday_momentum_engine as ime
 
 
 class StrategyMode(StrEnum):
     SWING_DEFAULT = "SWING_DEFAULT"
-    INTRADAY_TECHNICAL = "INTRADAY_TECHNICAL"
+    INTRADAY_MOMENTUM = "INTRADAY_MOMENTUM"
 
 
 STRATEGY_MODE_KEY = "strategy_mode"
@@ -26,8 +27,8 @@ INTRADAY_ENRICHMENT_KEYS = (
 
 def normalize_strategy_mode(value: Any) -> StrategyMode:
     normalized = str(value or "").strip().upper()
-    if normalized == StrategyMode.INTRADAY_TECHNICAL.value:
-        return StrategyMode.INTRADAY_TECHNICAL
+    if normalized in {StrategyMode.INTRADAY_MOMENTUM.value, "INTRADAY_MOMENTUM"}:
+        return StrategyMode.INTRADAY_MOMENTUM
     return StrategyMode.SWING_DEFAULT
 
 
@@ -49,7 +50,7 @@ async def set_strategy_mode(mode: StrategyMode | str) -> dict[str, Any]:
 
 
 def is_intraday_mode(mode: StrategyMode | str | None) -> bool:
-    return normalize_strategy_mode(mode) == StrategyMode.INTRADAY_TECHNICAL
+    return normalize_strategy_mode(mode) == StrategyMode.INTRADAY_MOMENTUM
 
 
 def intraday_rules() -> dict[str, Any]:
@@ -179,10 +180,11 @@ def validate_intraday_buy(row: dict[str, Any]) -> dict[str, Any]:
     rules = intraday_rules()
     reasons: list[str] = []
 
-    if not has_intraday_bars(row):
-        reasons.append("Intraday BUY blocked: fresh 1m/5m/15m bars are unavailable")
+    ok,missing_reasons = ime.required_bars_available(row)
+    if not ok:
+        reasons.append("Intraday BUY blocked: fresh 1m/5m/15m bars are unavailable"); reasons.extend(missing_reasons)
 
-    score, score_reasons = calculate_intraday_technical_score(row)
+    score, score_reasons = ime.calculate_intraday_momentum_score(row)
     if score < rules["min_score_to_buy"]:
         reasons.append(f"Intraday score too low ({score} < {rules['min_score_to_buy']})")
 
@@ -282,7 +284,7 @@ def strategy_mode_payload(
     return {
         "strategy_mode": normalized.value,
         "previous_strategy_mode": normalize_strategy_mode(previous_mode).value if previous_mode else None,
-        "active_buy_engine": "intraday_technical" if is_intraday_mode(normalized) else "swing_default",
+        "active_buy_engine": "intraday_momentum_engine" if is_intraday_mode(normalized) else "swing_default",
         "active_sell_engine": "intraday_exit" if is_intraday_mode(normalized) else "swing_position_manager",
         "active_risk_profile": (
             f"intraday_{config.active_paper_training_profile().lower()}"

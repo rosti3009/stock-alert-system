@@ -37,7 +37,7 @@ def test_trading_status_exposes_effective_aggressive_profile(tmp_path, monkeypat
     try:
         database.DB_PATH = str(tmp_path / "paper_training_status.db")
         asyncio.run(database.init_db())
-        asyncio.run(database.set_app_state("strategy_mode", "INTRADAY_TECHNICAL"))
+        asyncio.run(database.set_app_state("strategy_mode", "INTRADAY_MOMENTUM"))
         config.IBKR_PAPER_TRADING = True
         config.IBKR_ENABLE_REAL_TRADING = False
         config.PAPER_TRAINING_PROFILE = "AGGRESSIVE_LEARNING"

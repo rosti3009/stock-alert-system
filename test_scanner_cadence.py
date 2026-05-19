@@ -25,7 +25,7 @@ def test_swing_uses_minute_interval():
 
 
 def test_intraday_uses_seconds_interval():
-    cadence = main.scanner_cadence_for_mode(strategy_mode.StrategyMode.INTRADAY_TECHNICAL)
+    cadence = main.scanner_cadence_for_mode(strategy_mode.StrategyMode.INTRADAY_MOMENTUM)
 
     assert cadence["scan_interval_seconds"] == config.INTRADAY_SCAN_INTERVAL_SECONDS == 30
     assert cadence["symbols_per_scan"] == config.INTRADAY_SYMBOLS_PER_SCAN == 100
@@ -43,7 +43,7 @@ def test_mode_switch_updates_scanner_cadence(tmp_path):
         run_async(strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.SWING_DEFAULT))
         swing_status = run_async(main.configure_scanner_job())
 
-        run_async(strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.INTRADAY_TECHNICAL))
+        run_async(strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.INTRADAY_MOMENTUM))
         intraday_status = run_async(main.configure_scanner_job())
 
         jobs = [job for job in main.scheduler.get_jobs() if job.id == main.SCANNER_JOB_ID]
@@ -90,7 +90,7 @@ def test_intraday_open_positions_are_prioritized_and_scan_is_bounded(tmp_path, m
 
     try:
         run_async(database.init_db())
-        run_async(strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.INTRADAY_TECHNICAL))
+        run_async(strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.INTRADAY_MOMENTUM))
         run_async(database.add_position({"symbol": "OPENX", "buy_price": 100, "quantity": 1, "current_price": 101}))
         run_async(database.save_daily_candidate({"symbol": "BUY1", "price": 25, "signal": "BUY", "score": 90, "weekly_score": 90}, 1))
 
