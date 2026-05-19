@@ -18,13 +18,13 @@ def run_async(coro):
 
 
 def test_switching_to_intraday_changes_buy_threshold():
-    rules = strategy_mode.active_rules(strategy_mode.StrategyMode.INTRADAY_TECHNICAL)
+    rules = strategy_mode.active_rules(strategy_mode.StrategyMode.INTRADAY_MOMENTUM)
     assert rules["min_score_to_buy"] == 78
     assert rules["min_score_to_buy"] < strategy_mode.active_rules(strategy_mode.StrategyMode.SWING_DEFAULT)["min_score_to_buy"]
 
 
 def test_switching_to_intraday_changes_max_positions():
-    rules = strategy_mode.active_rules(strategy_mode.StrategyMode.INTRADAY_TECHNICAL)
+    rules = strategy_mode.active_rules(strategy_mode.StrategyMode.INTRADAY_MOMENTUM)
     assert rules["max_open_positions"] == 8
     assert strategy_mode.active_rules(strategy_mode.StrategyMode.SWING_DEFAULT)["max_open_positions"] == config.MAX_OPEN_POSITIONS
 

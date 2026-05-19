@@ -37,6 +37,7 @@ import position_sizing_engine
 import position_exit_priority_engine
 import sector_intelligence
 import strategy_mode
+import intraday_momentum_engine
 from execution_quality import evaluate_execution_quality, summarize_execution_quality
 from auto_trader import process_auto_trading
 from trading_safety import get_market_hours_status
@@ -734,9 +735,10 @@ async def _scan_symbol_inner(symbol: str) -> dict:
                 intraday_bars[timeframe] = bars
         result["intraday_bars"] = intraday_bars
         result["intraday_bars_available"] = bool(intraday_bars)
-        intraday_score, intraday_reasons = strategy_mode.calculate_intraday_technical_score(result)
-        result["intraday_technical_score"] = intraday_score
-        result["intraday_score_reasons"] = intraday_reasons
+        momentum_payload = intraday_momentum_engine.build_dashboard_payload(result)
+        result.update(momentum_payload)
+        result["intraday_technical_score"] = momentum_payload["intraday_momentum_score"]
+        result["intraday_score_reasons"] = momentum_payload.get("score_reasons", [])
         result["intraday_enrichment_status"] = strategy_mode.intraday_enrichment_status(result)
 
     await maybe_send_alert(symbol, signal_type, ind, risk, reasons, score)
@@ -1677,7 +1679,7 @@ async def api_strategy_mode_swing():
 
 @app.post("/api/strategy-mode/intraday")
 async def api_strategy_mode_intraday():
-    payload = await strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.INTRADAY_TECHNICAL)
+    payload = await strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.INTRADAY_MOMENTUM)
     scanner = await configure_scanner_job()
     return JSONResponse(
         {**payload, "scanner": scanner},
@@ -1732,7 +1734,7 @@ async def api_strategy_toggle_intraday_swing():
     target = (
         strategy_mode.StrategyMode.SWING_DEFAULT
         if strategy_mode.is_intraday_mode(current)
-        else strategy_mode.StrategyMode.INTRADAY_TECHNICAL
+        else strategy_mode.StrategyMode.INTRADAY_MOMENTUM
     )
     payload = await strategy_mode.set_strategy_mode(target)
     scanner = await configure_scanner_job()
@@ -2751,6 +2753,20 @@ async def api_trading_status():
             "effective_max_daily_trades": active_strategy_payload["effective_max_daily_trades"],
 
             "intraday_enrichment_status": active_strategy_payload["intraday_enrichment_status"],
+            "intraday_engine": {
+                "active": strategy_mode.is_intraday_mode(active_strategy_mode),
+                "mode": active_strategy_payload["strategy_mode"],
+                "buy_engine": "intraday_momentum_engine",
+                "sell_engine": "intraday_exit_engine",
+                "intraday_regime": "MOMENTUM_NEUTRAL",
+                "buy_threshold": intraday_momentum_engine.BUY_THRESHOLD,
+                "required_timeframes": list(intraday_momentum_engine.REQUIRED_TIMEFRAMES),
+                "max_daily_trades": active_strategy_payload["intraday_rules"].get("max_daily_trades"),
+                "max_consecutive_losses": active_strategy_payload["intraday_rules"].get("max_consecutive_losses"),
+                "max_daily_loss_percent": active_strategy_payload["intraday_rules"].get("max_daily_loss_percent"),
+                "force_exit_before_close": True,
+                "allow_overnight": False,
+            },
 
             "force_exit_before_close": active_strategy_payload["force_exit_before_close"],
 
