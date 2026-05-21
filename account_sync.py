@@ -8,13 +8,13 @@ from datetime import datetime, timezone
 import aiosqlite
 
 import config
+from tws_connection_manager import with_shared_ib_sync
 import database
 import execution_sync
 from circuit_breaker import record_ibkr_error, reset_ibkr_error_count
 
 log = logging.getLogger(__name__)
 
-ACCOUNT_SYNC_CLIENT_ID_OFFSET = 600
 RECONCILIATION_STATUS_KEY = "account_sync_reconciliation_status"
 
 
@@ -142,24 +142,7 @@ def _account_value(summary: list[dict], tag: str) -> float:
 
 
 def fetch_account_snapshot_sync() -> dict:
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    from ib_insync import IB
-
-    ib = IB()
-
-    try:
-        client_id = int(config.IBKR_CLIENT_ID) + ACCOUNT_SYNC_CLIENT_ID_OFFSET
-
-        ib.connect(
-            config.IBKR_HOST,
-            int(config.IBKR_PORT),
-            clientId=client_id,
-            timeout=10,
-            readonly=True,
-        )
-
+    def _fetch(ib):
         account = None
         accounts = ib.managedAccounts()
         if accounts:
@@ -249,17 +232,7 @@ def fetch_account_snapshot_sync() -> dict:
             "synced_at": synced_at,
         }
 
-    finally:
-        try:
-            if ib.isConnected():
-                ib.disconnect()
-        except Exception:
-            pass
-
-        try:
-            loop.close()
-        except Exception:
-            pass
+    return with_shared_ib_sync(_fetch, readonly=True)
 
 
 async def save_account_snapshot(snapshot: dict) -> None:
