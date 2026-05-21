@@ -198,6 +198,18 @@ IBKR_MARKET_DATA_TYPE = get_int("IBKR_MARKET_DATA_TYPE", 3)
 TRADING_MODE = get_str("TRADING_MODE", "OFF").upper()
 AUTO_SEND_ORDERS = get_bool("AUTO_SEND_ORDERS", False)
 REQUIRE_MANUAL_CONFIRMATION = get_bool("REQUIRE_MANUAL_CONFIRMATION", True)
+APP_ROLE = get_str("APP_ROLE", "dashboard").lower()
+if APP_ROLE not in {"dashboard", "trader"}:
+    APP_ROLE = "dashboard"
+
+
+def broker_execution_enabled() -> bool:
+    return (
+        APP_ROLE == "trader"
+        and TRADING_MODE != "OFF"
+        and bool(AUTO_SEND_ORDERS)
+        and bool(IBKR_PAPER_TRADING)
+    )
 
 # ==============================
 # MARKET HOURS GUARD

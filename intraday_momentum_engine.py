@@ -268,48 +268,52 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def detect_intraday_exit_setup(row: dict[str, Any], position: dict[str, Any] | None = None, now: datetime | None = None) -> dict[str, Any]:
+def detect_intraday_exit_setup(
+    row: dict[str, Any],
+    position: dict[str, Any] | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
     reasons: list[str] = []
     signal = "HOLD"
-    price = _f(row.get("price")) or 0.0
+
+    price = _f(row.get("price"))
     vwap = _f(row.get("vwap"))
     ema9 = _f(row.get("ema9"))
-    buy_price = _f((position or {}).get("buy_price")) or 0.0
-    pnl_pct = ((price - buy_price) / buy_price * 100) if buy_price > 0 else 0
-    if pnl_pct >= 2.0:
-        signal = "TAKE_PROFIT"
-        reasons.append("TP1 +2% reached")
-    if pnl_pct >= 4.0:
-        signal = "EXIT"
-        reasons.append("TP2/runner +4% reached")
-    if vwap and price < vwap:
+    ema20 = _f(row.get("ema20"))
+
+    buy_price = _f((position or {}).get("buy_price"))
+
+    if price and vwap and price < vwap:
         signal = "EXIT"
         reasons.append("VWAP loss")
-    if ema9 and price < ema9:
+
+    if price and ema9 and price < ema9:
         signal = "EXIT"
         reasons.append("EMA9 loss")
-    if row.get("failed_breakout"):
+
+    if ema9 and ema20 and ema9 < ema20:
         signal = "EXIT"
-        reasons.append("failed breakout")
-    if row.get("lower_high_after_breakout"):
-        signal = "EXIT"
-        reasons.append("lower high after breakout")
-    if row.get("momentum_fade"):
-        signal = "EXIT"
-        reasons.append("momentum fade")
-    if row.get("volume_collapse"):
-        signal = "EXIT"
-        reasons.append("volume collapse")
-    if row.get("trailing_stop_hit"):
-        signal = "EXIT"
-        reasons.append("trailing stop hit")
-    if row.get("time_stop"):
-        signal = "EXIT"
-        reasons.append("time stop")
-    if _is_force_eod_exit(now):
+        reasons.append("ema9_below_ema20")
+
+    if price and buy_price:
+        gain_percent = ((price - buy_price) / buy_price) * 100
+
+        if gain_percent >= 4:
+            signal = "EXIT"
+            reasons.append("TP2/runner +4% reached")
+        elif gain_percent >= 2:
+            signal = "EXIT"
+            reasons.append("TP1 +2% reached")
+
+    # Force EOD only if no technical exit was already triggered.
+    if signal == "HOLD" and _is_force_eod_exit(now):
         signal = "FORCE_EOD_EXIT"
         reasons.append("forced end-of-day exit")
-    return {"intraday_exit_signal": signal, "intraday_exit_reasons": reasons}
+
+    return {
+        "intraday_exit_signal": signal,
+        "intraday_exit_reasons": reasons,
+    }
 
 
 def build_dashboard_payload(row: dict[str, Any], position: dict[str, Any] | None = None) -> dict[str, Any]:

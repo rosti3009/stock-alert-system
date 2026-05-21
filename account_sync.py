@@ -9,6 +9,8 @@ import aiosqlite
 
 import config
 from tws_connection_manager import with_shared_ib_sync
+from ibkr_asyncio_compat import ensure_event_loop
+import ib_insync
 import database
 import execution_sync
 from circuit_breaker import record_ibkr_error, reset_ibkr_error_count
@@ -143,6 +145,7 @@ def _account_value(summary: list[dict], tag: str) -> float:
 
 def fetch_account_snapshot_sync() -> dict:
     def _fetch(ib):
+        ensure_event_loop()
         account = None
         accounts = ib.managedAccounts()
         if accounts:
@@ -232,7 +235,18 @@ def fetch_account_snapshot_sync() -> dict:
             "synced_at": synced_at,
         }
 
-    return with_shared_ib_sync(_fetch, readonly=True)
+    try:
+        return with_shared_ib_sync(_fetch, readonly=True)
+    except Exception:
+        ib = ib_insync.IB()
+        try:
+            ib.connect(config.IBKR_HOST, int(config.IBKR_PORT), clientId=int(config.IBKR_CLIENT_ID) + 710, readonly=True, timeout=5)
+            return _fetch(ib)
+        finally:
+            try:
+                ib.disconnect()
+            except Exception:
+                pass
 
 
 async def save_account_snapshot(snapshot: dict) -> None:

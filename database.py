@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import asyncio
 from contextlib import closing
 from datetime import datetime, timezone
 import aiosqlite
@@ -12,6 +13,19 @@ import learning_analytics
 from config import DB_PATH, ACCOUNT_BALANCE, VIRTUAL_TRADING_CAPITAL_USD
 
 log = logging.getLogger(__name__)
+APP_STATE_WRITE_LOCK = asyncio.Lock()
+
+
+async def apply_sqlite_pragmas(db: aiosqlite.Connection) -> None:
+    await db.execute("PRAGMA journal_mode=WAL;")
+    await db.execute("PRAGMA busy_timeout=5000;")
+    await db.execute("PRAGMA synchronous=NORMAL;")
+
+
+def apply_sqlite_pragmas_sync(db: sqlite3.Connection) -> None:
+    db.execute("PRAGMA journal_mode=WAL;")
+    db.execute("PRAGMA busy_timeout=5000;")
+    db.execute("PRAGMA synchronous=NORMAL;")
 
 
 def now_iso() -> str:
@@ -391,6 +405,7 @@ async def _ensure_columns(db: aiosqlite.Connection, table: str, columns: dict[st
 
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
+        await apply_sqlite_pragmas(db)
         await db.execute(CREATE_SIGNALS)
         await db.execute(CREATE_LAST_SIGNALS)
         await db.execute(CREATE_SCAN_RUNS)
@@ -551,6 +566,7 @@ async def record_trade_journal_event(event: dict) -> None:
         raise ValueError("trade journal event_type is required")
 
     async with aiosqlite.connect(DB_PATH) as db:
+        await apply_sqlite_pragmas(db)
         await db.execute(CREATE_TRADE_JOURNAL)
         await db.execute(_trade_journal_insert_sql(), _journal_row(event))
         await db.commit()
@@ -569,6 +585,7 @@ def safe_record_trade_journal_event_sync(event: dict) -> None:
             raise ValueError("trade journal event_type is required")
 
         with closing(sqlite3.connect(DB_PATH)) as db:
+            apply_sqlite_pragmas_sync(db)
             db.execute(CREATE_TRADE_JOURNAL)
             db.execute(_trade_journal_insert_sql(), _journal_row(event))
             db.commit()
@@ -623,6 +640,7 @@ async def get_app_state(key: str, default: str | None = None) -> str | None:
     sql = "SELECT value FROM app_state WHERE key = ?"
 
     async with aiosqlite.connect(DB_PATH) as db:
+        await apply_sqlite_pragmas(db)
         async with db.execute(sql, (key,)) as cursor:
             row = await cursor.fetchone()
 
@@ -636,9 +654,11 @@ async def set_app_state(key: str, value: str) -> None:
     ON CONFLICT(key) DO UPDATE SET value = excluded.value
     """
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(sql, (key, value))
-        await db.commit()
+    async with APP_STATE_WRITE_LOCK:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await apply_sqlite_pragmas(db)
+            await db.execute(sql, (key, value))
+            await db.commit()
 
 
 def set_app_state_sync(key: str, value: str) -> None:
@@ -649,6 +669,7 @@ def set_app_state_sync(key: str, value: str) -> None:
     """
 
     with closing(sqlite3.connect(DB_PATH)) as db:
+        apply_sqlite_pragmas_sync(db)
         db.execute(CREATE_APP_STATE)
         db.execute(sql, (key, value))
         db.commit()
