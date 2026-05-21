@@ -19,7 +19,7 @@ def run_async(coro):
 
 def test_switching_to_intraday_changes_buy_threshold():
     rules = strategy_mode.active_rules(strategy_mode.StrategyMode.INTRADAY_MOMENTUM)
-    assert rules["min_score_to_buy"] == 78
+    assert rules["min_score_to_buy"] == 75
     assert rules["min_score_to_buy"] < strategy_mode.active_rules(strategy_mode.StrategyMode.SWING_DEFAULT)["min_score_to_buy"]
 
 
@@ -27,6 +27,8 @@ def test_switching_to_intraday_changes_max_positions():
     rules = strategy_mode.active_rules(strategy_mode.StrategyMode.INTRADAY_MOMENTUM)
     assert rules["max_open_positions"] == 8
     assert strategy_mode.active_rules(strategy_mode.StrategyMode.SWING_DEFAULT)["max_open_positions"] == config.MAX_OPEN_POSITIONS
+    assert rules["max_daily_trades"] == 15
+    assert rules["max_daily_loss_percent"] == 4.0
 
 
 def test_intraday_blocks_buy_if_intraday_data_missing():
@@ -55,6 +57,7 @@ def test_intraday_mode_does_not_bypass_execution_safety_gates():
         "signal": "BUY",
         "price": 10,
         "intraday_bars_available": True,
+        "intraday_bars": {"1m": [1], "5m": [1], "15m": [1]},
         "intraday_technical_score": 95,
         "relative_volume": 2,
         "volume": 1_000,
@@ -69,6 +72,44 @@ def test_intraday_mode_does_not_bypass_execution_safety_gates():
     assert decision["allowed"] is False
     assert decision["execution_quality"]["blocks_buy"] is True
     assert any("Execution quality" in reason or "Spread too wide" in reason for reason in decision["reasons"])
+
+
+def test_weekly_score_alone_cannot_trigger_intraday_buy():
+    decision = strategy_mode.validate_intraday_buy({
+        "symbol": "AAPL",
+        "weekly_score": 99,
+        "score": 99,
+        "intraday_bars_available": True,
+        "relative_volume": 2.0,
+        "dollar_volume": 10_000_000,
+        "bid": 99.999,
+        "ask": 100.001,
+        "price": 100,
+        "vwap": 100,
+        "setup": "breakout",
+        "trend": "strong bullish",
+    })
+    assert decision["allowed"] is False
+
+
+def test_intraday_score_and_entry_allowed_reaches_execution_safety():
+    decision = strategy_mode.validate_intraday_buy({
+        "symbol": "AAPL",
+        "intraday_bars_available": True,
+        "intraday_technical_score": 90,
+        "intraday_entry_allowed": True,
+        "relative_volume": 2.0,
+        "dollar_volume": 10_000_000,
+        "bid": 99.999,
+        "ask": 100.001,
+        "price": 100.0,
+        "vwap": 99.8,
+        "intraday_bars": {"1m": [1], "5m": [1], "15m": [1]},
+        "setup": "breakout momentum opening range",
+        "trend": "strong bullish",
+    })
+    assert decision["score"] >= 75
+    assert "execution_quality" in decision
 
 
 def test_intraday_sell_logic_uses_intraday_exits():
@@ -138,21 +179,21 @@ def test_aggressive_learning_profile_increases_capital_and_max_positions():
     try:
         config.IBKR_PAPER_TRADING = True
         config.IBKR_ENABLE_REAL_TRADING = False
-        config.PAPER_TRAINING_PROFILE = "AGGRESSIVE_LEARNING"
+        config.PAPER_TRAINING_PROFILE = "INTRADAY_AGGRESSIVE"
 
         rules = strategy_mode.intraday_rules()
         profile = config.active_paper_training_profile_rules()
 
         assert config.effective_virtual_trading_capital() == 500000.0
-        assert profile["profile"] == "AGGRESSIVE_LEARNING"
+        assert profile["profile"] == "INTRADAY_AGGRESSIVE"
         assert rules["max_open_positions"] == 8
-        assert rules["position_size_factor"] == 0.5
-        assert rules["min_score_to_buy"] == 78
-        assert rules["min_relative_volume"] == 1.2
+        assert rules["min_score_to_buy"] == 75
+        assert rules["risk_per_trade_percent"] == 1.0
+        assert rules["min_relative_volume"] == 1.5
         assert rules["min_dollar_volume"] == 3000000.0
         assert rules["max_daily_trades"] == 15
         assert rules["max_consecutive_losses"] == 4
-        assert rules["max_daily_loss_percent"] == 3.0
+        assert rules["max_daily_loss_percent"] == 4.0
     finally:
         for key, value in original.items():
             setattr(config, key, value)
@@ -191,15 +232,14 @@ def test_strategy_payload_exposes_effective_training_profile():
     try:
         config.IBKR_PAPER_TRADING = True
         config.IBKR_ENABLE_REAL_TRADING = False
-        config.PAPER_TRAINING_PROFILE = "AGGRESSIVE_LEARNING"
+        config.PAPER_TRAINING_PROFILE = "INTRADAY_AGGRESSIVE"
 
         payload = strategy_mode.strategy_mode_payload(strategy_mode.StrategyMode.INTRADAY_TECHNICAL)
 
-        assert payload["active_training_profile"] == "AGGRESSIVE_LEARNING"
+        assert payload["active_training_profile"] == "INTRADAY_AGGRESSIVE"
         assert payload["profile_rules"]["paper_capital"] == 500000.0
         assert payload["effective_max_positions"] == 8
-        assert payload["effective_score_threshold"] == 78
-        assert payload["effective_risk_factor"] == 0.5
+        assert payload["effective_score_threshold"] == 75
         assert payload["effective_max_daily_trades"] == 15
         assert "market_hours_guard" in payload["profile_rules"]["hard_protections_kept"]
         assert payload["force_exit_before_close"]["enabled"] is True

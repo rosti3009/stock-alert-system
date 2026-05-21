@@ -69,12 +69,14 @@ def intraday_rules() -> dict[str, Any]:
         "allow_overnight": bool(getattr(config, "INTRADAY_ALLOW_OVERNIGHT", False)),
         "require_vwap_when_available": True,
         "required_timeframes": ["1m", "5m", "15m"],
+        "max_open_intraday_positions": int(getattr(config, "INTRADAY_MAX_OPEN_POSITIONS", 3)),
     }
     profile_rules = config.active_paper_training_profile_rules()
     rules.update(profile_rules.get("intraday") or {})
     rules["training_profile"] = profile_rules["profile"]
     rules["hard_protections_kept"] = profile_rules["hard_protections_kept"]
     rules["allow_overnight"] = False
+    rules["profile_name"] = rules.get("training_profile")
     return rules
 
 
@@ -182,6 +184,8 @@ def validate_intraday_buy(row: dict[str, Any]) -> dict[str, Any]:
 
     if not has_intraday_bars(row):
         reasons.append("Intraday BUY blocked: fresh 1m/5m/15m bars are unavailable")
+    if row.get("intraday_entry_allowed") is False:
+        reasons.append("intraday_entry_allowed=false")
 
     score, score_reasons = calculate_intraday_technical_score(row)
     if score < rules["min_score_to_buy"]:

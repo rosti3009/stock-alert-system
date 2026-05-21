@@ -51,7 +51,25 @@ def test_target_profit_range_creates_take_profit():
     row["price"] = 103
     exit_payload = ime.detect_intraday_exit_setup(row, position={"buy_price": 100})
     assert exit_payload["intraday_exit_signal"] in {"TAKE_PROFIT", "EXIT"}
-    assert any("2%-4% target reached" in r for r in exit_payload["intraday_exit_reasons"])
+    assert any("TP1 +2% reached" in r for r in exit_payload["intraday_exit_reasons"])
+
+
+def test_runner_tp2_reaches_exit():
+    row = base_row()
+    row["price"] = 104.5
+    exit_payload = ime.detect_intraday_exit_setup(row, position={"buy_price": 100})
+    assert exit_payload["intraday_exit_signal"] == "EXIT"
+    assert any("TP2/runner +4% reached" in r for r in exit_payload["intraday_exit_reasons"])
+
+
+def test_invalid_spread_and_low_relative_volume_blocks_entry():
+    row = base_row()
+    row["relative_volume"] = 1.1
+    row["spread_percent"] = 3.0
+    payload = ime.detect_intraday_entry_setup(row)
+    assert payload["entry_allowed"] is False
+    assert "relative volume below minimum" in payload["aggressive_rejection_reasons"]
+    assert "spread too wide" in payload["aggressive_rejection_reasons"]
 
 
 def test_forced_eod_exit():

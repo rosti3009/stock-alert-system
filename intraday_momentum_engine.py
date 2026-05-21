@@ -5,7 +5,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 REQUIRED_TIMEFRAMES = ("1m", "5m", "15m")
-BUY_THRESHOLD = 70
+BUY_THRESHOLD = 75
 
 
 def validate_required_intraday_bars(row: dict[str, Any]) -> tuple[bool, list[str]]:
@@ -90,13 +90,39 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
     bars_ok, missing = validate_required_intraday_bars(row)
     score, score_reasons, _ = calculate_intraday_momentum_score(row)
     rejection_reasons = generate_rejection_reasons(row, score, missing if not bars_ok else [])
-    allowed = bars_ok and score >= BUY_THRESHOLD
+    intraday_entry_allowed = bool(row.get("intraday_entry_allowed", True))
+    allowed = bars_ok and intraday_entry_allowed and score >= BUY_THRESHOLD
+    if not intraday_entry_allowed:
+        rejection_reasons.append("intraday_entry_allowed=false")
+    rv = _f(row.get("relative_volume")) or 0.0
+    dv = _f(row.get("dollar_volume")) or 0.0
+    spread = _f(row.get("spread_percent"))
+    if rv < 1.5:
+        rejection_reasons.append("relative volume below minimum")
+        allowed = False
+    if dv < 3_000_000:
+        rejection_reasons.append("dollar volume below minimum")
+        allowed = False
+    if spread is not None and spread > 2.5:
+        rejection_reasons.append("spread too wide")
+        allowed = False
     return {
         "entry_allowed": allowed,
         "intraday_signal": "BUY" if allowed else "REJECTED",
         "intraday_momentum_score": score,
         "score_reasons": score_reasons,
         "rejection_reasons": rejection_reasons,
+        "active_profile": "INTRADAY_AGGRESSIVE",
+        "aggressive_entry_allowed": allowed,
+        "aggressive_rejection_reasons": rejection_reasons,
+        "expected_stop_percent": min(2.0, max(0.8, _f(row.get("atr_stop_percent")) or 1.2)),
+        "expected_tp1_percent": 2.0,
+        "expected_tp2_percent": 4.0,
+        "expected_position_size_percent": 12.0,
+        "liquidity_quality_score": 100 if dv >= 5_000_000 else 70 if dv >= 3_000_000 else 20,
+        "spread_quality_score": 100 if (spread is not None and spread <= 1.0) else 70 if (spread is not None and spread <= 2.5) else 20,
+        "volume_expansion_score": min(100, int((rv / 2.0) * 100)),
+        "intraday_aggressive_score": score,
     }
 
 
@@ -108,9 +134,12 @@ def detect_intraday_exit_setup(row: dict[str, Any], position: dict[str, Any] | N
     ema9 = _f(row.get("ema9"))
     buy_price = _f((position or {}).get("buy_price")) or 0.0
     pnl_pct = ((price - buy_price) / buy_price * 100) if buy_price > 0 else 0
-    if 2.0 <= pnl_pct <= 4.0:
+    if pnl_pct >= 2.0:
         signal = "TAKE_PROFIT"
-        reasons.append("2%-4% target reached")
+        reasons.append("TP1 +2% reached")
+    if pnl_pct >= 4.0:
+        signal = "EXIT"
+        reasons.append("TP2/runner +4% reached")
     if vwap and price < vwap:
         signal = "EXIT"
         reasons.append("VWAP loss")

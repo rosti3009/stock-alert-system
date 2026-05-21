@@ -531,7 +531,9 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
         if not symbol:
             continue
 
-        if signal == "BUY":
+        is_buy_candidate = (signal == "BUY") or (strategy_mode.is_intraday_mode(active_strategy_mode) and bool(row.get("entry_allowed")))
+
+        if is_buy_candidate:
             if not market_is_open:
                 reason = market_hours.get("reason") or "US regular market is closed"
                 log.info("AUTO BUY skipped for %s — %s", symbol, reason)
