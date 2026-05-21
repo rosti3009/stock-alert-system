@@ -104,3 +104,39 @@ def test_intraday_open_positions_are_prioritized_and_scan_is_bounded(tmp_path, m
     finally:
         main._latest.clear()
         database.DB_PATH = original_db_path
+
+
+def test_dynamic_universe_loaded_once_per_scan_symbol_selection(monkeypatch):
+    calls = {"count": 0}
+
+    def fake_cached_symbols(limit=None, force_refresh=False):
+        calls["count"] += 1
+        return ["AAA", "BBB", "CCC"]
+
+    async def fake_mode():
+        return strategy_mode.StrategyMode.SWING_DEFAULT
+
+    async def fake_priority_symbols(limit=200):
+        return []
+
+    async def fake_open_positions():
+        return []
+
+    async def fake_get_app_state(key, default="0"):
+        return "0"
+
+    async def fake_set_app_state(key, value):
+        return None
+
+    monkeypatch.setattr(config, "USE_DYNAMIC_SYMBOLS", True)
+    monkeypatch.setattr(main, "get_cached_symbols", fake_cached_symbols)
+    monkeypatch.setattr(strategy_mode, "get_strategy_mode", fake_mode)
+    monkeypatch.setattr(database, "get_priority_symbols", fake_priority_symbols)
+    monkeypatch.setattr(database, "get_open_positions", fake_open_positions)
+    monkeypatch.setattr(database, "get_app_state", fake_get_app_state)
+    monkeypatch.setattr(database, "set_app_state", fake_set_app_state)
+
+    symbols = run_async(main.get_scan_symbols())
+
+    assert symbols
+    assert calls["count"] == 1

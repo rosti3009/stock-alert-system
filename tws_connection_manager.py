@@ -4,17 +4,18 @@ import asyncio
 import logging
 import threading
 from datetime import datetime, timezone
-from typing import Callable, TypeVar
+from typing import Any, Callable, TypeVar
 
-from ib_insync import IB
+import ib_insync
 
 import config
+from ibkr_asyncio_compat import ensure_event_loop
 
 log = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-_ib: IB | None = None
+_ib: Any | None = None
 _lock = threading.RLock()
 _last_heartbeat_at: datetime | None = None
 
@@ -23,8 +24,8 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _create_ib() -> IB:
-    ib = IB()
+def _create_ib() -> Any:
+    ib = ib_insync.IB()
 
     def _on_connected() -> None:
         global _last_heartbeat_at
@@ -43,9 +44,13 @@ def _create_ib() -> IB:
     return ib
 
 
-def get_ib_sync(readonly: bool = False) -> IB:
+def get_ib_sync(readonly: bool = False) -> Any:
     global _ib, _last_heartbeat_at
+    ensure_event_loop()
     with _lock:
+        if _ib is not None and _ib.__class__ is not ib_insync.IB:
+            _ib = None
+
         if _ib is None:
             _ib = _create_ib()
 
@@ -64,7 +69,7 @@ def get_ib_sync(readonly: bool = False) -> IB:
         return _ib
 
 
-def with_shared_ib_sync(fn: Callable[[IB], T], readonly: bool = False) -> T:
+def with_shared_ib_sync(fn: Callable[[Any], T], readonly: bool = False) -> T:
     ib = get_ib_sync(readonly=readonly)
     try:
         result = fn(ib)
@@ -79,7 +84,7 @@ def with_shared_ib_sync(fn: Callable[[IB], T], readonly: bool = False) -> T:
         return result
 
 
-def reconnect_ib_sync(readonly: bool = False) -> IB:
+def reconnect_ib_sync(readonly: bool = False) -> Any:
     with _lock:
         if _ib and _ib.isConnected():
             try:
