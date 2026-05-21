@@ -415,6 +415,86 @@ def scanner_cadence_for_mode(mode: strategy_mode.StrategyMode | str | None) -> d
     }
 
 
+def _enrich_intraday_snapshot(result: dict, intraday_bars: dict[str, list[dict]]) -> dict:
+    bars_1m = intraday_bars.get("1m") or []
+    bars_5m = intraday_bars.get("5m") or []
+    bars_15m = intraday_bars.get("15m") or []
+
+    closes_1m = [float(b.get("close") or 0) for b in bars_1m if b.get("close") is not None]
+    volumes_1m = [float(b.get("volume") or 0) for b in bars_1m if b.get("volume") is not None]
+    highs_1m = [float(b.get("high") or 0) for b in bars_1m if b.get("high") is not None]
+    lows_1m = [float(b.get("low") or 0) for b in bars_1m if b.get("low") is not None]
+
+    vwap = None
+    if bars_1m:
+        total_pv = 0.0
+        total_vol = 0.0
+        for bar in bars_1m:
+            h = float(bar.get("high") or 0)
+            l = float(bar.get("low") or 0)
+            c = float(bar.get("close") or 0)
+            v = float(bar.get("volume") or 0)
+            typical = (h + l + c) / 3 if (h or l or c) else 0.0
+            total_pv += typical * v
+            total_vol += v
+        if total_vol > 0:
+            vwap = round(total_pv / total_vol, 4)
+
+    ema9 = None
+    if len(closes_1m) >= 9:
+        alpha9 = 2 / (9 + 1)
+        ema9_val = closes_1m[0]
+        for close in closes_1m[1:]:
+            ema9_val = (close * alpha9) + (ema9_val * (1 - alpha9))
+        ema9 = round(ema9_val, 4)
+
+    ema20 = None
+    closes_5m_values = [float(b.get("close") or 0) for b in bars_5m if b.get("close") is not None]
+    if len(closes_5m_values) >= 20:
+        alpha20 = 2 / (20 + 1)
+        ema20_val = closes_5m_values[0]
+        for close in closes_5m_values[1:]:
+            ema20_val = (close * alpha20) + (ema20_val * (1 - alpha20))
+        ema20 = round(ema20_val, 4)
+
+    relative_volume = None
+    if len(volumes_1m) >= 10:
+        recent = sum(volumes_1m[-5:])
+        baseline_samples = volumes_1m[:-5]
+        baseline = (sum(baseline_samples) / len(baseline_samples)) if baseline_samples else 0
+        if baseline > 0:
+            relative_volume = round((recent / 5) / baseline, 4)
+
+    opening_range_high = round(max(highs_1m[:15]), 4) if len(highs_1m) >= 15 else None
+    range_expansion = bool(highs_1m and lows_1m and ((max(highs_1m[-5:]) - min(lows_1m[-5:])) > (max(highs_1m[:5]) - min(lows_1m[:5])))) if len(highs_1m) >= 10 and len(lows_1m) >= 10 else False
+    consecutive_green_candles = 0
+    for bar in reversed(bars_1m):
+        if float(bar.get("close") or 0) > float(bar.get("open") or 0):
+            consecutive_green_candles += 1
+        else:
+            break
+
+    price = float(result.get("price") or result.get("current_price") or 0)
+    volume_confirmation = bool(relative_volume and relative_volume >= 1.5)
+    micro_pullback_continuation = bool(ema9 and price and price >= ema9)
+    volatility_expansion = bool(range_expansion)
+
+    return {
+        "vwap": vwap,
+        "ema9": ema9,
+        "ema20": ema20,
+        "relative_volume": relative_volume,
+        "opening_range_high": opening_range_high,
+        "consecutive_green_candles": consecutive_green_candles,
+        "range_expansion": range_expansion,
+        "volume_confirmation": volume_confirmation,
+        "micro_pullback_continuation": micro_pullback_continuation,
+        "volatility_expansion": volatility_expansion,
+        "intraday_take_profit_percent": 3.0,
+        "intraday_force_exit_before_close": bool(strategy_mode.force_exit_before_close_status().get("active")),
+    }
+
+
 def _load_scan_universe() -> list[str]:
     if config.USE_DYNAMIC_SYMBOLS:
         all_symbols = load_nasdaq_symbols(limit=None)
@@ -735,6 +815,7 @@ async def _scan_symbol_inner(symbol: str) -> dict:
                 intraday_bars[timeframe] = bars
         result["intraday_bars"] = intraday_bars
         result["intraday_bars_available"] = bool(intraday_bars)
+        result.update(_enrich_intraday_snapshot(result, intraday_bars))
         momentum_payload = intraday_momentum_engine.build_dashboard_payload(result)
         result.update(momentum_payload)
         result["intraday_technical_score"] = momentum_payload["intraday_momentum_score"]

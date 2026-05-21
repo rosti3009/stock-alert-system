@@ -191,11 +191,56 @@ def fetch_stock_data(symbol: str) -> dict | None:
         return None
 
 def fetch_intraday_bars(symbol: str, timeframe: str = "5m") -> list[dict] | None:
-    """Architecture hook for fresh 1m/5m/15m bars.
+    symbol = _clean_symbol(symbol)
+    timeframe = str(timeframe or "5m").strip().lower()
+    multiplier_map = {"1m": 1, "5m": 5, "15m": 15}
+    multiplier = multiplier_map.get(timeframe)
+    if not symbol or multiplier is None:
+        return None
 
-    Providers can implement this later. Returning None is intentional: intraday
-    strategy mode must block BUYs instead of silently falling back to daily/swing
-    data when fresh intraday bars are unavailable.
-    """
-    _ = (_clean_symbol(symbol), timeframe)
-    return None
+    if API_PROVIDER.strip().lower() not in ("massive", "polygon"):
+        return None
+    if not API_KEY:
+        return None
+
+    url = f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/{multiplier}/minute"
+    end_ms = int(time.time() * 1000)
+    # ~3.5 sessions of bars gives stable RVOL baselines while staying bounded.
+    start_ms = end_ms - int(3.5 * 24 * 60 * 60 * 1000)
+
+    try:
+        response = requests.get(
+            f"{url}/{start_ms}/{end_ms}",
+            params={
+                "adjusted": "true",
+                "sort": "asc",
+                "limit": 5000,
+                "apiKey": API_KEY,
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+        if response.status_code in (401, 403, 429):
+            return None
+        response.raise_for_status()
+        payload = response.json()
+    except requests.exceptions.RequestException:
+        return None
+
+    results = payload.get("results") or []
+    if not results:
+        return None
+
+    bars: list[dict] = []
+    for item in results:
+        try:
+            bars.append({
+                "timestamp": int(item.get("t")),
+                "open": float(item.get("o")),
+                "high": float(item.get("h")),
+                "low": float(item.get("l")),
+                "close": float(item.get("c")),
+                "volume": float(item.get("v") or 0),
+            })
+        except (TypeError, ValueError):
+            continue
+    return bars or None
