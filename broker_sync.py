@@ -4,7 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 
 import ib_insync
-from ib_insync import IB  # compatibility for tests patching broker_sync.IB
+from ib_insync import IB
 
 import config
 from tws_connection_manager import with_shared_ib_sync
