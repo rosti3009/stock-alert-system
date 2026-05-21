@@ -179,3 +179,94 @@ def submit_sell_order(symbol, quantity, limit_price=None, reason=None, metadata=
 
 def flatten_all(reason="Emergency flatten all"):
     return {"ok": True, "closed": [], "reason": reason, "timestamp": _ts()}
+
+
+ORDER_STATUS_MAP = {
+    "PENDINGSUBMIT": "PENDING",
+    "PRESUBMITTED": "SUBMITTED",
+    "SUBMITTED": "SUBMITTED",
+    "PARTIAL": "PARTIAL",
+    "FILLED": "FILLED",
+    "CANCELLED": "CANCELLED",
+    "APICANCELLED": "CANCELLED",
+    "INACTIVE": "REJECTED",
+    "REJECTED": "REJECTED",
+    "EXPIRED": "EXPIRED",
+    "CLOSED": "CLOSED",
+}
+
+
+def normalize_order_status(status: str | None, filled: float = 0.0, remaining: float = 0.0) -> str:
+    key = str(status or "").strip().upper()
+    mapped = ORDER_STATUS_MAP.get(key, "PENDING")
+    if filled > 0 and remaining > 0:
+        return "PARTIAL"
+    if filled > 0 and remaining <= 0:
+        return "FILLED"
+    return mapped
+
+
+def poll_open_orders(client: IBKRClient | None = None) -> list[dict]:
+    engine = TradeEngine()
+    c = client or engine.client
+    if hasattr(c, 'get_open_orders'):
+        return list(c.get_open_orders() or [])
+    return []
+
+
+def detect_partial_fills(order: dict) -> dict:
+    filled = float(order.get('filled_quantity') or order.get('filled') or 0.0)
+    total = float(order.get('quantity') or order.get('total_quantity') or 0.0)
+    remaining = float(order.get('remaining_quantity') or order.get('remaining') or max(total-filled,0.0))
+    is_partial = filled > 0 and remaining > 0
+    return {**order, 'filled_quantity': filled, 'remaining_quantity': remaining, 'partial_fill_quantity': filled if is_partial else 0.0, 'status': normalize_order_status(order.get('status'), filled, remaining)}
+
+
+def sync_order_statuses(open_orders: list[dict]) -> list[dict]:
+    synced=[]
+    for o in open_orders:
+        normalized = detect_partial_fills(o)
+        database.safe_record_trade_journal_event_sync({
+            'symbol': normalized.get('symbol'), 'event_type': 'ORDER_STATUS_SYNC', 'decision': normalized.get('status'),
+            'reason': 'broker_source_of_truth_sync', 'source_module': 'trade_engine', 'price': normalized.get('avg_fill_price') or normalized.get('limit_price'),
+            'quantity': normalized.get('filled_quantity') or normalized.get('quantity'), 'raw_payload': normalized,
+        })
+        synced.append(normalized)
+    return synced
+
+
+def sync_executions(executions: list[dict]) -> list[dict]:
+    out=[]
+    for ex in executions:
+        row = dict(ex)
+        row['execution_timestamp'] = row.get('time') or _ts()
+        row['average_fill_price'] = float(row.get('price') or 0.0)
+        database.safe_record_trade_journal_event_sync({
+            'symbol': row.get('symbol'), 'event_type': 'EXECUTION_SYNC', 'decision': 'FILLED', 'reason': 'broker_execution_sync', 'source_module': 'trade_engine',
+            'price': row.get('average_fill_price'), 'quantity': row.get('shares') or row.get('quantity'), 'raw_payload': row,
+        })
+        out.append(row)
+    return out
+
+
+def reconcile_open_orders(open_orders: list[dict], stale_after_seconds: int = 300) -> dict:
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    reconciled = sync_order_statuses(open_orders)
+    stale=[]; rejected=[]; cancelled=[]; partial=[]
+    for o in reconciled:
+        if o.get('status') == 'PARTIAL':
+            partial.append(o)
+        if o.get('status') == 'REJECTED':
+            rejected.append(o)
+        if o.get('status') == 'CANCELLED':
+            cancelled.append(o)
+        ts = o.get('updated_at') or o.get('timestamp')
+        if ts:
+            try:
+                age=(now-datetime.fromisoformat(str(ts).replace('Z','+00:00'))).total_seconds()
+                if age > stale_after_seconds and o.get('status') in {'PENDING','SUBMITTED','PARTIAL'}:
+                    stale.append(o)
+            except Exception:
+                pass
+    return {'open_orders': reconciled, 'stale_orders': stale, 'rejected_orders': rejected, 'cancelled_orders': cancelled, 'partial_fills': partial}
