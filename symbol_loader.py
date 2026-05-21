@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+
 import requests
 
 NASDAQ_LIST_URL = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
@@ -85,7 +88,15 @@ def _is_bad_symbol(symbol: str, name: str = "") -> bool:
     return False
 
 
-def load_nasdaq_symbols(limit: int | None = None) -> list[str]:
+
+
+_SYMBOL_CACHE: list[str] = []
+_SYMBOL_CACHE_TS: float = 0.0
+_SYMBOL_CACHE_TTL_SECONDS = 60 * 60
+_CACHE_LOCK = threading.RLock()
+
+
+def _load_symbols_uncached(limit: int | None = None) -> list[str]:
     symbols: list[str] = []
 
     try:
@@ -129,5 +140,25 @@ def load_nasdaq_symbols(limit: int | None = None) -> list[str]:
     if limit:
         clean = clean[:limit]
 
-    print(f"[symbol_loader] Loaded {len(clean)} symbols")
     return clean
+
+def get_cached_symbols(limit: int | None = None, force_refresh: bool = False, ttl_seconds: int | None = None) -> list[str]:
+    ttl = _SYMBOL_CACHE_TTL_SECONDS if ttl_seconds is None else max(0, int(ttl_seconds))
+    now = time.time()
+
+    with _CACHE_LOCK:
+        cache_fresh = bool(_SYMBOL_CACHE) and (ttl <= 0 or (now - _SYMBOL_CACHE_TS) < ttl)
+        if not force_refresh and cache_fresh:
+            symbols = list(_SYMBOL_CACHE)
+            return symbols[:limit] if limit else symbols
+
+        symbols = _load_symbols_uncached(limit=None)
+        globals()["_SYMBOL_CACHE"] = list(symbols)
+        globals()["_SYMBOL_CACHE_TS"] = now
+
+    print(f"[symbol_loader] Loaded {len(symbols)} symbols")
+    return symbols[:limit] if limit else list(symbols)
+
+
+def load_nasdaq_symbols(limit: int | None = None, force_refresh: bool = False) -> list[str]:
+    return get_cached_symbols(limit=limit, force_refresh=force_refresh)
