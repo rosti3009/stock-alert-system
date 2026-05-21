@@ -285,11 +285,11 @@ def detect_intraday_exit_setup(
 
     if price and vwap and price < vwap:
         signal = "EXIT"
-        reasons.append("vwap_loss")
+        reasons.append("VWAP loss")
 
     if price and ema9 and price < ema9:
         signal = "EXIT"
-        reasons.append("ema9_loss")
+        reasons.append("EMA9 loss")
 
     if ema9 and ema20 and ema9 < ema20:
         signal = "EXIT"
@@ -300,10 +300,10 @@ def detect_intraday_exit_setup(
 
         if gain_percent >= 4:
             signal = "EXIT"
-            reasons.append("take_profit_4_percent")
+            reasons.append("TP2/runner +4% reached")
         elif gain_percent >= 2:
             signal = "EXIT"
-            reasons.append("take_profit_2_percent")
+            reasons.append("TP1 +2% reached")
 
     # Force EOD only if no technical exit was already triggered.
     if signal == "HOLD" and _is_force_eod_exit(now):
