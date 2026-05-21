@@ -26,6 +26,7 @@ def calculate_intraday_momentum_score(row: dict[str, Any]) -> tuple[int, list[st
     dollar_volume = _f(row.get("dollar_volume")) or 0.0
     opening_range_high = _f(row.get("opening_range_high"))
     gap_percent = _f(row.get("gap_percent")) or 0.0
+    intraday_change = _f(row.get("intraday_price_change_percent") or row.get("price_change_percent") or row.get("change_percent")) or 0.0
     breakout = str(row.get("setup") or row.get("intraday_setup") or "").lower()
 
     momentum_accel = _f(row.get("momentum_acceleration") or row.get("momentum_acceleration_score") or row.get("momentum_delta"))
@@ -38,8 +39,19 @@ def calculate_intraday_momentum_score(row: dict[str, Any]) -> tuple[int, list[st
         reasons.append("EMA9 above EMA20")
         components["ema9_above_ema20"] = True
     if rv and rv >= 1.5:
-        score += 16 if rv >= 2.0 else 12
+        if rv >= 3.0:
+            score += 24
+            reasons.append("relative volume >= 3.0")
+        elif rv >= 2.0:
+            score += 18
+            reasons.append("relative volume >= 2.0")
+        else:
+            score += 12
         reasons.append("relative volume surge")
+    if row.get("volume_expansion") is True:
+        score += 12
+        reasons.append("volume expansion")
+        components["volume_expansion"] = True
     if momentum_accel and momentum_accel > 0:
         score += 14 if momentum_accel >= 2 else 10
         reasons.append("momentum acceleration positive")
@@ -60,6 +72,10 @@ def calculate_intraday_momentum_score(row: dict[str, Any]) -> tuple[int, list[st
     if int(row.get("consecutive_green_candles") or 0) >= 3:
         score += 8
         reasons.append("consecutive strong green candles")
+    if bool(row.get("positive_candle_momentum")):
+        score += 10
+        reasons.append("positive candle momentum")
+        components["positive_candle_momentum"] = True
     if row.get("range_expansion") is True:
         score += 8
         reasons.append("range expansion")
@@ -71,6 +87,10 @@ def calculate_intraday_momentum_score(row: dict[str, Any]) -> tuple[int, list[st
         reasons.append("liquidity quality")
     if gap_percent > 0:
         score += 3
+    if intraday_change > 2.5:
+        score += 10
+        reasons.append("intraday price change > 2.5%")
+        components["intraday_price_change_gt_2_5"] = True
 
     components["momentum_acceleration_score"] = int(min(100, max(0, (momentum_accel or 0.0) * 20)))
     components["volume_expansion_score"] = min(100, int(((rv or 0.0) / 2.0) * 100))
@@ -101,6 +121,9 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
     bars_ok, missing = validate_required_intraday_bars(row)
     score, score_reasons, components = calculate_intraday_momentum_score(row)
     rejection_reasons = generate_rejection_reasons(row, score, missing if not bars_ok else [])
+    vwap = _f(row.get("vwap"))
+    ema9 = _f(row.get("ema9"))
+    ema20 = _f(row.get("ema20"))
     intraday_entry_allowed = bool(row.get("intraday_entry_allowed", True))
     allowed = bars_ok and intraday_entry_allowed and score >= BUY_THRESHOLD
     if not intraday_entry_allowed:
@@ -108,6 +131,13 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
     rv = _f(row.get("relative_volume")) or 0.0
     dv = _f(row.get("dollar_volume")) or 0.0
     spread = _f(row.get("spread_percent"))
+    stale_data = bool(row.get("stale_data", False))
+    low_liquidity = bool(row.get("low_liquidity", False))
+    bad_spread_flag = bool(row.get("bad_spread", False))
+    no_overnight = bool(row.get("no_overnight", False))
+    duplicate_order = bool(row.get("duplicate_order", False))
+    market_closed = bool(row.get("market_closed", False))
+    spread_quality_missing = row.get("spread_quality_score") is None
     if rv < 1.7:
         rejection_reasons.append("relative volume below minimum")
         allowed = False
@@ -117,6 +147,10 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
     if spread is not None and spread > 2.5:
         rejection_reasons.append("spread too wide")
         allowed = False
+    if spread is None or spread_quality_missing:
+        rejection_reasons.append("spread_quality_missing")
+    if row.get("volume_expansion") is None:
+        rejection_reasons.append("volume_expansion_missing")
     execution_safety_ok = bool(row.get("execution_safety_passes", True))
     broker_sync_healthy = bool(row.get("broker_sync_healthy", True))
     reconciliation_healthy = bool(row.get("reconciliation_healthy", True))
@@ -133,6 +167,30 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
     if not circuit_breaker_clear:
         rejection_reasons.append("circuit breaker active")
         allowed = False
+    if stale_data:
+        rejection_reasons.append("stale data")
+        allowed = False
+    if low_liquidity:
+        rejection_reasons.append("low liquidity")
+        allowed = False
+    if bad_spread_flag:
+        rejection_reasons.append("bad spread")
+        allowed = False
+    if market_closed:
+        rejection_reasons.append("market closed")
+        allowed = False
+    if duplicate_order:
+        rejection_reasons.append("duplicate order")
+        allowed = False
+    if no_overnight:
+        rejection_reasons.append("no overnight")
+        allowed = False
+    technical_fallback_mode = (
+        rv >= 2.0
+        and bool(components.get("vwap_reclaim_signal"))
+        and bool(components.get("ema9_above_ema20"))
+        and (bool(components.get("momentum_acceleration_positive")) or bool(components.get("positive_candle_momentum")))
+    )
     breakout_allowed = (
         score >= BUY_THRESHOLD
         and
@@ -148,6 +206,19 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
         if allowed:
             score = max(score, BUY_THRESHOLD + 10)
             score_reasons.append("aggressive breakout override")
+    if (not bars_ok) and technical_fallback_mode:
+        rejection_reasons = [r for r in rejection_reasons if not r.startswith("Intraday bars unavailable")]
+        allowed = intraday_entry_allowed and score >= BUY_THRESHOLD
+        score_reasons.append("technical fallback mode")
+
+    if score < BUY_THRESHOLD:
+        rejection_reasons.append("score_below_threshold")
+    if vwap is None:
+        rejection_reasons.append("missing_vwap")
+    if not bool(components.get("ema9_above_ema20")):
+        rejection_reasons.append("ema_not_aligned")
+    if not ("breakout" in str(row.get("setup") or row.get("intraday_setup") or "").lower() or row.get("range_expansion") is True):
+        rejection_reasons.append("weak_breakout")
     breakout_strength = min(100, int((score * 0.5) + (components.get("volume_expansion_score", 0) * 0.5)))
     regime = str(row.get("market_regime") or row.get("regime") or "").upper()
     regime_override_active = (
@@ -167,6 +238,7 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
         allowed = False
     if regime_override_active:
         allowed = allowed or (bars_ok and intraday_entry_allowed)
+    rejection_reasons = list(dict.fromkeys(rejection_reasons))
     return {
         "entry_allowed": allowed,
         "intraday_signal": "BUY" if allowed else "REJECTED",
@@ -174,8 +246,8 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
         "score_reasons": score_reasons,
         "rejection_reasons": rejection_reasons,
         "active_profile": "INTRADAY_AGGRESSIVE",
-        "aggressive_entry_allowed": allowed,
-        "aggressive_rejection_reasons": rejection_reasons,
+        "aggressive_entry_allowed": bool(allowed),
+        "aggressive_rejection_reasons": rejection_reasons if rejection_reasons else [],
         "momentum_acceleration_score": components.get("momentum_acceleration_score", 0),
         "breakout_strength_score": breakout_strength,
         "vwap_reclaim_signal": components.get("vwap_reclaim_signal", False),
