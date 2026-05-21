@@ -2,7 +2,7 @@ from __future__ import annotations
 import asyncio, json
 from datetime import datetime, timezone
 import config
-from ib_insync import IB
+from tws_connection_manager import with_shared_ib_sync
 
 BROKER_SYNC_CLIENT_ID_OFFSET = 700
 
@@ -21,11 +21,9 @@ def _s(v):
     return "" if v is None else str(v)
 
 def fetch_broker_snapshot_sync() -> dict:
-    loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
-    ib = IB(); errors=[]
+    errors=[]
     snapshot={"ok":False,"connected":False,"account":None,"synced_at":now_iso(),"equity":{"net_liquidation":0.0,"total_cash":0.0,"available_funds":0.0,"buying_power":0.0,"currency":"USD"},"positions":[],"open_orders":[],"executions":[],"errors":errors}
-    try:
-        ib.connect(config.IBKR_HOST, int(config.IBKR_PORT), clientId=int(config.IBKR_CLIENT_ID)+BROKER_SYNC_CLIENT_ID_OFFSET, timeout=10, readonly=True)
+    def _fetch(ib):
         snapshot["connected"]=ib.isConnected()
         if not snapshot["connected"]:
             errors.append("IBKR connect returned disconnected state"); return snapshot
@@ -37,10 +35,10 @@ def fetch_broker_snapshot_sync() -> dict:
             if row and getattr(row,'currency',None): snapshot["equity"]["currency"]=_s(row.currency)
         port={}
         for p in ib.portfolio() or []:
-            sym=_s(getattr(p.contract,'symbol',None)).upper();
+            sym=_s(getattr(p.contract,'symbol',None)).upper()
             if sym: port[sym]=p
         for pos in ib.positions() or []:
-            sym=_s(getattr(pos.contract,'symbol',None)).upper();
+            sym=_s(getattr(pos.contract,'symbol',None)).upper()
             if not sym: continue
             p=port.get(sym)
             snapshot["positions"].append({"symbol":sym,"quantity":_f(pos.position),"avg_cost":_f(pos.avgCost),"market_price":_f(getattr(p,'marketPrice',None)),"market_value":_f(getattr(p,'marketValue',None)),"unrealized_pnl":_f(getattr(p,'unrealizedPNL',None)),"realized_pnl":_f(getattr(p,'realizedPNL',None)),"account":_s(getattr(pos,'account',None) or snapshot['account'])})
@@ -53,15 +51,12 @@ def fetch_broker_snapshot_sync() -> dict:
             snapshot["executions"].append({"execution_id":_s(ex.execId),"order_id":_i(ex.orderId),"perm_id":_i(ex.permId),"symbol":_s(ex.symbol).upper(),"side":_s(ex.side).upper(),"shares":_f(ex.shares),"price":_f(ex.price),"time":_s(ex.time),"account":_s(ex.acctNumber or snapshot['account']),"commission":_f(getattr(cm,'commission',None))})
         snapshot["ok"]=True
         return snapshot
+    try:
+        return with_shared_ib_sync(_fetch, readonly=True)
     except Exception as exc:
         errors.append(str(exc)); return snapshot
     finally:
         snapshot["synced_at"]=now_iso()
-        try:
-            if ib.isConnected(): ib.disconnect()
-        except: pass
-        try: loop.close()
-        except: pass
 
 async def run_broker_sync_once() -> dict:
     return await asyncio.to_thread(fetch_broker_snapshot_sync)

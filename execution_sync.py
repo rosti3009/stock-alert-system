@@ -10,9 +10,9 @@ from ibkr_asyncio_compat import ensure_event_loop
 
 ensure_event_loop()
 
-from ib_insync import IB
 
 import config
+from tws_connection_manager import with_shared_ib_sync
 import database
 import order_lifecycle
 from circuit_breaker import record_ibkr_error, reset_ibkr_error_count
@@ -170,43 +170,13 @@ def normalize_execution_item(item) -> dict:
 
 
 def fetch_executions_sync():
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    ib = IB()
-
-    try:
-        client_id = (
-            int(config.IBKR_CLIENT_ID)
-            + EXECUTION_CLIENT_ID_OFFSET
-        )
-
-        ib.connect(
-            config.IBKR_HOST,
-            int(config.IBKR_PORT),
-            clientId=client_id,
-            timeout=10,
-        )
-
+    def _fetch(ib):
         ib.sleep(1)
-
         fills = ib.fills()
         executions = fills or ib.executions()
-
         return normalize_execution_items(executions)
 
-    finally:
-        try:
-            if ib.isConnected():
-                ib.disconnect()
-        except Exception:
-            pass
-
-        try:
-            loop.close()
-        except Exception:
-            pass
+    return with_shared_ib_sync(_fetch)
 
 
 async def sync_executions():

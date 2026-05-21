@@ -3,6 +3,7 @@ from ibkr_asyncio_compat import ensure_event_loop
 ensure_event_loop()
 
 from ib_insync import *
+from tws_connection_manager import get_ib_sync
 
 import config
 import database
@@ -22,24 +23,18 @@ class IBKRClient:
         self.port = port or config.IBKR_PORT
         self.client_id = client_id or config.IBKR_CLIENT_ID
         ensure_event_loop()
-        self.ib = IB()
+        self.ib = None
 
     def connect(self):
-        if not self.ib.isConnected():
-            self.ib.connect(
-                self.host,
-                self.port,
-                clientId=self.client_id,
-            )
-
-        return self.ib.isConnected()
+        self.ib = get_ib_sync(readonly=False)
+        return bool(self.ib and self.ib.isConnected())
 
     def disconnect(self):
-        if self.ib.isConnected():
-            self.ib.disconnect()
+        # shared session intentionally persists
+        return None
 
     def is_connected(self):
-        return self.ib.isConnected()
+        return bool(self.ib and self.ib.isConnected())
 
     def get_accounts(self):
         return self.ib.managedAccounts()
