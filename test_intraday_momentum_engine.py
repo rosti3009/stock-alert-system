@@ -100,3 +100,36 @@ def test_low_quality_setup_still_blocked_with_threshold_60():
     payload = ime.detect_intraday_entry_setup(row)
     assert payload["entry_allowed"] is False
     assert "relative volume below minimum" in payload["aggressive_rejection_reasons"]
+
+
+def test_high_rvol_vwap_ema_alignment_reaches_threshold():
+    row = base_row()
+    row["relative_volume"] = 3.5
+    row["volume_expansion"] = True
+    row["positive_candle_momentum"] = True
+    row["intraday_price_change_percent"] = 3.1
+    payload = ime.detect_intraday_entry_setup(row)
+    assert payload["intraday_momentum_score"] >= 60
+
+
+def test_high_rvol_but_bad_spread_is_blocked():
+    row = base_row()
+    row["relative_volume"] = 3.5
+    row["bad_spread"] = True
+    payload = ime.detect_intraday_entry_setup(row)
+    assert payload["entry_allowed"] is False
+    assert "bad spread" in payload["aggressive_rejection_reasons"]
+
+
+def test_aggressive_entry_allowed_never_null():
+    payload = ime.detect_intraday_entry_setup(base_row())
+    assert payload["aggressive_entry_allowed"] in {True, False}
+
+
+def test_rejection_reasons_non_empty_when_rejected():
+    row = base_row()
+    row["relative_volume"] = 1.0
+    payload = ime.detect_intraday_entry_setup(row)
+    assert payload["entry_allowed"] is False
+    assert isinstance(payload["aggressive_rejection_reasons"], list)
+    assert len(payload["aggressive_rejection_reasons"]) > 0
