@@ -2986,3 +2986,42 @@ async def api_trading_status():
         },
         headers=no_cache_headers(),
 )
+
+@app.get("/api/orders")
+async def api_orders(limit: int = 200):
+    rows = await database.fetch_all("SELECT * FROM orders ORDER BY COALESCE(updated_at, created_at) DESC LIMIT ?", (max(1, min(limit, 1000)),))
+    return {"ok": True, "orders": rows}
+
+
+@app.get("/api/broker-sync/status")
+async def api_broker_sync_status():
+    snapshot = await database.fetch_one("SELECT * FROM broker_sync_snapshots ORDER BY id DESC LIMIT 1")
+    return {"ok": True, "snapshot": snapshot}
+
+
+@app.post("/api/broker-sync/run")
+async def api_broker_sync_run():
+    from broker_sync import run_broker_sync_cycle
+    result = await run_broker_sync_cycle()
+    return {"ok": bool(result.get("ok", True)), "result": result}
+
+
+@app.post("/api/emergency/flatten-all")
+async def api_emergency_flatten_all():
+    from trade_engine import flatten_all
+    result = flatten_all(reason="api_emergency_flatten_all")
+    return result
+
+
+@app.post("/api/emergency/stop-trading")
+async def api_emergency_stop_trading():
+    await database.set_app_state("auto_trading_enabled", "false")
+    return {"ok": True, "auto_trading_enabled": False}
+
+
+@app.post("/api/intraday/exit-check")
+async def api_intraday_exit_check(payload: dict | None = None):
+    from intraday_exit_engine import evaluate_exit
+    payload = payload or {}
+    return evaluate_exit(payload.get("position", {}), payload.get("signals", {}))
+
