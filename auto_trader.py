@@ -525,6 +525,15 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
             intraday_entry = intraday_momentum_engine.detect_intraday_entry_setup(row)
             row = {**row, **intraday_entry, "intraday_score_reasons": intraday_entry.get("score_reasons", [])}
             score = int(intraday_entry.get("intraday_momentum_score") or 0)
+            if row.get("regime_override_active"):
+                await database.safe_record_trade_journal_event({
+                    "symbol": symbol or "UNKNOWN",
+                    "event_type": "REGIME_OVERRIDE_ACTIVATED",
+                    "decision": "OVERRIDE",
+                    "reason": "HIGH_MOMENTUM_EXCEPTION",
+                    "source_module": "auto_trader",
+                    "raw_payload": row,
+                })
         else:
             score = int(row.get("weekly_score") or row.get("score") or 0)
 
@@ -577,6 +586,14 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
             if strategy_mode.is_intraday_mode(active_strategy_mode):
                 if not row.get("entry_allowed"):
                     reason = "; ".join(row.get("rejection_reasons") or ["Intraday BUY blocked"])
+                    await database.safe_record_trade_journal_event({
+                        "symbol": symbol,
+                        "event_type": "AGGRESSIVE_REJECTION",
+                        "decision": "BLOCKED",
+                        "reason": reason,
+                        "source_module": "auto_trader",
+                        "raw_payload": row,
+                    })
                     log.info("AUTO BUY skipped for %s — %s", symbol, reason)
                     await _journal_buy_decision(
                         row,
@@ -617,6 +634,14 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
                 "BUY candidate passed auto-trading filters",
                 market,
             )
+            await database.safe_record_trade_journal_event({
+                "symbol": symbol,
+                "event_type": "AGGRESSIVE_ENTRY_ACCEPTED",
+                "decision": "ACCEPTED",
+                "reason": "; ".join(row.get("score_reasons") or ["intraday_accepted"]),
+                "source_module": "auto_trader",
+                "raw_payload": row,
+            })
 
             opened = await auto_open_position(
                 row=row,

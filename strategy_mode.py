@@ -55,7 +55,7 @@ def is_intraday_mode(mode: StrategyMode | str | None) -> bool:
 
 def intraday_rules() -> dict[str, Any]:
     rules = {
-        "min_score_to_buy": int(getattr(config, "INTRADAY_MIN_SCORE_TO_BUY", 85)),
+        "min_score_to_buy": int(getattr(config, "INTRADAY_MIN_SCORE_TO_BUY", 60)),
         "max_open_positions": int(getattr(config, "INTRADAY_MAX_OPEN_POSITIONS", 3)),
         "position_size_factor": float(getattr(config, "INTRADAY_POSITION_SIZE_FACTOR", 0.25)),
         "min_relative_volume": float(getattr(config, "INTRADAY_MIN_RELATIVE_VOLUME", 1.5)),
@@ -204,6 +204,9 @@ def validate_intraday_buy(row: dict[str, Any]) -> dict[str, Any]:
     dv = dollar_volume(row)
     if dv < rules["min_dollar_volume"]:
         reasons.append(f"Dollar volume below intraday minimum (${dv:,.0f} < ${rules['min_dollar_volume']:,.0f})")
+    momentum_accel = _float(row.get("momentum_acceleration") or row.get("momentum_acceleration_score") or row.get("momentum_delta")) or 0.0
+    ema9 = _float(row.get("ema9"))
+    ema20 = _float(row.get("ema20"))
 
     execution_quality = evaluate_execution_quality(row=row, limit_price=price, symbol=row.get("symbol"))
     metrics = execution_quality.get("metrics") or {}
@@ -215,6 +218,16 @@ def validate_intraday_buy(row: dict[str, Any]) -> dict[str, Any]:
         reasons.append(f"Slippage estimate too high for intraday ({float(slippage):.2f}% > {rules['max_slippage_estimate']:.2f}%)")
     if execution_quality.get("blocks_buy"):
         reasons.append(execution_quality.get("blocked_buy_reason") or "Execution quality blocked intraday BUY")
+    spread_quality_strong = spread is None or float(spread) <= 1.5
+    volume_expansion_score = min(100, int(((rv or 0.0) / 2.0) * 100))
+    aggressive_breakout = bool(
+        (rv or 0.0) >= 2.0
+        and bool(vwap and price and price >= vwap)
+        and bool(ema9 and ema20 and ema9 > ema20)
+        and momentum_accel > 0
+        and spread_quality_strong
+        and volume_expansion_score >= 70
+    )
 
     setup = str(row.get("setup") or row.get("intraday_setup") or "").lower()
     if not any(token in setup for token in ("breakout", "momentum", "opening range")):
@@ -234,6 +247,14 @@ def validate_intraday_buy(row: dict[str, Any]) -> dict[str, Any]:
     if daily_loss_percent is not None and daily_loss_percent >= rules["max_daily_loss_percent"]:
         reasons.append(f"Max intraday daily loss reached ({daily_loss_percent:.2f}% >= {rules['max_daily_loss_percent']:.2f}%)")
 
+    low_value_enrichment_missing = [k for k in INTRADAY_ENRICHMENT_KEYS if row.get(k) in (None, "", False)]
+    regime = str(row.get("market_regime") or row.get("regime") or "").upper()
+    high_momentum_exception = regime == "DEFENSIVE" and score >= 70 and (rv or 0.0) >= 2.0 and spread_quality_strong
+    if regime == "DEFENSIVE" and not high_momentum_exception:
+        reasons.append("Market regime DEFENSIVE without high-momentum exception")
+    if aggressive_breakout:
+        bypass_reasons = ("VWAP confirmation failed", "Intraday setup is not breakout/momentum preferred")
+        reasons = [r for r in reasons if r not in bypass_reasons and "enrichment" not in r.lower()]
     allowed = not reasons
     return {
         "allowed": allowed,
@@ -243,6 +264,14 @@ def validate_intraday_buy(row: dict[str, Any]) -> dict[str, Any]:
         "execution_quality": execution_quality,
         "rules": rules,
         "enrichment_status": intraday_enrichment_status(row),
+        "aggressive_breakout": aggressive_breakout,
+        "momentum_acceleration_score": int(min(100, max(0, momentum_accel * 20))),
+        "breakout_strength_score": min(100, int((score * 0.6) + (volume_expansion_score * 0.4))),
+        "vwap_reclaim_signal": bool(vwap and price and price >= vwap),
+        "volatility_expansion_signal": bool(row.get("volatility_expansion") is True or row.get("range_expansion") is True),
+        "regime_override_active": high_momentum_exception,
+        "regime_override": "HIGH_MOMENTUM_EXCEPTION" if high_momentum_exception else None,
+        "missing_enrichment_soft": low_value_enrichment_missing,
     }
 
 

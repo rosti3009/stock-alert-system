@@ -5,7 +5,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 REQUIRED_TIMEFRAMES = ("1m", "5m", "15m")
-BUY_THRESHOLD = 75
+BUY_THRESHOLD = 60
 
 
 def validate_required_intraday_bars(row: dict[str, Any]) -> tuple[bool, list[str]]:
@@ -28,19 +28,26 @@ def calculate_intraday_momentum_score(row: dict[str, Any]) -> tuple[int, list[st
     gap_percent = _f(row.get("gap_percent")) or 0.0
     breakout = str(row.get("setup") or row.get("intraday_setup") or "").lower()
 
+    momentum_accel = _f(row.get("momentum_acceleration") or row.get("momentum_acceleration_score") or row.get("momentum_delta"))
     if vwap and price and price >= vwap:
-        score += 12
+        score += 16
         reasons.append("price above VWAP")
         components["vwap_reclaim"] = True
     if ema9 and ema20 and ema9 > ema20:
-        score += 10
+        score += 16
         reasons.append("EMA9 above EMA20")
+        components["ema9_above_ema20"] = True
     if rv and rv >= 1.5:
-        score += 10
+        score += 16 if rv >= 2.0 else 12
         reasons.append("relative volume surge")
+    if momentum_accel and momentum_accel > 0:
+        score += 14 if momentum_accel >= 2 else 10
+        reasons.append("momentum acceleration positive")
+        components["momentum_acceleration_positive"] = True
     if row.get("volatility_expansion") is True:
-        score += 8
+        score += 12
         reasons.append("volatility expansion")
+        components["volatility_expansion"] = True
     if opening_range_high and price and price > opening_range_high:
         score += 10
         reasons.append("opening range breakout")
@@ -65,6 +72,10 @@ def calculate_intraday_momentum_score(row: dict[str, Any]) -> tuple[int, list[st
     if gap_percent > 0:
         score += 3
 
+    components["momentum_acceleration_score"] = int(min(100, max(0, (momentum_accel or 0.0) * 20)))
+    components["volume_expansion_score"] = min(100, int(((rv or 0.0) / 2.0) * 100))
+    components["vwap_reclaim_signal"] = bool(vwap and price and price >= vwap)
+    components["volatility_expansion_signal"] = bool(row.get("volatility_expansion") is True or row.get("range_expansion") is True)
     return min(100, max(0, score)), reasons, components
 
 
@@ -88,7 +99,7 @@ def generate_rejection_reasons(row: dict[str, Any], score: int, missing_timefram
 
 def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
     bars_ok, missing = validate_required_intraday_bars(row)
-    score, score_reasons, _ = calculate_intraday_momentum_score(row)
+    score, score_reasons, components = calculate_intraday_momentum_score(row)
     rejection_reasons = generate_rejection_reasons(row, score, missing if not bars_ok else [])
     intraday_entry_allowed = bool(row.get("intraday_entry_allowed", True))
     allowed = bars_ok and intraday_entry_allowed and score >= BUY_THRESHOLD
@@ -106,6 +117,27 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
     if spread is not None and spread > 2.5:
         rejection_reasons.append("spread too wide")
         allowed = False
+    breakout_allowed = (
+        rv >= 2.0
+        and bool(components.get("vwap_reclaim_signal"))
+        and bool(components.get("ema9_above_ema20"))
+        and bool(components.get("momentum_acceleration_positive"))
+        and (spread is None or spread <= 1.5)
+        and int(components.get("volume_expansion_score", 0)) >= 70
+    )
+    if breakout_allowed:
+        allowed = bars_ok and intraday_entry_allowed and dv >= 3_000_000
+        if allowed:
+            score = max(score, BUY_THRESHOLD + 10)
+            score_reasons.append("aggressive breakout override")
+    breakout_strength = min(100, int((score * 0.5) + (components.get("volume_expansion_score", 0) * 0.5)))
+    regime = str(row.get("market_regime") or row.get("regime") or "").upper()
+    regime_override_active = regime == "DEFENSIVE" and score >= 70 and rv >= 2.0 and (spread is None or spread <= 1.5)
+    if regime == "DEFENSIVE" and not regime_override_active:
+        rejection_reasons.append("DEFENSIVE regime without high momentum exception")
+        allowed = False
+    if regime_override_active:
+        allowed = allowed or (bars_ok and intraday_entry_allowed)
     return {
         "entry_allowed": allowed,
         "intraday_signal": "BUY" if allowed else "REJECTED",
@@ -115,6 +147,12 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
         "active_profile": "INTRADAY_AGGRESSIVE",
         "aggressive_entry_allowed": allowed,
         "aggressive_rejection_reasons": rejection_reasons,
+        "momentum_acceleration_score": components.get("momentum_acceleration_score", 0),
+        "breakout_strength_score": breakout_strength,
+        "vwap_reclaim_signal": components.get("vwap_reclaim_signal", False),
+        "volatility_expansion_signal": components.get("volatility_expansion_signal", False),
+        "regime_override_active": regime_override_active,
+        "regime_override": "HIGH_MOMENTUM_EXCEPTION" if regime_override_active else None,
         "expected_stop_percent": min(2.0, max(0.8, _f(row.get("atr_stop_percent")) or 1.2)),
         "expected_tp1_percent": 2.0,
         "expected_tp2_percent": 4.0,
