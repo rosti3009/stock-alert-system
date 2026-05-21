@@ -108,7 +108,7 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
     rv = _f(row.get("relative_volume")) or 0.0
     dv = _f(row.get("dollar_volume")) or 0.0
     spread = _f(row.get("spread_percent"))
-    if rv < 1.5:
+    if rv < 1.7:
         rejection_reasons.append("relative volume below minimum")
         allowed = False
     if dv < 3_000_000:
@@ -117,7 +117,25 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
     if spread is not None and spread > 2.5:
         rejection_reasons.append("spread too wide")
         allowed = False
+    execution_safety_ok = bool(row.get("execution_safety_passes", True))
+    broker_sync_healthy = bool(row.get("broker_sync_healthy", True))
+    reconciliation_healthy = bool(row.get("reconciliation_healthy", True))
+    circuit_breaker_clear = bool(row.get("circuit_breaker_clear", True))
+    if not execution_safety_ok:
+        rejection_reasons.append("execution safety gate blocked")
+        allowed = False
+    if not broker_sync_healthy:
+        rejection_reasons.append("broker sync unhealthy")
+        allowed = False
+    if not reconciliation_healthy:
+        rejection_reasons.append("reconciliation unhealthy")
+        allowed = False
+    if not circuit_breaker_clear:
+        rejection_reasons.append("circuit breaker active")
+        allowed = False
     breakout_allowed = (
+        score >= BUY_THRESHOLD
+        and
         rv >= 2.0
         and bool(components.get("vwap_reclaim_signal"))
         and bool(components.get("ema9_above_ema20"))
@@ -132,7 +150,18 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
             score_reasons.append("aggressive breakout override")
     breakout_strength = min(100, int((score * 0.5) + (components.get("volume_expansion_score", 0) * 0.5)))
     regime = str(row.get("market_regime") or row.get("regime") or "").upper()
-    regime_override_active = regime == "DEFENSIVE" and score >= 70 and rv >= 2.0 and (spread is None or spread <= 1.5)
+    regime_override_active = (
+        regime == "DEFENSIVE"
+        and score >= 65
+        and rv >= 2.0
+        and bool(components.get("vwap_reclaim_signal"))
+        and bool(components.get("ema9_above_ema20"))
+        and int(components.get("volume_expansion_score", 0)) >= 80
+        and (spread is None or spread <= 2.5)
+        and execution_safety_ok
+        and broker_sync_healthy
+        and reconciliation_healthy
+    )
     if regime == "DEFENSIVE" and not regime_override_active:
         rejection_reasons.append("DEFENSIVE regime without high momentum exception")
         allowed = False
@@ -152,6 +181,9 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
         "vwap_reclaim_signal": components.get("vwap_reclaim_signal", False),
         "volatility_expansion_signal": components.get("volatility_expansion_signal", False),
         "regime_override_active": regime_override_active,
+        "regime_override_reason": "HIGH_MOMENTUM_EXCEPTION" if regime_override_active else None,
+        "market_regime_before_override": regime,
+        "market_regime_after_override": "MOMENTUM_EXCEPTION" if regime_override_active else regime,
         "regime_override": "HIGH_MOMENTUM_EXCEPTION" if regime_override_active else None,
         "expected_stop_percent": min(2.0, max(0.8, _f(row.get("atr_stop_percent")) or 1.2)),
         "expected_tp1_percent": 2.0,

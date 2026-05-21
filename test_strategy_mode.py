@@ -19,16 +19,16 @@ def run_async(coro):
 
 def test_switching_to_intraday_changes_buy_threshold():
     rules = strategy_mode.active_rules(strategy_mode.StrategyMode.INTRADAY_MOMENTUM)
-    assert rules["min_score_to_buy"] == 75
+    assert rules["min_score_to_buy"] == 60
     assert rules["min_score_to_buy"] < strategy_mode.active_rules(strategy_mode.StrategyMode.SWING_DEFAULT)["min_score_to_buy"]
 
 
 def test_switching_to_intraday_changes_max_positions():
     rules = strategy_mode.active_rules(strategy_mode.StrategyMode.INTRADAY_MOMENTUM)
-    assert rules["max_open_positions"] == 8
+    assert rules["max_open_positions"] == 5
     assert strategy_mode.active_rules(strategy_mode.StrategyMode.SWING_DEFAULT)["max_open_positions"] == config.MAX_OPEN_POSITIONS
-    assert rules["max_daily_trades"] == 15
-    assert rules["max_daily_loss_percent"] == 4.0
+    assert rules["max_daily_trades"] == 20
+    assert rules["max_daily_loss_percent"] == 5.0
 
 
 def test_intraday_blocks_buy_if_intraday_data_missing():
@@ -186,14 +186,14 @@ def test_aggressive_learning_profile_increases_capital_and_max_positions():
 
         assert config.effective_virtual_trading_capital() == 500000.0
         assert profile["profile"] == "INTRADAY_AGGRESSIVE"
-        assert rules["max_open_positions"] == 8
-        assert rules["min_score_to_buy"] == 75
-        assert rules["risk_per_trade_percent"] == 1.0
-        assert rules["min_relative_volume"] == 1.5
+        assert rules["max_open_positions"] == 5
+        assert rules["min_score_to_buy"] == 60
+        assert rules["risk_per_trade_percent"] == 1.25
+        assert rules["min_relative_volume"] == 1.7
         assert rules["min_dollar_volume"] == 3000000.0
-        assert rules["max_daily_trades"] == 15
+        assert rules["max_daily_trades"] == 20
         assert rules["max_consecutive_losses"] == 4
-        assert rules["max_daily_loss_percent"] == 4.0
+        assert rules["max_daily_loss_percent"] == 5.0
     finally:
         for key, value in original.items():
             setattr(config, key, value)
@@ -238,9 +238,9 @@ def test_strategy_payload_exposes_effective_training_profile():
 
         assert payload["active_training_profile"] == "INTRADAY_AGGRESSIVE"
         assert payload["profile_rules"]["paper_capital"] == 500000.0
-        assert payload["effective_max_positions"] == 8
-        assert payload["effective_score_threshold"] == 75
-        assert payload["effective_max_daily_trades"] == 15
+        assert payload["effective_max_positions"] == 5
+        assert payload["effective_score_threshold"] == 60
+        assert payload["effective_max_daily_trades"] == 20
         assert "market_hours_guard" in payload["profile_rules"]["hard_protections_kept"]
         assert payload["force_exit_before_close"]["enabled"] is True
     finally:
