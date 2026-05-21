@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -47,7 +48,7 @@ from data_fetcher import fetch_intraday_bars, fetch_stock_data
 from indicators import compute_indicators
 from ranking_engine import calculate_weekly_score, rank_top_weekly_setups
 from signal_logic import evaluate_signal
-from symbol_loader import load_nasdaq_symbols
+from symbol_loader import get_cached_symbols, load_nasdaq_symbols
 from telegram_notifier import send_buy_alert, send_sell_alert, send_position_alert
 from position_manager import evaluate_position
 from ibkr_asyncio_compat import ensure_event_loop
@@ -58,6 +59,7 @@ log = logging.getLogger(__name__)
 
 _latest: dict[str, dict] = {}
 _top_weekly: list[dict] = []
+_SCAN_UNIVERSE_SET: set[str] = set()
 _scan_lock = asyncio.Lock()
 _positions_lock = asyncio.Lock()
 _scanner_state: dict[str, object] = {
@@ -495,9 +497,9 @@ def _enrich_intraday_snapshot(result: dict, intraday_bars: dict[str, list[dict]]
     }
 
 
-def _load_scan_universe() -> list[str]:
+def _load_scan_universe(force_refresh: bool = False) -> list[str]:
     if config.USE_DYNAMIC_SYMBOLS:
-        all_symbols = load_nasdaq_symbols(limit=None)
+        all_symbols = get_cached_symbols(limit=None, force_refresh=force_refresh)
     else:
         all_symbols = config.SYMBOLS
 
@@ -528,7 +530,7 @@ async def _build_intraday_priority_symbols(priority_limit: int) -> list[str]:
 
     def _intraday_priority_score(item: dict) -> float:
         symbol = str(item.get("symbol") or "").upper()
-        is_nasdaq = symbol in set(load_nasdaq_symbols(limit=None))
+        is_nasdaq = symbol in _SCAN_UNIVERSE_SET
         rv = _relative_volume(item)
         move = abs(float(item.get("change_percent") or item.get("percent_change") or 0.0))
         market_cap = float(item.get("market_cap") or 0.0)
@@ -558,6 +560,8 @@ async def get_scan_symbols() -> list[str]:
     active_mode = await strategy_mode.get_strategy_mode()
     cadence = scanner_cadence_for_mode(active_mode)
     all_symbols = _load_scan_universe()
+    global _SCAN_UNIVERSE_SET
+    _SCAN_UNIVERSE_SET = set(all_symbols)
 
     if not all_symbols:
         return _unique_symbols(config.SYMBOLS)[:cadence["symbols_per_scan"]]
@@ -874,7 +878,7 @@ async def run_full_scan() -> dict:
     global _top_weekly
 
     if _scan_lock.locked():
-        log.info("Scan request ignored — already running")
+        log.info("Scan skipped: previous scan still running")
         return {"status": "already running"}
 
     async with _scan_lock:
@@ -885,7 +889,9 @@ async def run_full_scan() -> dict:
 
         active_mode = await strategy_mode.get_strategy_mode()
         cadence = scanner_cadence_for_mode(active_mode)
+        symbol_load_start = time.perf_counter()
         symbols = await get_scan_symbols()
+        symbol_load_ms = round((time.perf_counter() - symbol_load_start) * 1000, 2)
         scan_started_at = utc_now()
         _scanner_state["last_scan_at"] = scan_started_at.isoformat()
 
@@ -907,6 +913,7 @@ async def run_full_scan() -> dict:
             batch_size = int(cadence["batch_size"])
 
             for i in range(0, len(symbols), batch_size):
+                batch_started = time.perf_counter()
                 batch = symbols[i:i + batch_size]
 
                 results = await asyncio.gather(
@@ -939,6 +946,8 @@ async def run_full_scan() -> dict:
                         stats["sell_signals"] += 1
 
                 rebuild_top_weekly(limit=10)
+                scan_batch_ms = round((time.perf_counter() - batch_started) * 1000, 2)
+                log.info("scan_batch_ms=%s batch_size=%s", scan_batch_ms, len(batch))
 
                 if i + batch_size < len(symbols):
                     await asyncio.sleep(config.REQUEST_DELAY_SECONDS)
@@ -974,6 +983,16 @@ async def run_full_scan() -> dict:
                     "scan_cycle_completed",
                     metadata={"scan_run_id": scan_run_id, "fresh_symbols": fresh_symbols},
                 )
+
+            total_scan_ms = round((time.perf_counter() - symbol_load_start) * 1000, 2)
+            candidates_updated_count = len(all_results)
+            log.info(
+                "scan_metrics symbol_load_ms=%s total_scan_ms=%s symbols_scanned_count=%s candidates_updated_count=%s",
+                symbol_load_ms,
+                total_scan_ms,
+                len(symbols),
+                candidates_updated_count,
+            )
 
             log.info(
                 "✔ Scan finished | scanned=%s skipped=%s errors=%s BUY=%s SELL=%s TOP10=%s",

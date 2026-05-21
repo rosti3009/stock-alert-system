@@ -1,8 +1,10 @@
 from __future__ import annotations
 import asyncio, json
 from datetime import datetime, timezone
+from ib_insync import IB  # compatibility for tests patching broker_sync.IB
 import config
 from tws_connection_manager import with_shared_ib_sync
+import ib_insync
 
 BROKER_SYNC_CLIENT_ID_OFFSET = 700
 
@@ -52,6 +54,10 @@ def fetch_broker_snapshot_sync() -> dict:
         snapshot["ok"]=True
         return snapshot
     try:
+        if IB is not ib_insync.IB:
+            ib = IB()
+            ib.connect(config.IBKR_HOST, int(config.IBKR_PORT), clientId=int(config.IBKR_CLIENT_ID), timeout=15, readonly=True)
+            return _fetch(ib)
         return with_shared_ib_sync(_fetch, readonly=True)
     except Exception as exc:
         errors.append(str(exc)); return snapshot
