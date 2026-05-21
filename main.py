@@ -2848,6 +2848,25 @@ async def api_trading_status():
                 "force_exit_before_close": True,
                 "allow_overnight": False,
             },
+            "intraday_aggressive_profile": {
+                "active": active_strategy_payload["intraday_rules"].get("training_profile") == "INTRADAY_AGGRESSIVE",
+                "min_score_to_buy": active_strategy_payload["intraday_rules"].get("min_score_to_buy"),
+                "risk_per_trade_percent": active_strategy_payload["intraday_rules"].get("risk_per_trade_percent"),
+                "max_daily_loss_percent": active_strategy_payload["intraday_rules"].get("max_daily_loss_percent"),
+                "max_daily_trades": active_strategy_payload["intraday_rules"].get("max_daily_trades"),
+                "max_open_intraday_positions": active_strategy_payload["intraday_rules"].get("max_open_intraday_positions", active_strategy_payload["intraday_rules"].get("max_open_positions")),
+                "max_total_intraday_exposure_percent": active_strategy_payload["intraday_rules"].get("max_total_intraday_exposure_percent"),
+                "max_single_position_percent": active_strategy_payload["intraday_rules"].get("max_single_position_percent"),
+                "take_profit_1_percent": active_strategy_payload["intraday_rules"].get("take_profit_1_percent"),
+                "take_profit_2_percent": active_strategy_payload["intraday_rules"].get("take_profit_2_percent"),
+                "stop_loss_range": {
+                    "min": active_strategy_payload["intraday_rules"].get("stop_loss_percent_min"),
+                    "max": active_strategy_payload["intraday_rules"].get("stop_loss_percent_max"),
+                },
+                "partial_take_profit_enabled": active_strategy_payload["intraday_rules"].get("partial_take_profit_enabled"),
+                "force_exit_before_close": active_strategy_payload["intraday_rules"].get("force_exit_before_close", True),
+                "allow_overnight": active_strategy_payload["intraday_rules"].get("allow_overnight", False),
+            },
 
             "force_exit_before_close": active_strategy_payload["force_exit_before_close"],
 
@@ -3024,4 +3043,3 @@ async def api_intraday_exit_check(payload: dict | None = None):
     from intraday_exit_engine import evaluate_exit
     payload = payload or {}
     return evaluate_exit(payload.get("position", {}), payload.get("signals", {}))
-

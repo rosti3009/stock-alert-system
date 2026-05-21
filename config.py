@@ -262,7 +262,7 @@ INTRADAY_TIME_EXIT_MINUTES = get_int("INTRADAY_TIME_EXIT_MINUTES", 30)
 # ==============================
 # PAPER TRAINING PROFILES
 # ==============================
-PAPER_TRAINING_PROFILE = get_str("PAPER_TRAINING_PROFILE", "AGGRESSIVE_LEARNING").upper()
+PAPER_TRAINING_PROFILE = get_str("PAPER_TRAINING_PROFILE", "INTRADAY_AGGRESSIVE").upper()
 PAPER_TRAINING_PROFILES = {
     "CONSERVATIVE": {
         "paper_capital": VIRTUAL_TRADING_CAPITAL_USD,
@@ -294,6 +294,38 @@ PAPER_TRAINING_PROFILES = {
             "max_daily_trades": 15,
             "max_consecutive_losses": 4,
             "max_daily_loss_percent": 3.0,
+        },
+    },
+    "INTRADAY_AGGRESSIVE": {
+        "paper_capital": 500000.0,
+        "intraday": {
+            "min_score_to_buy": 75,
+            "risk_per_trade_percent": 1.0,
+            "max_daily_loss_percent": 4.0,
+            "max_consecutive_losses": 4,
+            "max_daily_trades": 15,
+            "max_open_positions": 8,
+            "max_total_intraday_exposure_percent": 65.0,
+            "max_single_position_percent": 12.0,
+            "min_relative_volume": 1.5,
+            "min_dollar_volume": 3000000.0,
+            "max_spread_percent": 2.5,
+            "max_slippage_estimate": 1.5,
+            "take_profit_1_percent": 2.0,
+            "take_profit_2_percent": 4.0,
+            "stop_loss_percent_min": 0.8,
+            "stop_loss_percent_max": 2.0,
+            "use_dynamic_atr_stop": True,
+            "use_vwap_trailing_stop": True,
+            "use_ema9_trailing_stop": True,
+            "partial_take_profit_enabled": True,
+            "partial_take_profit_percent": 50,
+            "move_stop_to_breakeven_after_tp1": True,
+            "runner_exit_target_percent": 4.0,
+            "allow_overnight": False,
+            "force_exit_before_close": True,
+            "force_exit_minutes_before_close": 15,
+            "reentry_cooldown_minutes": 5,
         },
     },
 }
