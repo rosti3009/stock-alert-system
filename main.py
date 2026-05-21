@@ -3005,47 +3005,129 @@ async def api_trading_status():
 @app.get("/api/orders")
 async def api_orders(limit: int = 200):
     try:
-        rows = await database.fetch_all("SELECT * FROM orders ORDER BY COALESCE(updated_at, created_at) DESC LIMIT ?", (max(1, min(limit, 1000)),))
-        return {"ok": True, "orders": rows, "count": len(rows)}
+        rows = await database.fetch_all("SELECT * FROM orders ORDER BY COALESCE(updated_at, created_at) DESC LIMIT ?", (max(1, min(limit, 1000)),)) or []
+        return {
+            "ok": True,
+            "connected": True,
+            "orders": rows if isinstance(rows, list) else [],
+            "count": len(rows if isinstance(rows, list) else []),
+            "errors": [],
+            "last_synced_at": None,
+            "heartbeat_age_seconds": None,
+            "open_orders_count": 0,
+            "executions_count": 0,
+            "positions_count": 0,
+            "source": "orders_table",
+        }
     except Exception as exc:
         log.exception("api_orders failed")
-        return {"ok": False, "orders": [], "count": 0, "error": str(exc)}
+        return {
+            "ok": False,
+            "connected": False,
+            "orders": [],
+            "count": 0,
+            "errors": [str(exc)],
+            "last_synced_at": None,
+            "heartbeat_age_seconds": None,
+            "open_orders_count": 0,
+            "executions_count": 0,
+            "positions_count": 0,
+            "source": "orders_table",
+        }
 
 
 @app.get("/api/broker-sync/status")
 async def api_broker_sync_status():
+    def _safe_json_array(value) -> list:
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, list) else []
+            except Exception:
+                return []
+        return []
+
     try:
         snapshot = await database.fetch_one("SELECT * FROM broker_sync_snapshots ORDER BY id DESC LIMIT 1") or {}
+        errors = _safe_json_array(snapshot.get("errors_json")) or _safe_json_array(snapshot.get("errors"))
+        open_orders = _safe_json_array(snapshot.get("open_orders_json"))
+        executions = _safe_json_array(snapshot.get("executions_json"))
+        positions = _safe_json_array(snapshot.get("positions_json"))
         return {
-            "ok": True,
+            "ok": bool(snapshot),
             "connected": bool(snapshot.get("connected")),
             "snapshot": snapshot,
-            "metrics": {
-                "positions_count": len(json.loads(snapshot.get("positions_json") or "[]")) if snapshot else 0,
-                "open_orders_count": len(json.loads(snapshot.get("open_orders_json") or "[]")) if snapshot else 0,
-                "executions_count": len(json.loads(snapshot.get("executions_json") or "[]")) if snapshot else 0,
-                "errors_count": len(json.loads(snapshot.get("errors_json") or "[]")) if snapshot else 0,
-            },
+            "errors": errors,
+            "last_synced_at": snapshot.get("synced_at"),
+            "heartbeat_age_seconds": snapshot.get("heartbeat_age_seconds"),
+            "open_orders_count": len(open_orders),
+            "executions_count": len(executions),
+            "positions_count": len(positions),
+            "source": "broker_sync_snapshots",
+            "metrics": {"positions_count": len(positions), "open_orders_count": len(open_orders), "executions_count": len(executions), "errors_count": len(errors)},
         }
     except Exception as exc:
         log.exception("api_broker_sync_status failed")
-        return {"ok": False, "connected": False, "snapshot": {}, "metrics": {}, "error": str(exc)}
+        return {
+            "ok": False,
+            "connected": False,
+            "snapshot": {},
+            "metrics": {},
+            "errors": [str(exc)],
+            "last_synced_at": None,
+            "heartbeat_age_seconds": None,
+            "open_orders_count": 0,
+            "executions_count": 0,
+            "positions_count": 0,
+            "source": "broker_sync_snapshots",
+        }
 
 
 @app.post("/api/broker-sync/run")
 async def api_broker_sync_run():
+    def _safe_array(payload: dict[str, Any], key: str) -> list:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+        return []
+
     try:
-        result = await broker_sync.run_broker_sync_once()
+        result = await broker_sync.run_broker_sync_once() or {}
+        if not isinstance(result, dict):
+            result = {"ok": False, "connected": False, "errors": ["malformed broker response"], "source": "broker_sync"}
         await database.save_broker_sync_snapshot(result)
+        errors = _safe_array(result, "errors")
+        open_orders = _safe_array(result, "open_orders")
+        executions = _safe_array(result, "executions")
+        positions = _safe_array(result, "positions")
         return {
             "ok": bool(result.get("ok", False)),
             "connected": bool(result.get("connected", False)),
             "result": result,
-            "errors": result.get("errors") or [],
+            "errors": errors,
+            "last_synced_at": result.get("synced_at"),
+            "heartbeat_age_seconds": result.get("heartbeat_age_seconds"),
+            "open_orders_count": len(open_orders),
+            "executions_count": len(executions),
+            "positions_count": len(positions),
+            "source": result.get("source") or "broker_sync",
         }
     except Exception as exc:
         log.exception("api_broker_sync_run failed")
-        return {"ok": False, "connected": False, "result": {}, "errors": [str(exc)]}
+        return {
+            "ok": False,
+            "connected": False,
+            "result": {},
+            "errors": [str(exc)],
+            "last_synced_at": None,
+            "heartbeat_age_seconds": None,
+            "open_orders_count": 0,
+            "executions_count": 0,
+            "positions_count": 0,
+            "source": "broker_sync",
+        }
 
 
 @app.post("/api/emergency/flatten-all")

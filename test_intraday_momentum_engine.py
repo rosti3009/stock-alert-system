@@ -80,3 +80,23 @@ def test_forced_eod_exit():
         now=datetime(2026, 5, 19, 19, 50, tzinfo=timezone.utc),
     )
     assert payload["intraday_exit_signal"] == "FORCE_EOD_EXIT"
+
+
+def test_defensive_regime_high_momentum_exception_allows_entry():
+    row = base_row()
+    row["market_regime"] = "DEFENSIVE"
+    payload = ime.detect_intraday_entry_setup(row)
+    assert payload["regime_override_active"] is True
+    assert payload["entry_allowed"] is True
+    assert payload["regime_override_reason"] == "HIGH_MOMENTUM_EXCEPTION"
+
+
+def test_low_quality_setup_still_blocked_with_threshold_60():
+    row = base_row()
+    row["relative_volume"] = 1.2
+    row["volatility_expansion"] = False
+    row["range_expansion"] = False
+    row["setup"] = "none"
+    payload = ime.detect_intraday_entry_setup(row)
+    assert payload["entry_allowed"] is False
+    assert "relative volume below minimum" in payload["aggressive_rejection_reasons"]
