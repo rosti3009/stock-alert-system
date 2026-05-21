@@ -526,24 +526,21 @@ async def _build_intraday_priority_symbols(priority_limit: int) -> list[str]:
         if symbol and symbol not in cached_rows_by_symbol:
             cached_rows_by_symbol[symbol] = row
 
-    high_relative_volume_symbols = [
-        row.get("symbol")
-        for row in sorted(
-            cached_rows_by_symbol.values(),
-            key=lambda item: _relative_volume(item),
-            reverse=True,
-        )
-        if _relative_volume(row) >= float(getattr(config, "INTRADAY_MIN_RELATIVE_VOLUME", 1.5))
-    ]
+    def _intraday_priority_score(item: dict) -> float:
+        symbol = str(item.get("symbol") or "").upper()
+        is_nasdaq = symbol in set(load_nasdaq_symbols(limit=None))
+        rv = _relative_volume(item)
+        move = abs(float(item.get("change_percent") or item.get("percent_change") or 0.0))
+        market_cap = float(item.get("market_cap") or 0.0)
+        small_mid_cap_bonus = 15.0 if (300_000_000 <= market_cap <= 20_000_000_000) else 0.0
+        unusual_volume_bonus = 20.0 if rv >= 2.0 else 0.0
+        move_bonus = 20.0 if move >= 3.0 else move * 4.0
+        return (20.0 if is_nasdaq else 0.0) + (rv * 20.0) + move_bonus + small_mid_cap_bonus + unusual_volume_bonus + _mover_score(item)
 
-    mover_symbols = [
+    ranked_symbols = [
         row.get("symbol")
-        for row in sorted(
-            cached_rows_by_symbol.values(),
-            key=lambda item: _mover_score(item),
-            reverse=True,
-        )
-        if _mover_score(row) > 0
+        for row in sorted(cached_rows_by_symbol.values(), key=_intraday_priority_score, reverse=True)
+        if _intraday_priority_score(row) > 0
     ]
     watchlist_symbols = list(getattr(config, "SYMBOLS", []))
     priority_symbols = await database.get_priority_symbols(limit=priority_limit)
@@ -551,8 +548,7 @@ async def _build_intraday_priority_symbols(priority_limit: int) -> list[str]:
     return _unique_symbols(
         open_position_symbols
         + recent_buy_symbols
-        + high_relative_volume_symbols
-        + mover_symbols
+        + ranked_symbols
         + watchlist_symbols
         + priority_symbols
     )[:priority_limit]
@@ -3008,21 +3004,48 @@ async def api_trading_status():
 
 @app.get("/api/orders")
 async def api_orders(limit: int = 200):
-    rows = await database.fetch_all("SELECT * FROM orders ORDER BY COALESCE(updated_at, created_at) DESC LIMIT ?", (max(1, min(limit, 1000)),))
-    return {"ok": True, "orders": rows}
+    try:
+        rows = await database.fetch_all("SELECT * FROM orders ORDER BY COALESCE(updated_at, created_at) DESC LIMIT ?", (max(1, min(limit, 1000)),))
+        return {"ok": True, "orders": rows, "count": len(rows)}
+    except Exception as exc:
+        log.exception("api_orders failed")
+        return {"ok": False, "orders": [], "count": 0, "error": str(exc)}
 
 
 @app.get("/api/broker-sync/status")
 async def api_broker_sync_status():
-    snapshot = await database.fetch_one("SELECT * FROM broker_sync_snapshots ORDER BY id DESC LIMIT 1")
-    return {"ok": True, "snapshot": snapshot}
+    try:
+        snapshot = await database.fetch_one("SELECT * FROM broker_sync_snapshots ORDER BY id DESC LIMIT 1") or {}
+        return {
+            "ok": True,
+            "connected": bool(snapshot.get("connected")),
+            "snapshot": snapshot,
+            "metrics": {
+                "positions_count": len(json.loads(snapshot.get("positions_json") or "[]")) if snapshot else 0,
+                "open_orders_count": len(json.loads(snapshot.get("open_orders_json") or "[]")) if snapshot else 0,
+                "executions_count": len(json.loads(snapshot.get("executions_json") or "[]")) if snapshot else 0,
+                "errors_count": len(json.loads(snapshot.get("errors_json") or "[]")) if snapshot else 0,
+            },
+        }
+    except Exception as exc:
+        log.exception("api_broker_sync_status failed")
+        return {"ok": False, "connected": False, "snapshot": {}, "metrics": {}, "error": str(exc)}
 
 
 @app.post("/api/broker-sync/run")
 async def api_broker_sync_run():
-    from broker_sync import run_broker_sync_cycle
-    result = await run_broker_sync_cycle()
-    return {"ok": bool(result.get("ok", True)), "result": result}
+    try:
+        result = await broker_sync.run_broker_sync_once()
+        await database.save_broker_sync_snapshot(result)
+        return {
+            "ok": bool(result.get("ok", False)),
+            "connected": bool(result.get("connected", False)),
+            "result": result,
+            "errors": result.get("errors") or [],
+        }
+    except Exception as exc:
+        log.exception("api_broker_sync_run failed")
+        return {"ok": False, "connected": False, "result": {}, "errors": [str(exc)]}
 
 
 @app.post("/api/emergency/flatten-all")
