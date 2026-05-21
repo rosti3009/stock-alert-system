@@ -77,6 +77,10 @@ OPERATION_STATE_KEY = "dashboard_last_operations"
 WATCHDOG_JOB_ID = "tws_api_watchdog"
 
 
+def trading_jobs_enabled() -> bool:
+    return bool(getattr(config, "broker_execution_enabled", lambda: False)())
+
+
 def _json_payload(data: dict) -> str:
     return json.dumps(data, ensure_ascii=False, default=str)
 
@@ -1126,6 +1130,8 @@ async def lifespan(app: FastAPI):
         )
 
     await configure_scanner_job()
+    broker_jobs_enabled = trading_jobs_enabled()
+    broker_jobs_reason = "Dashboard deployment cannot connect to local TWS" if config.APP_ROLE == "dashboard" else "Broker execution disabled by configuration"
 
     scheduler.add_job(
         refresh_open_positions_safe,
@@ -1164,17 +1170,11 @@ async def lifespan(app: FastAPI):
         finally:
             manager.disconnect()
 
-    scheduler.add_job(
-        cancel_stale_orders_job,
-        "interval",
-        minutes=1,
-        id="stale_order_cleanup",
-        replace_existing=True,
-    )
-
-    log.info(
-        "Stale order cleanup started — every 1 minute"
-    )
+    if broker_jobs_enabled:
+        scheduler.add_job(cancel_stale_orders_job, "interval", minutes=1, id="stale_order_cleanup", replace_existing=True, max_instances=1, coalesce=True)
+        log.info("Stale order cleanup started — every 1 minute")
+    else:
+        log.info("Stale order cleanup disabled | reason=%s", broker_jobs_reason)
     # ==========================================
     # EMERGENCY EXIT PROTECTION
     # ==========================================
@@ -1201,35 +1201,22 @@ async def lifespan(app: FastAPI):
         finally:
             manager.disconnect()
 
-    scheduler.add_job(
-        emergency_exit_job,
-        "interval",
-        seconds=30,
-        id="emergency_exit_protection",
-        replace_existing=True,
-    )
-
-    log.info(
-        "Emergency exit protection started — every 30 seconds"
-    )
+    if broker_jobs_enabled:
+        scheduler.add_job(emergency_exit_job, "interval", seconds=30, id="emergency_exit_protection", replace_existing=True, max_instances=1, coalesce=True)
+        log.info("Emergency exit protection started — every 30 seconds")
+    else:
+        log.info("Emergency exit protection disabled | reason=%s", broker_jobs_reason)
     # ==========================================
     # LIVE TWS MIRROR
     # ==========================================
 
     from tws_mirror import run_tws_mirror_once
 
-    scheduler.add_job(
-        run_tws_mirror_once,
-        "interval",
-        seconds=15,
-        id="live_tws_mirror",
-        replace_existing=True,
-        max_instances=1,
-    )
-
-    log.info(
-        "Live TWS mirror started — every 15 seconds"
-    )
+    if broker_jobs_enabled:
+        scheduler.add_job(run_tws_mirror_once, "interval", seconds=15, id="live_tws_mirror", replace_existing=True, max_instances=1, coalesce=True)
+        log.info("Live TWS mirror started — every 15 seconds")
+    else:
+        log.info("Live TWS mirror disabled | reason=%s", broker_jobs_reason)
 
     # ==========================================
     # EXECUTION SYNC
@@ -1237,32 +1224,19 @@ async def lifespan(app: FastAPI):
 
     from execution_sync import sync_executions
 
-    scheduler.add_job(
-        sync_executions,
-        "interval",
-        seconds=30,
-        id="execution_sync",
-        replace_existing=True,
-        max_instances=1,
-    )
-
-    log.info(
-        "Execution sync started — every 30 seconds"
-    )
+    if broker_jobs_enabled:
+        scheduler.add_job(sync_executions, "interval", seconds=30, id="execution_sync", replace_existing=True, max_instances=1, coalesce=True)
+        log.info("Execution sync started — every 30 seconds")
+    else:
+        log.info("Execution sync disabled | reason=%s", broker_jobs_reason)
     # ==========================================
     # RECONCILIATION CHECK
     # ==========================================
 
     from reconciliation import run_reconciliation_once
 
-    scheduler.add_job(
-        run_reconciliation_once,
-        "interval",
-        seconds=30,
-        id="reconciliation_check",
-        replace_existing=True,
-        max_instances=1,
-    )
+    if broker_jobs_enabled:
+        scheduler.add_job(run_reconciliation_once, "interval", seconds=30, id="reconciliation_check", replace_existing=True, max_instances=1, coalesce=True)
 
     log.info(
         "Reconciliation check started — every 30 seconds"
@@ -1272,27 +1246,15 @@ async def lifespan(app: FastAPI):
     # READ-ONLY ACCOUNT SYNC
     # ==========================================
 
-    scheduler.add_job(
-        account_sync.run_account_sync_once,
-        "interval",
-        seconds=30,
-        id="account_sync",
-        replace_existing=True,
-        max_instances=1,
-    )
+    if broker_jobs_enabled:
+        scheduler.add_job(account_sync.run_account_sync_once, "interval", seconds=30, id="account_sync", replace_existing=True, max_instances=1, coalesce=True)
 
     log.info(
         "Read-only account sync started — every 30 seconds"
     )
 
-    scheduler.add_job(
-        account_sync.run_reconciliation_status_check,
-        "interval",
-        seconds=60,
-        id="account_sync_reconciliation_status",
-        replace_existing=True,
-        max_instances=1,
-    )
+    if broker_jobs_enabled:
+        scheduler.add_job(account_sync.run_reconciliation_status_check, "interval", seconds=60, id="account_sync_reconciliation_status", replace_existing=True, max_instances=1, coalesce=True)
 
     log.info(
         "Account reconciliation status check started — every 60 seconds"
@@ -2806,6 +2768,10 @@ async def api_trading_status():
             # ==========================================
 
             "trading_mode": config.TRADING_MODE,
+            "app_role": config.APP_ROLE,
+            "broker_execution_enabled": trading_jobs_enabled(),
+            "trading_jobs_enabled": trading_jobs_enabled(),
+            "reason": "Dashboard deployment cannot connect to local TWS" if config.APP_ROLE == "dashboard" else "",
 
             "strategy_mode": active_strategy_payload["strategy_mode"],
 

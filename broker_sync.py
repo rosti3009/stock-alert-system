@@ -3,6 +3,8 @@ import asyncio, json
 from datetime import datetime, timezone
 import config
 from tws_connection_manager import with_shared_ib_sync
+import ib_insync
+IB = ib_insync.IB
 
 BROKER_SYNC_CLIENT_ID_OFFSET = 700
 
@@ -53,8 +55,18 @@ def fetch_broker_snapshot_sync() -> dict:
         return snapshot
     try:
         return with_shared_ib_sync(_fetch, readonly=True)
-    except Exception as exc:
-        errors.append(str(exc)); return snapshot
+    except Exception:
+        try:
+            ib = IB()
+            ib.connect(config.IBKR_HOST, int(config.IBKR_PORT), clientId=int(config.IBKR_CLIENT_ID) + BROKER_SYNC_CLIENT_ID_OFFSET, readonly=True, timeout=5)
+            return _fetch(ib)
+        except Exception as exc:
+            errors.append(str(exc)); return snapshot
+        finally:
+            try:
+                ib.disconnect()
+            except Exception:
+                pass
     finally:
         snapshot["synced_at"]=now_iso()
 
