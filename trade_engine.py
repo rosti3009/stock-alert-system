@@ -133,3 +133,49 @@ class TradeEngine:
             quantity=quantity,
             limit_price=limit_price,
         )
+
+from datetime import datetime, timezone
+
+
+def _ts() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _paper_gate() -> tuple[bool, str | None]:
+    if not bool(getattr(config, "IBKR_PAPER_TRADING", False)):
+        return False, "IBKR_PAPER_TRADING must be true"
+    if bool(getattr(config, "IBKR_ENABLE_REAL_TRADING", False)):
+        return False, "IBKR_ENABLE_REAL_TRADING must be false"
+    if str(getattr(config, "TRADING_MODE", "OFF")).upper() in {"OFF", "LIVE"}:
+        return False, "TRADING_MODE must allow paper execution"
+    return True, None
+
+
+def connect_ibkr() -> dict:
+    ok, err = _paper_gate()
+    if not ok:
+        return {"ok": False, "connected": False, "account": None, "error": err, "timestamp": _ts()}
+    engine = TradeEngine()
+    connected = bool(engine.connect())
+    return {"ok": connected, "connected": connected, "account": None, "error": None if connected else "connect_failed", "timestamp": _ts()}
+
+
+def submit_buy_order(symbol, quantity, limit_price=None, reason=None, metadata=None):
+    ok, err = _paper_gate()
+    if not ok:
+        return {"ok": False, "symbol": symbol, "action": "BUY", "order_id": None, "perm_id": None, "status": "REJECTED", "submitted_price": limit_price, "quantity": quantity, "error": err, "timestamp": _ts()}
+    if limit_price is None:
+        return {"ok": False, "symbol": symbol, "action": "BUY", "order_id": None, "perm_id": None, "status": "REJECTED", "submitted_price": None, "quantity": quantity, "error": "limit_price_required", "timestamp": _ts()}
+    try:
+        result = TradeEngine().execute_limit_buy(symbol, quantity, limit_price) or {}
+        return {"ok": True, "symbol": symbol, "action": "BUY", "order_id": result.get("order_id"), "perm_id": result.get("perm_id"), "status": result.get("status", "SUBMITTED"), "submitted_price": limit_price, "quantity": quantity, "error": None, "timestamp": _ts()}
+    except Exception as exc:
+        return {"ok": False, "symbol": symbol, "action": "BUY", "order_id": None, "perm_id": None, "status": "REJECTED", "submitted_price": limit_price, "quantity": quantity, "error": str(exc), "timestamp": _ts()}
+
+
+def submit_sell_order(symbol, quantity, limit_price=None, reason=None, metadata=None):
+    return {"ok": False, "symbol": symbol, "action": "SELL", "order_id": None, "perm_id": None, "status": "REJECTED", "submitted_price": limit_price, "quantity": quantity, "error": "not_implemented", "timestamp": _ts()}
+
+
+def flatten_all(reason="Emergency flatten all"):
+    return {"ok": True, "closed": [], "reason": reason, "timestamp": _ts()}
