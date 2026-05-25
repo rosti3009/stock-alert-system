@@ -57,6 +57,8 @@ from paper_liquidation import liquidate_all_paper_positions
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 log = logging.getLogger(__name__)
 
+BROKER_SYNC_RUN_TIMEOUT_SECONDS = 8
+
 _latest: dict[str, dict] = {}
 _top_weekly: list[dict] = []
 _SCAN_UNIVERSE_SET: set[str] = set()
@@ -3037,6 +3039,8 @@ async def api_broker_sync_status():
     try:
         snapshot = await database.fetch_one("SELECT * FROM broker_sync_snapshots ORDER BY id DESC LIMIT 1") or {}
         errors = _safe_json_array(snapshot.get("errors_json")) or _safe_json_array(snapshot.get("errors"))
+        if not isinstance(errors, list):
+            errors = []
         open_orders = _safe_json_array(snapshot.get("open_orders_json"))
         executions = _safe_json_array(snapshot.get("executions_json"))
         positions = _safe_json_array(snapshot.get("positions_json"))
@@ -3079,7 +3083,18 @@ async def api_broker_sync_run():
         return []
 
     try:
-        result = await broker_sync.run_broker_sync_once() or {}
+        try:
+            result = await asyncio.wait_for(
+                broker_sync.run_broker_sync_once(),
+                timeout=BROKER_SYNC_RUN_TIMEOUT_SECONDS,
+            ) or {}
+        except asyncio.TimeoutError:
+            result = {
+                "ok": False,
+                "connected": False,
+                "errors": [f"broker sync timed out after {BROKER_SYNC_RUN_TIMEOUT_SECONDS}s"],
+                "source": "broker_sync",
+            }
         if not isinstance(result, dict):
             result = {"ok": False, "connected": False, "errors": ["malformed broker response"], "source": "broker_sync"}
         await database.save_broker_sync_snapshot(result)

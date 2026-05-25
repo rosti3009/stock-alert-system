@@ -32,6 +32,24 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+async def fetch_all(sql: str, params: tuple = ()) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await apply_sqlite_pragmas(db)
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def fetch_one(sql: str, params: tuple = ()) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await apply_sqlite_pragmas(db)
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cursor:
+            row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
 CREATE_SIGNALS = """
 CREATE TABLE IF NOT EXISTS signals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
