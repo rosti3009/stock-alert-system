@@ -544,12 +544,21 @@ def _blocking_reasons(status: dict, thresholds: dict) -> list[str]:
     open_count = int(live_tracking.get("open_position_count") or 0)
     tracked_count = int(live_tracking.get("tracked_count") or 0)
     tracking_age = live_tracking.get("last_refresh_age_seconds")
+    execution_healthy = (
+        status.get("last_execution_sync_at") is not None
+        and (
+            execution_age is None
+            or execution_age <= thresholds["execution_stale_seconds"]
+            or use_broker_fallback
+        )
+    )
     if open_count > 0:
-        if not live_tracking.get("last_refresh_at"):
+        allow_tracker_gap = bool(use_broker_fallback and execution_healthy)
+        if not live_tracking.get("last_refresh_at") and not allow_tracker_gap:
             reasons.append(LIVE_POSITION_TRACKING_NO_REFRESH_REASON)
-        elif tracking_age is not None and tracking_age > thresholds["position_tracking_stale_seconds"]:
+        elif tracking_age is not None and tracking_age > thresholds["position_tracking_stale_seconds"] and not allow_tracker_gap:
             reasons.append(f"{LIVE_POSITION_TRACKING_STALE_REASON_PREFIX} ({tracking_age}s)")
-        if tracked_count < open_count:
+        if tracked_count < open_count and not allow_tracker_gap:
             reasons.append(f"{LIVE_POSITION_TRACKER_MISSING_REASON_PREFIX} ({tracked_count}/{open_count})")
         if live_tracking.get("healthy") is False:
             reasons.append(LIVE_POSITION_TRACKING_UNHEALTHY_REASON)

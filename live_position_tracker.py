@@ -201,6 +201,27 @@ def _merge_previous_status(previous: dict[str, Any], open_positions: list[dict[s
     return retained, previous_by_symbol
 
 
+async def _resolve_open_symbols_from_sources(open_positions: list[dict[str, Any]]) -> list[str]:
+    symbols = {
+        str(item.get("symbol") or "").strip().upper()
+        for item in open_positions
+        if item.get("symbol")
+    }
+
+    snapshot = await database.get_latest_broker_sync_snapshot() or {}
+    for position in snapshot.get("positions") or []:
+        symbol = str(position.get("symbol") or "").strip().upper()
+        qty = position.get("position")
+        try:
+            has_qty = float(qty) != 0.0
+        except Exception:
+            has_qty = bool(qty)
+        if symbol and has_qty:
+            symbols.add(symbol)
+
+    return sorted(symbol for symbol in symbols if symbol)
+
+
 async def _record_transition_event(position: dict[str, Any], scan_result: dict[str, Any], position_update: dict[str, Any], previous_action: str | None) -> None:
     new_action = position_update.get("action")
     journal_event_by_action = {
@@ -352,10 +373,24 @@ async def refresh_live_tracked_positions(scan_symbol: ScanCallable) -> list[dict
                 refreshed_positions.append(updated)
 
         latest_open_positions = await database.get_open_positions()
-        latest_open_symbols = {str(p.get("symbol") or "").upper() for p in latest_open_positions if p.get("symbol")}
+        latest_open_symbols = set(await _resolve_open_symbols_from_sources(latest_open_positions))
+        if latest_open_symbols and not metadata_by_symbol:
+            for symbol in latest_open_symbols:
+                metadata_by_symbol[symbol] = {
+                    "symbol": symbol,
+                    "status": "OPEN",
+                    "source": LIVE_POSITION_TRACKER_SOURCE,
+                    "position_source": "RECONCILED",
+                    "last_refresh_at": started_at,
+                    "refresh_source": "live_position_tracker_rebuild",
+                    "live_tracking": True,
+                    "live_tracking_source": LIVE_POSITION_TRACKER_SOURCE,
+                    "live_tracking_last_refresh_at": started_at,
+                    "reconciled": True,
+                }
         positions_payload = [item for symbol, item in sorted(metadata_by_symbol.items()) if symbol in latest_open_symbols]
         healthy = not errors
-        last_refresh_at = started_at if latest_open_symbols or positions_payload else None
+        last_refresh_at = started_at if latest_open_symbols else None
         status = {
             "source": LIVE_POSITION_TRACKER_SOURCE,
             "last_refresh_at": last_refresh_at,
