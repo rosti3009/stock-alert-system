@@ -521,10 +521,17 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
     for row in scan_results:
         symbol = str(row.get("symbol", "")).strip().upper()
         signal = row.get("signal")
-        if strategy_mode.is_intraday_mode(active_strategy_mode):
+        intraday_mode_active = strategy_mode.is_intraday_mode(active_strategy_mode)
+        if intraday_mode_active:
             intraday_entry = intraday_momentum_engine.detect_intraday_entry_setup(row)
             row = {**row, **intraday_entry, "intraday_score_reasons": intraday_entry.get("score_reasons", [])}
-            score = int(intraday_entry.get("intraday_momentum_score") or 0)
+            score = int(
+                row.get("aggressive_score")
+                or row.get("intraday_aggressive_score")
+                or intraday_entry.get("intraday_momentum_score")
+                or row.get("intraday_momentum_score")
+                or 0
+            )
             if row.get("regime_override_active"):
                 await database.safe_record_trade_journal_event({
                     "symbol": symbol or "UNKNOWN",
@@ -540,7 +547,47 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
         if not symbol:
             continue
 
-        is_buy_candidate = (signal == "BUY") or (strategy_mode.is_intraday_mode(active_strategy_mode) and bool(row.get("entry_allowed")))
+        aggressive_entry_allowed = bool(row.get("aggressive_entry_allowed"))
+        intraday_entry_allowed = bool(row.get("intraday_entry_allowed"))
+        legacy_entry_allowed = bool(row.get("entry_allowed"))
+        intraday_candidate = aggressive_entry_allowed or intraday_entry_allowed or legacy_entry_allowed or (signal == "BUY")
+
+        if intraday_mode_active and intraday_candidate:
+            await database.safe_record_trade_journal_event({
+                "symbol": symbol,
+                "event_type": "AUTO_TRADER_INTRADAY_CANDIDATE_DETECTED",
+                "decision": "CANDIDATE",
+                "reason": "intraday_candidate_detected",
+                "source_module": "auto_trader",
+                "raw_payload": {
+                    "symbol": symbol,
+                    "aggressive_entry_allowed": aggressive_entry_allowed,
+                    "intraday_entry_allowed": intraday_entry_allowed,
+                    "entry_allowed": legacy_entry_allowed,
+                    "aggressive_score": row.get("aggressive_score"),
+                    "intraday_aggressive_score": row.get("intraday_aggressive_score"),
+                    "intraday_momentum_score": row.get("intraday_momentum_score"),
+                    "rejection_reasons": row.get("rejection_reasons") or [],
+                },
+            })
+        elif intraday_mode_active:
+            await database.safe_record_trade_journal_event({
+                "symbol": symbol,
+                "event_type": "AUTO_TRADER_INTRADAY_CANDIDATE_SKIPPED",
+                "decision": "SKIPPED",
+                "reason": "no_aggressive_or_intraday_entry_allowed",
+                "source_module": "auto_trader",
+                "raw_payload": {
+                    "symbol": symbol,
+                    "aggressive_entry_allowed": aggressive_entry_allowed,
+                    "intraday_entry_allowed": intraday_entry_allowed,
+                    "entry_allowed": legacy_entry_allowed,
+                    "signal": signal,
+                    "rejection_reasons": row.get("rejection_reasons") or [],
+                },
+            })
+
+        is_buy_candidate = intraday_candidate if intraday_mode_active else (signal == "BUY")
 
         if is_buy_candidate:
             if not market_is_open:
@@ -583,8 +630,8 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
                 )
                 continue
 
-            if strategy_mode.is_intraday_mode(active_strategy_mode):
-                if not row.get("entry_allowed"):
+            if intraday_mode_active:
+                if not (aggressive_entry_allowed or intraday_entry_allowed or legacy_entry_allowed):
                     reason = "; ".join(row.get("rejection_reasons") or ["Intraday BUY blocked"])
                     await database.safe_record_trade_journal_event({
                         "symbol": symbol,
