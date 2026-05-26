@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import config
 import database
@@ -113,11 +114,13 @@ def test_intraday_score_and_entry_allowed_reaches_execution_safety():
 
 
 def test_intraday_sell_logic_uses_intraday_exits():
-    result = position_manager.evaluate_position(
-        {"symbol": "AAPL", "buy_price": 100, "quantity": 2, "stop_loss": 98.5},
-        {"symbol": "AAPL", "price": 98.4, "signal": "NEUTRAL"},
-        mode=strategy_mode.StrategyMode.INTRADAY_TECHNICAL.value,
-    )
+    # Keep production force-exit priority intact; pin this test outside force-exit window.
+    with patch.object(strategy_mode, "force_exit_before_close_status", return_value={"enabled": True, "active": False, "minutes_before_close": 15}):
+        result = position_manager.evaluate_position(
+            {"symbol": "AAPL", "buy_price": 100, "quantity": 2, "stop_loss": 98.5},
+            {"symbol": "AAPL", "price": 98.4, "signal": "NEUTRAL"},
+            mode=strategy_mode.StrategyMode.INTRADAY_TECHNICAL.value,
+        )
 
     assert result["exit_engine"] == "intraday_exit"
     assert result["action"] == "INTRADAY_STOP_LOSS_HIT"
