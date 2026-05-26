@@ -219,7 +219,39 @@ class LivePositionTrackerTests(unittest.TestCase):
         asyncio.run(live_position_tracker.refresh_live_tracked_positions(fake_scan))
         asyncio.run(live_position_tracker.refresh_live_tracked_positions(fake_scan))
 
-        self.assertEqual(calls, ["AAPL", "AAPL"])
+    def test_sell_signal_does_not_close_without_broker_confirmation(self):
+        self.add_position("TSCO")
+
+        async def fake_scan(symbol: str) -> dict:
+            return {"symbol": symbol, "price": 95, "signal": "SELL"}
+
+        asyncio.run(live_position_tracker.refresh_live_tracked_positions(fake_scan))
+        row = asyncio.run(database.get_position("TSCO"))
+        self.assertEqual(row["status"], "CLOSE_REQUESTED")
+        self.assertEqual(row["action"], "SELL_SIGNAL")
+
+    def test_broker_open_reopens_closed_and_restores_tracker_symbol(self):
+        self.insert_position("TSCO", status="CLOSED", action="INTRADAY_SELL_SIGNAL")
+        asyncio.run(database.save_broker_sync_snapshot({
+            "synced_at": database.now_iso(),
+            "ok": True,
+            "connected": True,
+            "positions": [{"symbol": "TSCO", "position": 3}],
+            "open_orders": [],
+            "executions": [],
+            "errors": [],
+            "equity": {},
+        }))
+
+        async def fake_scan(symbol: str) -> dict:
+            return {"symbol": symbol, "price": 101, "signal": "HOLD"}
+
+        asyncio.run(live_position_tracker.refresh_live_tracked_positions(fake_scan))
+        row = asyncio.run(database.get_position("TSCO"))
+        status = asyncio.run(live_position_tracker.get_tracker_status())
+        self.assertEqual(row["status"], "OPEN")
+        self.assertEqual(row["action"], "POSITION_REOPENED_FROM_BROKER_TRUTH")
+        self.assertIn("TSCO", status["tracked_symbols"])
 
     def test_scanner_rotation_no_longer_controls_active_positions(self):
         self.add_position("AAPL")

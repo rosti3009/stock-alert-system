@@ -152,7 +152,7 @@ def evaluate_position(position: dict, market: dict, mode: str | None = None) -> 
             "stop_loss": stop_loss,
             "take_profit_1": take_profit_1,
             "take_profit_2": take_profit_2,
-            "status": "CLOSED",
+            "status": "CLOSE_REQUESTED",
             "action": "SELL_SIGNAL",
             "reason": "Sell signal detected",
             "partial_sell": False,
@@ -258,7 +258,7 @@ def evaluate_intraday_position(
         return payload("INTRADAY_TIME_EXIT", "Intraday time exit: trade did not move", "CLOSED", False, quantity)
 
     if market.get("signal") == "SELL":
-        return payload("INTRADAY_SELL_SIGNAL", "Intraday sell signal detected", "CLOSED", False, quantity)
+        return payload("INTRADAY_SELL_SIGNAL", "Intraday sell signal detected", "CLOSE_REQUESTED", False, quantity)
 
     if not rules["allow_overnight"]:
         return payload("INTRADAY_HOLD", "Intraday position monitored; overnight holding disabled")
