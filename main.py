@@ -41,6 +41,7 @@ import position_exit_priority_engine
 import sector_intelligence
 import strategy_mode
 import intraday_momentum_engine
+from broker_freshness import evaluate_broker_freshness
 from execution_quality import evaluate_execution_quality, summarize_execution_quality
 from auto_trader import process_auto_trading
 from trading_safety import get_market_hours_status
@@ -2675,14 +2676,13 @@ async def api_trading_status():
     auto_trading_enabled = bool(auto_trading_state["enabled"])
 
     stale_data = watchdog_status.get("stale_data") or {}
-    broker_sync_connected = bool(broker_snapshot.get("connected"))
-    broker_sync_fresh = bool(broker_snapshot.get("synced_at")) and not bool(stale_data.get("broker_sync"))
-    tws_mirror_fresh = (not bool(stale_data.get("tws_mirror"))) or broker_sync_fresh
+    freshness = evaluate_broker_freshness(watchdog_status, broker_snapshot)
+    broker_sync_connected = bool(freshness.get("broker_sync_connected"))
+    broker_sync_fresh = bool(freshness.get("broker_sync_fresh"))
+    tws_mirror_fresh = bool(freshness.get("tws_mirror_fresh"))
     broker_exec_count = len(json.loads(broker_snapshot.get("executions_json") or "[]")) if broker_snapshot else 0
-    execution_sync_fresh = (not bool(stale_data.get("execution_sync"))) or broker_sync_fresh
-    freshness_source = "watchdog"
-    if broker_sync_fresh and broker_sync_connected:
-        freshness_source = "broker_sync_source_of_truth"
+    execution_sync_fresh = bool(freshness.get("execution_sync_fresh"))
+    freshness_source = freshness.get("freshness_source")
 
     blocked_reasons = []
     market_hours = get_market_hours_status()
