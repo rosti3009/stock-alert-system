@@ -2403,7 +2403,7 @@ async def api_positions():
     merged, missing_tracker = _merge_positions_with_truth(db_positions, tracker, broker_snapshot)
     payload = {
         "positions": merged,
-        "position_truth_source": "broker_snapshot",
+        "position_truth_source": "BROKER_SNAPSHOT",
         "enrichment_source": "live_position_tracker",
         "missing_tracker_enrichment_symbols": missing_tracker,
     }
@@ -2453,7 +2453,7 @@ def _merge_positions_with_truth(
             "reason": "Present in broker snapshot",
         }
         position = dict(db_row)
-        position["position_truth_source"] = "broker_snapshot"
+        position["position_truth_source"] = "BROKER_SNAPSHOT"
 
         live = tracker_by_symbol.get(symbol)
         position["live_tracking"] = bool(live)
@@ -2470,13 +2470,15 @@ def _merge_positions_with_truth(
                     position[key] = live.get(key)
         merged.append(position)
 
+    open_statuses = {"OPEN", "CLOSE_REQUESTED", "PENDING_BROKER_CONFIRMATION"}
     for row in db_positions:
         symbol = str(row.get("symbol") or "").strip().upper()
-        if not symbol or symbol in broker_by_symbol:
+        status = str(row.get("status") or "").strip().upper()
+        if not symbol or symbol in broker_by_symbol or status not in open_statuses:
             continue
         position = dict(row)
         live = tracker_by_symbol.get(symbol)
-        position["position_truth_source"] = "database"
+        position["position_truth_source"] = "DATABASE"
         position["live_tracking"] = bool(live and str(position.get("status") or "").upper() == "OPEN")
         position["live_tracking_source"] = (live or {}).get("source")
         position["live_tracking_last_refresh_at"] = (live or {}).get("last_refresh_at")
