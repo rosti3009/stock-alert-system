@@ -86,6 +86,37 @@ def _reference_price(row: dict[str, Any] | None, quote: dict[str, Any] | None, l
     return 0.0
 
 
+def normalize_volume_metrics(
+    row: dict[str, Any] | None,
+    quote: dict[str, Any] | None = None,
+    limit_price: float | None = None,
+) -> dict[str, Any]:
+    row = row or {}
+    quote = quote or {}
+    reference_price = _reference_price(row, quote, limit_price)
+    avg_volume = _first_float(row.get("average_volume"), row.get("avg_volume"))
+    volume = _first_float(row.get("current_volume"), row.get("volume"))
+    relative_volume = _first_float(row.get("relative_volume"), row.get("volume_ratio"))
+    explicit_dollar_volume = _first_float(row.get("dollar_volume"))
+    dollar_volume = explicit_dollar_volume
+    used_volume_alias = row.get("average_volume") in (None, "") and row.get("avg_volume") not in (None, "")
+    computed_dollar_volume = False
+    if dollar_volume is None and avg_volume is not None and reference_price > 0:
+        dollar_volume = avg_volume * reference_price
+        computed_dollar_volume = True
+    if relative_volume is None and avg_volume and avg_volume > 0 and volume is not None:
+        relative_volume = volume / avg_volume
+    return {
+        "reference_price": reference_price,
+        "average_volume": avg_volume,
+        "volume": volume,
+        "relative_volume": relative_volume,
+        "dollar_volume": dollar_volume,
+        "used_avg_volume_alias": used_volume_alias,
+        "computed_dollar_volume": computed_dollar_volume,
+    }
+
+
 def _latest_range_percent(row: dict[str, Any], reference_price: float) -> float | None:
     high = _safe_float(row.get("high") or row.get("day_high") or row.get("latest_high"), None)
     low = _safe_float(row.get("low") or row.get("day_low") or row.get("latest_low"), None)
@@ -216,7 +247,8 @@ def evaluate_execution_quality(
 
     bid = _safe_float(quote.get("bid") if quote else row.get("bid"), None)
     ask = _safe_float(quote.get("ask") if quote else row.get("ask"), None)
-    reference_price = _reference_price(row, quote, limit_price)
+    volume_metrics = normalize_volume_metrics(row=row, quote=quote, limit_price=limit_price)
+    reference_price = volume_metrics["reference_price"]
 
     spread_dollars = None
     spread_percent = None
@@ -226,12 +258,10 @@ def evaluate_execution_quality(
         if mid > 0:
             spread_percent = (spread_dollars / mid) * 100
 
-    avg_volume = _first_float(row.get("average_volume"), row.get("avg_volume"))
-    volume = _first_float(row.get("current_volume"), row.get("volume"))
-    relative_volume = _first_float(row.get("relative_volume"), row.get("volume_ratio"))
-    dollar_volume = avg_volume * reference_price if avg_volume is not None and reference_price > 0 else None
-    if relative_volume is None and avg_volume and avg_volume > 0 and volume is not None:
-        relative_volume = volume / avg_volume
+    avg_volume = volume_metrics["average_volume"]
+    volume = volume_metrics["volume"]
+    relative_volume = volume_metrics["relative_volume"]
+    dollar_volume = volume_metrics["dollar_volume"]
 
     intraday_volatility = _safe_float(row.get("intraday_volatility_percent") or row.get("atr_percent"), None)
     if intraday_volatility is None:
@@ -251,6 +281,12 @@ def evaluate_execution_quality(
     dangers: list[str] = []
     block_reasons: list[str] = []
     block_categories: list[str] = []
+    journal_events: list[str] = []
+
+    if volume_metrics["used_avg_volume_alias"]:
+        journal_events.append("EXECUTION_VOLUME_FALLBACK_USED")
+    if volume_metrics["computed_dollar_volume"]:
+        journal_events.append("EXECUTION_DOLLAR_VOLUME_COMPUTED")
 
     def add_warning(message: str) -> None:
         warnings.append(message)
@@ -366,9 +402,12 @@ def evaluate_execution_quality(
             "current_price": _round(reference_price),
             "dollar_volume": _round(dollar_volume, 0),
             "relative_volume": _round(relative_volume),
+            "used_avg_volume_alias": volume_metrics["used_avg_volume_alias"],
+            "computed_dollar_volume": volume_metrics["computed_dollar_volume"],
             "block_reasons": list(dict.fromkeys(liquidity_block_reasons)),
             "decision": liquidity_decision,
         },
+        "journal_events": journal_events,
         "warnings": warnings,
         "dangers": dangers,
         "metrics": {
