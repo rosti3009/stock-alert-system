@@ -122,6 +122,9 @@ def test_broker_sync_run_times_out_and_does_not_hang(monkeypatch):
     assert payload["ok"] is False
     assert payload["connected"] is False
     assert any("timed out" in err for err in payload["errors"])
+    assert "timeout_seconds" in payload
+    assert "shared_ib_connected" in payload
+    assert "client_id" in payload
 
 
 def test_manual_tws_mirror_endpoint_exists_and_returns_json_in_dashboard(monkeypatch):

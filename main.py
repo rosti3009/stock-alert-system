@@ -42,6 +42,7 @@ import sector_intelligence
 import strategy_mode
 import intraday_momentum_engine
 from broker_freshness import evaluate_broker_freshness
+from tws_connection_manager import is_ib_connected as shared_ib_connected
 from execution_quality import evaluate_execution_quality, summarize_execution_quality
 from auto_trader import process_auto_trading
 from trading_safety import get_market_hours_status
@@ -60,7 +61,7 @@ from paper_liquidation import liquidate_all_paper_positions
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 log = logging.getLogger(__name__)
 
-BROKER_SYNC_RUN_TIMEOUT_SECONDS = 8
+BROKER_SYNC_RUN_TIMEOUT_SECONDS = float(getattr(config, "BROKER_SYNC_MANUAL_TIMEOUT_SECONDS", 20))
 STARTUP_RECOVERY_RUN_TIMEOUT_SECONDS = 30
 MANUAL_SYNC_RUN_TIMEOUT_SECONDS = 10
 
@@ -3136,10 +3137,18 @@ async def api_broker_sync_run():
                 timeout=BROKER_SYNC_RUN_TIMEOUT_SECONDS,
             ) or {}
         except asyncio.TimeoutError:
+            last_snapshot = await (database.get_latest_broker_sync_snapshot() if hasattr(database, "get_latest_broker_sync_snapshot") else asyncio.sleep(0, result={})) or {}
             result = {
                 "ok": False,
                 "connected": False,
+                "error_type": "timeout",
+                "error": f"broker sync timed out after {BROKER_SYNC_RUN_TIMEOUT_SECONDS}s",
                 "errors": [f"broker sync timed out after {BROKER_SYNC_RUN_TIMEOUT_SECONDS}s"],
+                "timeout_seconds": BROKER_SYNC_RUN_TIMEOUT_SECONDS,
+                "active_ib_connected": False,
+                "shared_ib_connected": bool(shared_ib_connected()),
+                "client_id": int(getattr(config, "IBKR_CLIENT_ID", 0)),
+                "last_successful_snapshot_at": last_snapshot.get("synced_at") if last_snapshot.get("ok") else None,
                 "source": "broker_sync",
             }
         if not isinstance(result, dict):
@@ -3149,11 +3158,17 @@ async def api_broker_sync_run():
         open_orders = _safe_array(result, "open_orders")
         executions = _safe_array(result, "executions")
         positions = _safe_array(result, "positions")
+        latest_snapshot = await (database.get_latest_broker_sync_snapshot() if hasattr(database, "get_latest_broker_sync_snapshot") else asyncio.sleep(0, result={})) or {}
         return {
             "ok": bool(result.get("ok", False)),
             "connected": bool(result.get("connected", False)),
             "result": result,
             "errors": errors,
+            "timeout_seconds": result.get("timeout_seconds", BROKER_SYNC_RUN_TIMEOUT_SECONDS),
+            "active_ib_connected": bool(result.get("connected", False)),
+            "shared_ib_connected": bool(shared_ib_connected()),
+            "client_id": int(getattr(config, "IBKR_CLIENT_ID", 0)),
+            "last_successful_snapshot_at": latest_snapshot.get("synced_at") if latest_snapshot.get("ok") else None,
             "last_synced_at": result.get("synced_at"),
             "heartbeat_age_seconds": result.get("heartbeat_age_seconds"),
             "open_orders_count": len(open_orders),
