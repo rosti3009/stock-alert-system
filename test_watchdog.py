@@ -71,7 +71,7 @@ async def seed_broker_sync_snapshot(*, connected: bool, synced_at: str):
         "connected": connected,
         "account": "DU123",
         "equity": {},
-        "positions": [],
+        "positions": [{"symbol": "TSCO", "position": 10}],
         "open_orders": [],
         "executions": [],
         "errors": [],
@@ -295,6 +295,30 @@ class WatchdogTests(unittest.TestCase):
 
         stale_alerts = [alert for alert in sent_alerts if "Market data stale" in alert]
         self.assertEqual(len(stale_alerts), 1)
+
+    def test_watchdog_does_not_block_on_temporary_tracker_gap_when_broker_and_execution_are_healthy(self):
+        fresh = iso_delta(0)
+        self._add_open_position("TSCO")
+        asyncio.run(seed_watchdog_inputs(connected=True, mirror_at=fresh, execution_at=fresh, market_at=fresh))
+        asyncio.run(seed_broker_sync_snapshot(connected=True, synced_at=fresh))
+        asyncio.run(database.set_app_state(
+            watchdog.LIVE_POSITION_TRACKER_STATE_KEY,
+            json.dumps({
+                "source": "live_position_tracker",
+                "last_refresh_at": None,
+                "tracked_count": 0,
+                "tracked_symbols": [],
+                "positions": [],
+                "healthy": True,
+            }),
+        ))
+        with patch.object(watchdog, "is_ib_connected", return_value=True), \
+             patch.object(watchdog, "send_watchdog_alert", return_value=True):
+            status = asyncio.run(watchdog.run_watchdog_once())
+
+        self.assertFalse(status["trading_blocked"], status)
+        self.assertFalse(any("Live position tracker missing open positions" in r for r in status["blocking_reasons"]))
+        self.assertFalse(any("No live position tracking refresh for open positions" in r for r in status["blocking_reasons"]))
 
     def test_watchdog_status_endpoint_works(self):
         async def fake_status():

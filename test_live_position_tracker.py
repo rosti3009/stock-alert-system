@@ -273,6 +273,30 @@ class LivePositionTrackerTests(unittest.TestCase):
         self.assertTrue(status["stale_data"]["live_position_tracking"])
         self.assertTrue(any("Live position tracking stale" in reason for reason in status["blocking_reasons"]))
 
+    def test_refresh_rebuilds_tracker_symbols_from_broker_snapshot_when_empty(self):
+        self.add_position("TSCO")
+        asyncio.run(database.save_broker_sync_snapshot({
+            "synced_at": database.now_iso(),
+            "ok": True,
+            "connected": True,
+            "account": "DU123",
+            "positions": [{"symbol": "TSCO", "position": 10}],
+            "executions": [],
+            "open_orders": [],
+            "errors": [],
+        }))
+
+        async def fake_scan(symbol: str) -> dict:
+            return {"symbol": symbol, "signal": "ERROR", "error": "temporary scan failure"}
+
+        asyncio.run(live_position_tracker.refresh_live_tracked_positions(fake_scan))
+        status = asyncio.run(live_position_tracker.get_tracker_status())
+
+        self.assertEqual(status["open_position_count"], 1)
+        self.assertEqual(status["tracked_count"], 1)
+        self.assertEqual(status["tracked_symbols"], ["TSCO"])
+        self.assertIsNotNone(status["last_refresh_at"])
+
 
 if __name__ == "__main__":
     unittest.main()
