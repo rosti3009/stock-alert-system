@@ -92,3 +92,52 @@ def test_intraday_vwap_and_relative_volume_populated_when_data_exists(monkeypatc
     assert isinstance(row.get("vwap"), float)
     assert isinstance(row.get("relative_volume"), float)
     assert row["relative_volume"] > 0
+
+
+def test_intraday_momentum_mode_populates_aggressive_fields(monkeypatch):
+    monkeypatch.setattr(main, "fetch_stock_data", lambda symbol: _daily_payload(symbol))
+
+    async def _mode():
+        return strategy_mode.StrategyMode.INTRADAY_MOMENTUM
+
+    monkeypatch.setattr(main.strategy_mode, "get_strategy_mode", _mode)
+    monkeypatch.setattr(main.watchdog, "refresh_market_data_timestamp", lambda *args, **kwargs: asyncio.sleep(0))
+    monkeypatch.setattr(main, "maybe_send_alert", lambda *args, **kwargs: asyncio.sleep(0))
+    monkeypatch.setattr(main, "fetch_intraday_bars", lambda symbol, timeframe="5m": _intraday_bars())
+
+    row = run_async(main.scan_symbol("AAPL"))
+
+    assert row["intraday_momentum_score"] > 0
+    assert row["aggressive_score"] == row["intraday_aggressive_score"]
+    assert row["aggressive_score"] > 0
+    assert isinstance(row["aggressive_rejection_reasons"], list)
+
+
+def test_oust_like_row_can_allow_aggressive_entry(monkeypatch):
+    monkeypatch.setattr(main, "fetch_stock_data", lambda symbol: _daily_payload(symbol))
+
+    async def _mode():
+        return strategy_mode.StrategyMode.INTRADAY_MOMENTUM
+
+    monkeypatch.setattr(main.strategy_mode, "get_strategy_mode", _mode)
+    monkeypatch.setattr(main.watchdog, "refresh_market_data_timestamp", lambda *args, **kwargs: asyncio.sleep(0))
+    monkeypatch.setattr(main, "maybe_send_alert", lambda *args, **kwargs: asyncio.sleep(0))
+    monkeypatch.setattr(main, "fetch_intraday_bars", lambda symbol, timeframe="5m": _intraday_bars())
+
+    row = run_async(main.scan_symbol("OUST"))
+    row.update({
+        "relative_volume": 15.897,
+        "price": float(row.get("price") or row.get("current_price") or 110.0),
+        "vwap": float(row.get("vwap") or 100.0),
+        "ema9": float(row.get("ema9") or 101.0),
+        "ema20": None,
+        "volume_confirmation": True,
+        "volume_expansion": None,
+        "spread_percent": 0.8,
+        "intraday_entry_allowed": True,
+    })
+    payload = main.intraday_momentum_engine.detect_intraday_entry_setup(row)
+
+    assert payload["intraday_aggressive_score"] >= 60
+    assert payload["aggressive_entry_allowed"] is True
+    assert isinstance(payload["aggressive_rejection_reasons"], list)
