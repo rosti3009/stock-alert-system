@@ -64,6 +64,20 @@ async def seed_watchdog_inputs(*, connected: bool, mirror_at: str, execution_at:
         await db.commit()
 
 
+async def seed_broker_sync_snapshot(*, connected: bool, synced_at: str):
+    await database.save_broker_sync_snapshot({
+        "synced_at": synced_at,
+        "ok": True,
+        "connected": connected,
+        "account": "DU123",
+        "equity": {},
+        "positions": [],
+        "open_orders": [],
+        "executions": [],
+        "errors": [],
+    })
+
+
 class WatchdogTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -255,6 +269,18 @@ class WatchdogTests(unittest.TestCase):
         self.assertTrue(status["tws_connected"])
         self.assertFalse(status["trading_blocked"])
         self.assertEqual(status["blocking_reasons"], [])
+
+    def test_stale_mirror_execution_with_fresh_broker_sync_is_not_blocked(self):
+        stale = iso_delta(-600)
+        fresh = iso_delta(0)
+        asyncio.run(seed_watchdog_inputs(connected=True, mirror_at=stale, execution_at=stale, market_at=fresh))
+        asyncio.run(seed_broker_sync_snapshot(connected=True, synced_at=fresh))
+        with patch.object(watchdog, "is_ib_connected", return_value=True), \
+             patch.object(watchdog, "send_watchdog_alert", return_value=True):
+            status = asyncio.run(watchdog.run_watchdog_once())
+        self.assertFalse(status["trading_blocked"], status)
+        self.assertFalse(status["stale_data"]["tws_mirror"])
+        self.assertFalse(status["stale_data"]["execution_sync"])
 
     def test_duplicate_telegram_alerts_are_suppressed(self):
         sent_alerts = []

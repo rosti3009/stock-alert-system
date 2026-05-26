@@ -55,6 +55,25 @@ CREATE TABLE IF NOT EXISTS reconciliation_issues (
 )
 """
 
+CREATE_BROKER_SYNC_SNAPSHOTS = """
+CREATE TABLE IF NOT EXISTS broker_sync_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    synced_at TEXT,
+    ok INTEGER,
+    connected INTEGER,
+    account TEXT,
+    net_liquidation REAL,
+    total_cash REAL,
+    available_funds REAL,
+    buying_power REAL,
+    positions_json TEXT,
+    open_orders_json TEXT,
+    executions_json TEXT,
+    errors_json TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 
 class RecoveryManagerTests(unittest.TestCase):
     def setUp(self):
@@ -186,6 +205,24 @@ class RecoveryManagerTests(unittest.TestCase):
 
         self.assertEqual(status["state"], "HEALTHY")
         self.assertTrue(any(row["event_type"] == "RECOVERY_STATE_CHANGED" for row in rows))
+
+    def _seed_fresh_broker_sync_fallback(self):
+        with closing(sqlite3.connect(self.tmp.name)) as db:
+            db.execute(CREATE_BROKER_SYNC_SNAPSHOTS)
+            db.execute("INSERT INTO broker_sync_snapshots (synced_at, ok, connected, account, executions_json, errors_json) VALUES (?,1,1,'DU123','[]','[]')", (recovery_manager.now_iso(),))
+            db.execute("INSERT INTO app_state (key, value) VALUES ('watchdog_status', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", ('{"stale_data":{"broker_sync":false,"tws_mirror":true,"execution_sync":true}}',))
+            db.commit()
+
+    def test_stale_tws_heartbeat_with_fresh_broker_sync_allows_buy(self):
+        self.write_heartbeat(connected=True, age_seconds=180)
+        self._seed_fresh_broker_sync_fallback()
+        status = asyncio.run(recovery_manager.run_recovery_check())
+        self.assertFalse(status["buy_blocked"], status)
+
+    def test_disconnected_broker_sync_and_stale_heartbeat_blocks_buy(self):
+        self.write_heartbeat(connected=True, age_seconds=180)
+        status = asyncio.run(recovery_manager.run_recovery_check())
+        self.assertTrue(status["buy_blocked"], status)
 
 
 if __name__ == "__main__":

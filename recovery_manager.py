@@ -13,6 +13,7 @@ import aiosqlite
 
 import config
 import database
+from broker_freshness import evaluate_broker_freshness
 
 log = logging.getLogger(__name__)
 
@@ -183,8 +184,13 @@ async def _collect_heartbeat_issues(db: aiosqlite.Connection) -> tuple[dict[str,
         "age_seconds": age_seconds,
         "error": error,
     })
+    watchdog_status_raw = await database.get_app_state("watchdog_status")
+    watchdog_status = json.loads(watchdog_status_raw) if watchdog_status_raw else {}
+    broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
+    freshness = evaluate_broker_freshness(watchdog_status, broker_snapshot)
+    fallback_active = bool(freshness.get("broker_sync_connected") and freshness.get("broker_sync_fresh"))
 
-    if not connected:
+    if not connected and not fallback_active:
         issues.append(RecoveryIssue(
             issue_type="TWS_DISCONNECTED",
             severity="CRITICAL",
@@ -193,14 +199,14 @@ async def _collect_heartbeat_issues(db: aiosqlite.Connection) -> tuple[dict[str,
             details={"error": error},
         ))
 
-    if last_sync_dt is None:
+    if last_sync_dt is None and not fallback_active:
         issues.append(RecoveryIssue(
             issue_type="TWS_HEARTBEAT_MISSING_TIMESTAMP",
             severity="HIGH",
             message="TWS heartbeat is missing last_sync_at",
             source="tws_heartbeat",
         ))
-    elif age_seconds is not None and age_seconds > heartbeat_block_buy_seconds():
+    elif age_seconds is not None and age_seconds > heartbeat_block_buy_seconds() and not fallback_active:
         issues.append(RecoveryIssue(
             issue_type="TWS_HEARTBEAT_BLOCK_STALE",
             severity="CRITICAL",
@@ -208,7 +214,7 @@ async def _collect_heartbeat_issues(db: aiosqlite.Connection) -> tuple[dict[str,
             source="tws_heartbeat",
             details={"age_seconds": age_seconds},
         ))
-    elif age_seconds is not None and age_seconds > heartbeat_degraded_seconds():
+    elif age_seconds is not None and age_seconds > heartbeat_degraded_seconds() and not fallback_active:
         issues.append(RecoveryIssue(
             issue_type="TWS_HEARTBEAT_RECOVERY_STALE",
             severity="HIGH",
@@ -217,6 +223,8 @@ async def _collect_heartbeat_issues(db: aiosqlite.Connection) -> tuple[dict[str,
             details={"age_seconds": age_seconds},
         ))
 
+    heartbeat["freshness"] = freshness
+    heartbeat["fallback_active"] = fallback_active
     return heartbeat, issues
 
 
@@ -385,6 +393,13 @@ def evaluate_recovery_status_sync() -> dict[str, Any]:
     }
 
     with closing(sqlite3.connect(config.DB_PATH)) as db:
+        watchdog_row = db.execute("SELECT value FROM app_state WHERE key='watchdog_status'").fetchone()
+        watchdog_status = json.loads(watchdog_row[0]) if watchdog_row and watchdog_row[0] else {}
+        broker_row = db.execute("SELECT connected, synced_at FROM broker_sync_snapshots ORDER BY id DESC LIMIT 1").fetchone()
+        broker_snapshot = {"connected": bool(broker_row[0]), "synced_at": broker_row[1]} if broker_row else {}
+        freshness = evaluate_broker_freshness(watchdog_status, broker_snapshot)
+        fallback_active = bool(freshness.get("broker_sync_connected") and freshness.get("broker_sync_fresh"))
+
         if _sync_table_exists(db, "tws_heartbeat"):
             row = db.execute(
                 "SELECT connected, account, last_sync_at, error FROM tws_heartbeat WHERE id = 1"
@@ -412,7 +427,7 @@ def evaluate_recovery_status_sync() -> dict[str, Any]:
                 "error": row[3],
             })
 
-            if not connected:
+            if not connected and not fallback_active:
                 issues.append(RecoveryIssue(
                     issue_type="TWS_DISCONNECTED",
                     severity="CRITICAL",
@@ -421,14 +436,14 @@ def evaluate_recovery_status_sync() -> dict[str, Any]:
                     details={"error": row[3]},
                 ))
 
-            if last_sync_dt is None:
+            if last_sync_dt is None and not fallback_active:
                 issues.append(RecoveryIssue(
                     issue_type="TWS_HEARTBEAT_MISSING_TIMESTAMP",
                     severity="HIGH",
                     message="TWS heartbeat is missing last_sync_at",
                     source="tws_heartbeat",
                 ))
-            elif age_seconds is not None and age_seconds > heartbeat_block_buy_seconds():
+            elif age_seconds is not None and age_seconds > heartbeat_block_buy_seconds() and not fallback_active:
                 issues.append(RecoveryIssue(
                     issue_type="TWS_HEARTBEAT_BLOCK_STALE",
                     severity="CRITICAL",
@@ -436,7 +451,7 @@ def evaluate_recovery_status_sync() -> dict[str, Any]:
                     source="tws_heartbeat",
                     details={"age_seconds": age_seconds},
                 ))
-            elif age_seconds is not None and age_seconds > heartbeat_degraded_seconds():
+            elif age_seconds is not None and age_seconds > heartbeat_degraded_seconds() and not fallback_active:
                 issues.append(RecoveryIssue(
                     issue_type="TWS_HEARTBEAT_RECOVERY_STALE",
                     severity="HIGH",
@@ -475,6 +490,8 @@ def evaluate_recovery_status_sync() -> dict[str, Any]:
     state = _state_from_issues(issues)
     buy_blocked = state.value in BUY_BLOCKING_STATES
 
+    heartbeat["freshness"] = freshness
+    heartbeat["fallback_active"] = fallback_active
     return {
         "state": state.value,
         "healthy": state == RecoveryState.HEALTHY,
@@ -489,6 +506,15 @@ def evaluate_recovery_status_sync() -> dict[str, Any]:
 
 def require_buy_allowed(source_module: str = "buy_order") -> None:
     status = evaluate_recovery_status_sync()
+
+    if bool((status.get("heartbeat") or {}).get("fallback_active")):
+        database.safe_record_trade_journal_event_sync({
+            "event_type": "RECOVERY_MANAGER_BROKER_FALLBACK_USED",
+            "decision": "ALLOWED",
+            "reason": "Broker-sync freshness fallback satisfied heartbeat requirements",
+            "source_module": source_module,
+            "raw_payload": {"freshness": (status.get("heartbeat") or {}).get("freshness")},
+        })
 
     if not status.get("buy_blocked"):
         return

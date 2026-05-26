@@ -12,6 +12,7 @@ import aiosqlite
 
 import config
 import database
+from broker_freshness import evaluate_broker_freshness
 from circuit_breaker import auto_clear_recoverable_circuit_breaker, get_circuit_breaker_state, trip_circuit_breaker
 from telegram_notifier import send_watchdog_alert
 from tws_connection_manager import disconnect_ib_sync, get_ib_sync, is_ib_connected
@@ -409,6 +410,7 @@ async def _read_observed_state() -> dict:
 
     last_mirror_success_at = await database.get_app_state("tws_mirror_last_success_at")
     last_execution_success_at = await database.get_app_state("execution_sync_last_success_at")
+    broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
     live_position_tracking = await _read_live_position_tracking_state()
 
     return {
@@ -418,6 +420,7 @@ async def _read_observed_state() -> dict:
         "last_tws_mirror_sync_at": last_mirror_success_at,
         "last_tws_mirror_sync_age_seconds": _age_seconds(last_mirror_success_at),
         "last_execution_sync_at": last_execution_success_at,
+        "broker_snapshot": broker_snapshot,
         "last_execution_sync_age_seconds": _age_seconds(last_execution_success_at),
         "last_market_data_at": market_data_at,
         "last_market_data_age_seconds": _age_seconds(market_data_at),
@@ -518,16 +521,19 @@ def _blocking_reasons(status: dict, thresholds: dict) -> list[str]:
     if not status.get("tws_connected"):
         reasons.append("TWS/API disconnected")
 
+    freshness = evaluate_broker_freshness(status, status.get("broker_snapshot") or {})
+    use_broker_fallback = bool(freshness.get("broker_sync_connected") and freshness.get("broker_sync_fresh"))
+
     mirror_age = status.get("last_tws_mirror_sync_age_seconds")
-    if status.get("last_tws_mirror_sync_at") is None:
+    if status.get("last_tws_mirror_sync_at") is None and not use_broker_fallback:
         reasons.append("No successful TWS mirror sync timestamp")
-    elif mirror_age is not None and mirror_age > thresholds["mirror_stale_seconds"]:
+    elif mirror_age is not None and mirror_age > thresholds["mirror_stale_seconds"] and not use_broker_fallback:
         reasons.append(f"TWS mirror sync stale ({mirror_age}s)")
 
     execution_age = status.get("last_execution_sync_age_seconds")
-    if status.get("last_execution_sync_at") is None:
+    if status.get("last_execution_sync_at") is None and not use_broker_fallback:
         reasons.append("No successful execution sync timestamp")
-    elif execution_age is not None and execution_age > thresholds["execution_stale_seconds"]:
+    elif execution_age is not None and execution_age > thresholds["execution_stale_seconds"] and not use_broker_fallback:
         reasons.append(f"Execution sync stale ({execution_age}s)")
 
     market_age = status.get("last_market_data_age_seconds")
@@ -618,9 +624,11 @@ async def run_watchdog_once() -> dict:
     if live_position_tracker_recovered:
         log.info("Live position tracker recovered")
     status["trading_blocked"] = len(status["blocking_reasons"]) > 0
+    freshness = evaluate_broker_freshness(status, status.get("broker_snapshot") or {})
     status["stale_data"] = {
         "tws_mirror": any("TWS mirror sync stale" in r or "No successful TWS mirror" in r for r in status["blocking_reasons"]),
         "execution_sync": any("Execution sync stale" in r or "No successful execution" in r for r in status["blocking_reasons"]),
+        "broker_sync": not bool(freshness.get("broker_sync_connected") and freshness.get("broker_sync_fresh")),
         "market_data": any("Market data stale" in r for r in status["blocking_reasons"]),
         "live_position_tracking": any(_is_live_position_tracker_reason(r) for r in status["blocking_reasons"]),
     }
