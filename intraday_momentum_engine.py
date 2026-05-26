@@ -129,7 +129,10 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
     if not intraday_entry_allowed:
         rejection_reasons.append("intraday_entry_allowed=false")
     rv = _f(row.get("relative_volume")) or 0.0
-    dv = _f(row.get("dollar_volume")) or 0.0
+    price = _f(row.get("price") or row.get("current_price"))
+    volume = _f(row.get("volume"))
+    explicit_dv = _f(row.get("dollar_volume"))
+    dv = explicit_dv if explicit_dv is not None else ((price or 0.0) * (volume or 0.0))
     spread = _f(row.get("spread_percent"))
     stale_data = bool(row.get("stale_data", False))
     low_liquidity = bool(row.get("low_liquidity", False))
@@ -147,10 +150,22 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
     if spread is not None and spread > 2.5:
         rejection_reasons.append("spread too wide")
         allowed = False
-    if spread is None or spread_quality_missing:
-        rejection_reasons.append("spread_quality_missing")
+    strong_fast_trend = (
+        price is not None
+        and vwap is not None
+        and ema9 is not None
+        and price > vwap
+        and price > ema9
+        and rv >= 2.0
+        and score >= 60
+    )
+    if spread_quality_missing:
+        rejection_reasons.append("spread_quality_missing_assumed_ok")
     if row.get("volume_expansion") is None:
-        rejection_reasons.append("volume_expansion_missing")
+        if rv >= 2.0 and bool(row.get("volume_confirmation")):
+            rejection_reasons.append("volume_expansion_missing_rvol_confirmed")
+        else:
+            rejection_reasons.append("volume_expansion_missing")
     execution_safety_ok = bool(row.get("execution_safety_passes", True))
     broker_sync_healthy = bool(row.get("broker_sync_healthy", True))
     reconciliation_healthy = bool(row.get("reconciliation_healthy", True))
@@ -215,7 +230,9 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
         rejection_reasons.append("score_below_threshold")
     if vwap is None:
         rejection_reasons.append("missing_vwap")
-    if not bool(components.get("ema9_above_ema20")):
+    if ema20 is None and strong_fast_trend:
+        rejection_reasons.append("ema20_missing_but_fast_trend_valid")
+    elif not bool(components.get("ema9_above_ema20")):
         rejection_reasons.append("ema_not_aligned")
     if not ("breakout" in str(row.get("setup") or row.get("intraday_setup") or "").lower() or row.get("range_expansion") is True):
         rejection_reasons.append("weak_breakout")

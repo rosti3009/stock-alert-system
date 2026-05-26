@@ -2244,7 +2244,18 @@ async def serve_history_route():
 
 @app.get("/api/stocks")
 async def api_stocks():
-    return JSONResponse(list(_latest.values()), headers=no_cache_headers())
+    rows = []
+    for row in _latest.values():
+        normalized = dict(row)
+        normalized["aggressive_entry_allowed"] = bool(normalized.get("aggressive_entry_allowed", False))
+        normalized["aggressive_rejection_reasons"] = list(normalized.get("aggressive_rejection_reasons") or [])
+        normalized["intraday_aggressive_score"] = int(normalized.get("intraday_aggressive_score") or normalized.get("aggressive_score") or 0)
+        normalized["aggressive_score"] = int(normalized.get("aggressive_score") or normalized.get("intraday_aggressive_score") or 0)
+        normalized["breakout_strength_score"] = int(normalized.get("breakout_strength_score") or 0)
+        normalized["momentum_acceleration_score"] = int(normalized.get("momentum_acceleration_score") or 0)
+        normalized["regime_override_active"] = bool(normalized.get("regime_override_active", False))
+        rows.append(normalized)
+    return JSONResponse(rows, headers=no_cache_headers())
 
 
 @app.get("/api/top-weekly")
