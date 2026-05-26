@@ -10,6 +10,8 @@ import database
 import execution_sync
 import broker_sync
 import reconciliation_engine
+import reconciliation_lifecycle
+import watchdog
 from execution_quality import evaluate_execution_quality
 from circuit_breaker import (
     auto_clear_recoverable_circuit_breaker,
@@ -57,6 +59,21 @@ def _critical_issues(reconciliation: dict) -> list[dict]:
     ]
 
 
+
+
+def _is_timeout_broker_sync_step(step_item: dict) -> bool:
+    if (step_item or {}).get("name") != "broker_source_of_truth_sync":
+        return False
+    error = str((step_item or {}).get("error") or "")
+    return "timed out" in error.lower() or "timeout" in error.lower()
+
+
+def _structured_timeout_error(step_item: dict, timeout_seconds: int) -> dict:
+    return {
+        "error_type": "timeout",
+        "message": str((step_item or {}).get("error") or f"broker sync timed out after {timeout_seconds}s"),
+        "timeout_seconds": timeout_seconds,
+    }
 async def save_startup_recovery_status(status: dict) -> None:
     await database.set_app_state(STARTUP_RECOVERY_STATUS_KEY, _json_payload(status))
     await database.set_app_state(STARTUP_RECOVERY_PASSED_KEY, "true" if status.get("ok") else "false")
@@ -195,19 +212,36 @@ async def run_startup_recovery() -> dict:
         return status
 
     except Exception as exc:
-        circuit = await trip_circuit_breaker(
-            str(exc),
-            source="startup_recovery",
-            details={"steps": steps},
-        )
+        broker_step = next((x for x in steps if x.get("name") == "broker_source_of_truth_sync"), None)
+        watchdog_status = await watchdog.get_watchdog_status()
+        reconciliation = await reconciliation_lifecycle.get_reconciliation_status()
+        use_cached_fallback = False
+        if _is_timeout_broker_sync_step(broker_step):
+            last_snapshot = await database.get_latest_broker_sync_snapshot() or {}
+            if watchdog_status.get("tws_connected") and bool(last_snapshot):
+                use_cached_fallback = True
+                broker_step["fallback"] = "cached_snapshot"
+                broker_step["timeout_error"] = _structured_timeout_error(broker_step, STEP_TIMEOUT_SECONDS)
+
+        if use_cached_fallback and int(reconciliation.get("issues_count") or 0) == 0:
+            circuit = await get_circuit_breaker_state()
+        else:
+            circuit = await trip_circuit_breaker(
+                str(exc),
+                source="startup_recovery",
+                details={"steps": steps},
+            )
         status = {
             "ok": False,
             "state": "FAILED",
             "reason": str(exc),
+            "broker_source_of_truth_sync_error": _structured_timeout_error(broker_step, STEP_TIMEOUT_SECONDS) if _is_timeout_broker_sync_step(broker_step or {}) else None,
             "steps": steps,
             "checked_at": now_iso(),
             "circuit_breaker": circuit,
         }
+        if use_cached_fallback and int(reconciliation.get("issues_count") or 0) == 0:
+            status.update({"ok": True, "state": "PASSED_WITH_FALLBACK", "reason": "broker sync timed out; used cached broker snapshot"})
         await save_startup_recovery_status(status)
         log.warning("Startup recovery failed: %s", exc)
         return status

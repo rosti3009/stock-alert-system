@@ -604,3 +604,55 @@ class StartupRecoveryCircuitBreakerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _async_return(value):
+    async def _fn(*_args, **_kwargs):
+        return value
+    return _fn
+
+
+def test_startup_recovery_falls_back_to_cached_snapshot_on_broker_timeout(monkeypatch):
+    async def _run():
+        async def _timeout():
+            raise asyncio.TimeoutError("broker sync timed out")
+        monkeypatch.setattr(startup_recovery.broker_sync, "run_broker_sync_once", _timeout)
+        monkeypatch.setattr(startup_recovery.watchdog, "get_watchdog_status", _async_return({"tws_connected": True}))
+        monkeypatch.setattr(startup_recovery.database, "get_latest_broker_sync_snapshot", _async_return({"ok": True, "synced_at": "2026-01-01T00:00:00+00:00"}))
+        monkeypatch.setattr(startup_recovery.reconciliation_lifecycle, "get_reconciliation_status", _async_return({"issues_count": 0}))
+        status = await startup_recovery.run_startup_recovery()
+        assert status["ok"] is True
+        assert status["state"] == "PASSED_WITH_FALLBACK"
+        assert status.get("broker_source_of_truth_sync_error", {}).get("error_type") == "timeout"
+    asyncio.run(_run())
+
+
+def test_startup_recovery_timeout_healthy_watchdog_does_not_trip_circuit_breaker(monkeypatch):
+    async def _run():
+        await reset_circuit_breaker()
+        async def _timeout():
+            raise asyncio.TimeoutError("broker sync timed out")
+        monkeypatch.setattr(startup_recovery.broker_sync, "run_broker_sync_once", _timeout)
+        monkeypatch.setattr(startup_recovery.watchdog, "get_watchdog_status", _async_return({"tws_connected": True}))
+        monkeypatch.setattr(startup_recovery.database, "get_latest_broker_sync_snapshot", _async_return({"ok": True, "synced_at": "2026-01-01T00:00:00+00:00"}))
+        monkeypatch.setattr(startup_recovery.reconciliation_lifecycle, "get_reconciliation_status", _async_return({"issues_count": 0}))
+        await startup_recovery.run_startup_recovery()
+        circuit = await get_circuit_breaker_state()
+        assert circuit["tripped"] is False
+    asyncio.run(_run())
+
+
+def test_startup_recovery_true_broker_disconnected_still_fails(monkeypatch):
+    async def _run():
+        await reset_circuit_breaker()
+        async def _disc():
+            return {"ok": False, "connected": False, "errors": ["disconnected"]}
+        monkeypatch.setattr(startup_recovery.broker_sync, "run_broker_sync_once", _disc)
+        monkeypatch.setattr(startup_recovery.watchdog, "get_watchdog_status", _async_return({"tws_connected": False}))
+        monkeypatch.setattr(startup_recovery.database, "get_latest_broker_sync_snapshot", _async_return({}))
+        monkeypatch.setattr(startup_recovery.reconciliation_lifecycle, "get_reconciliation_status", _async_return({"issues_count": 0}))
+        status = await startup_recovery.run_startup_recovery()
+        assert status["ok"] is False
+        assert status["state"] == "FAILED"
+        await reset_circuit_breaker()
+    asyncio.run(_run())
