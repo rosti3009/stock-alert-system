@@ -937,7 +937,7 @@ async function loadDashboard(){
 
       fetchNoCache("/api/top-weekly"),
 
-      fetchNoCache("/api/positions"),
+      fetchNoCache("/api/positions").then(data => data.positions || data),
 
       fetchNoCache("/api/performance"),
 
