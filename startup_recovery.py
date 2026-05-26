@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -27,6 +28,7 @@ log = logging.getLogger(__name__)
 STARTUP_RECOVERY_STATUS_KEY = "startup_recovery_status"
 STARTUP_RECOVERY_PASSED_KEY = "startup_recovery_passed"
 CRITICAL_RECONCILIATION_SEVERITIES = {"HIGH", "CRITICAL"}
+STEP_TIMEOUT_SECONDS = 12
 
 
 def now_iso() -> str:
@@ -82,6 +84,28 @@ async def startup_recovery_passed() -> bool:
     return str(await database.get_app_state(STARTUP_RECOVERY_PASSED_KEY, "false")).lower() == "true"
 
 
+
+
+async def build_timeout_status(timeout_seconds: int) -> dict:
+    try:
+        circuit = await get_circuit_breaker_state()
+    except Exception:
+        circuit = {"tripped": False}
+    status = {
+        "ok": False,
+        "state": "FAILED",
+        "reason": f"startup recovery timed out after {timeout_seconds}s",
+        "steps": [],
+        "checked_at": now_iso(),
+        "timeout": True,
+        "circuit_breaker": circuit,
+    }
+    try:
+        await save_startup_recovery_status(status)
+    except Exception:
+        pass
+    return status
+
 async def run_startup_recovery() -> dict:
     """Run the blocking startup recovery sequence required before auto trading."""
     await database.init_db()
@@ -90,7 +114,7 @@ async def run_startup_recovery() -> dict:
     async def step(name: str, fn):
         started = now_iso()
         try:
-            result = await fn()
+            result = await asyncio.wait_for(fn(), timeout=STEP_TIMEOUT_SECONDS)
             item = {"name": name, "ok": True, "started_at": started, "finished_at": now_iso(), "result": result}
             steps.append(item)
             return result

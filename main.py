@@ -16,6 +16,8 @@ import config
 import database
 import account_sync
 import broker_sync
+import execution_sync
+import tws_mirror
 import reconciliation_engine
 import recovery_manager
 import session_manager
@@ -58,6 +60,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(me
 log = logging.getLogger(__name__)
 
 BROKER_SYNC_RUN_TIMEOUT_SECONDS = 8
+STARTUP_RECOVERY_RUN_TIMEOUT_SECONDS = 30
+MANUAL_SYNC_RUN_TIMEOUT_SECONDS = 10
 
 _latest: dict[str, dict] = {}
 _top_weekly: list[dict] = []
@@ -1530,7 +1534,15 @@ async def api_live_position_tracker_refresh():
 
 @app.post("/api/startup-recovery/run")
 async def api_startup_recovery_run():
-    result = await startup_recovery.run_startup_recovery()
+    try:
+        result = await asyncio.wait_for(
+            startup_recovery.run_startup_recovery(),
+            timeout=STARTUP_RECOVERY_RUN_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        result = await startup_recovery.build_timeout_status(
+            timeout_seconds=STARTUP_RECOVERY_RUN_TIMEOUT_SECONDS,
+        )
     ok = bool(result.get("ok"))
     return await _operation_response(
         "run_startup_recovery",
@@ -2662,6 +2674,16 @@ async def api_trading_status():
     recon_issues = await database.get_open_reconciliation_issues()
     auto_trading_enabled = bool(auto_trading_state["enabled"])
 
+    stale_data = watchdog_status.get("stale_data") or {}
+    broker_sync_connected = bool(broker_snapshot.get("connected"))
+    broker_sync_fresh = bool(broker_snapshot.get("synced_at")) and not bool(stale_data.get("broker_sync"))
+    tws_mirror_fresh = (not bool(stale_data.get("tws_mirror"))) or broker_sync_fresh
+    broker_exec_count = len(json.loads(broker_snapshot.get("executions_json") or "[]")) if broker_snapshot else 0
+    execution_sync_fresh = (not bool(stale_data.get("execution_sync"))) or broker_sync_fresh
+    freshness_source = "watchdog"
+    if broker_sync_fresh and broker_sync_connected:
+        freshness_source = "broker_sync_source_of_truth"
+
     blocked_reasons = []
     market_hours = get_market_hours_status()
 
@@ -2778,7 +2800,13 @@ async def api_trading_status():
     # ==========================================
 
     if watchdog_status.get("trading_blocked"):
-        blocked_reasons.extend(watchdog_status.get("blocking_reasons") or ["Watchdog blocked trading"])
+        watchdog_reasons = watchdog_status.get("blocking_reasons") or ["Watchdog blocked trading"]
+        if broker_sync_fresh and broker_sync_connected:
+            watchdog_reasons = [
+                r for r in watchdog_reasons
+                if "mirror sync stale" not in str(r).lower() and "execution sync stale" not in str(r).lower()
+            ]
+        blocked_reasons.extend(watchdog_reasons)
 
     # ==========================================
     # FINAL DECISION
@@ -2910,7 +2938,15 @@ async def api_trading_status():
                 "heartbeat": watchdog_status.get("heartbeat"),
             },
 
-            "stale_data_status": watchdog_status.get("stale_data"),
+            "stale_data_status": stale_data,
+
+            "broker_sync_fresh": broker_sync_fresh,
+            "tws_mirror_fresh": tws_mirror_fresh,
+            "execution_sync_fresh": execution_sync_fresh,
+            "freshness_source": freshness_source,
+            "last_broker_sync_at": broker_snapshot.get("synced_at"),
+            "last_tws_mirror_sync_at": watchdog_status.get("last_tws_mirror_sync_at"),
+            "last_execution_sync_at": watchdog_status.get("last_execution_sync_at"),
 
             "last_heartbeat_at": watchdog_status.get("last_heartbeat_at"),
 
@@ -3139,6 +3175,66 @@ async def api_broker_sync_run():
             "positions_count": 0,
             "source": "broker_sync",
         }
+
+
+def _manual_sync_skipped_response(source: str, reason: str) -> dict:
+    return {
+        "ok": False,
+        "connected": False,
+        "skipped": True,
+        "source": source,
+        "reason": reason,
+        "errors": [],
+        "last_synced_at": None,
+    }
+
+
+@app.post("/api/tws-mirror/run")
+async def api_tws_mirror_run():
+    if config.APP_ROLE == "dashboard":
+        return _manual_sync_skipped_response("tws_mirror", "skipped in dashboard mode")
+    if not trading_jobs_enabled():
+        return _manual_sync_skipped_response("tws_mirror", "trader execution disabled")
+    if not config.IBKR_PAPER_TRADING or config.IBKR_ENABLE_REAL_TRADING:
+        return _manual_sync_skipped_response("tws_mirror", "paper-only safety guard")
+    try:
+        result = await asyncio.wait_for(tws_mirror.run_tws_mirror_once(), timeout=MANUAL_SYNC_RUN_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return {"ok": False, "connected": False, "source": "tws_mirror", "errors": [f"timed out after {MANUAL_SYNC_RUN_TIMEOUT_SECONDS}s"], "last_synced_at": None}
+    except Exception as exc:
+        return {"ok": False, "connected": False, "source": "tws_mirror", "errors": [str(exc)], "last_synced_at": None}
+    return {
+        "ok": bool(result.get("connected")),
+        "connected": bool(result.get("connected")),
+        "source": "tws_mirror",
+        "errors": ([result.get("error")] if result.get("error") else []),
+        "last_synced_at": result.get("synced_at"),
+        "result": result,
+    }
+
+
+@app.post("/api/execution-sync/run")
+async def api_execution_sync_run():
+    if config.APP_ROLE == "dashboard":
+        return _manual_sync_skipped_response("execution_sync", "skipped in dashboard mode")
+    if not trading_jobs_enabled():
+        return _manual_sync_skipped_response("execution_sync", "trader execution disabled")
+    if not config.IBKR_PAPER_TRADING or config.IBKR_ENABLE_REAL_TRADING:
+        return _manual_sync_skipped_response("execution_sync", "paper-only safety guard")
+    try:
+        result = await asyncio.wait_for(execution_sync.sync_executions(), timeout=MANUAL_SYNC_RUN_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        return {"ok": False, "connected": False, "source": "execution_sync", "errors": [f"timed out after {MANUAL_SYNC_RUN_TIMEOUT_SECONDS}s"], "last_synced_at": None}
+    except Exception as exc:
+        return {"ok": False, "connected": False, "source": "execution_sync", "errors": [str(exc)], "last_synced_at": None}
+    return {
+        "ok": bool(result.get("ok")),
+        "connected": bool(result.get("ok")),
+        "source": "execution_sync",
+        "errors": ([result.get("error")] if result.get("error") else []),
+        "last_synced_at": result.get("synced_at"),
+        "result": result,
+    }
 
 
 @app.post("/api/emergency/flatten-all")

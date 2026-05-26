@@ -122,3 +122,54 @@ def test_broker_sync_run_times_out_and_does_not_hang(monkeypatch):
     assert payload["ok"] is False
     assert payload["connected"] is False
     assert any("timed out" in err for err in payload["errors"])
+
+
+def test_manual_tws_mirror_endpoint_exists_and_returns_json_in_dashboard(monkeypatch):
+    monkeypatch.setattr(main.config, "APP_ROLE", "dashboard")
+    payload = TestClient(main.app).post("/api/tws-mirror/run").json()
+    assert payload["skipped"] is True
+    assert payload["source"] == "tws_mirror"
+
+
+def test_manual_execution_sync_endpoint_exists_and_returns_json_in_dashboard(monkeypatch):
+    monkeypatch.setattr(main.config, "APP_ROLE", "dashboard")
+    payload = TestClient(main.app).post("/api/execution-sync/run").json()
+    assert payload["skipped"] is True
+    assert payload["source"] == "execution_sync"
+
+
+def test_startup_recovery_run_timeout_does_not_hang(monkeypatch):
+    async def _hang():
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(main.startup_recovery, "run_startup_recovery", _hang)
+    monkeypatch.setattr(main, "STARTUP_RECOVERY_RUN_TIMEOUT_SECONDS", 0.05)
+    start = time.perf_counter()
+    payload = TestClient(main.app).post("/api/startup-recovery/run").json()
+    elapsed = time.perf_counter() - start
+    assert elapsed < 2
+    assert payload["operation"]["status"] == "failed"
+    assert "timed out" in (payload.get("message") or "") or "timed out" in str(payload)
+
+
+def test_trading_status_includes_freshness_diagnostics(monkeypatch):
+    monkeypatch.setattr(main.watchdog, "get_watchdog_status", _async_return({"stale_data": {"tws_mirror": True, "execution_sync": True}, "trading_blocked": True, "blocking_reasons": ["TWS mirror sync stale", "Execution sync stale"], "last_tws_mirror_sync_at": None, "last_execution_sync_at": None}))
+    monkeypatch.setattr(main.database, "get_latest_broker_sync_snapshot", _async_return({"connected": 1, "synced_at": "2026-01-01T00:00:00+00:00", "executions_json": "[]", "positions_json": "[]", "open_orders_json": "[]", "errors_json": "[]"}))
+    monkeypatch.setattr(main.database, "get_open_positions", _async_return([]))
+    monkeypatch.setattr(main.database, "get_active_paper_session", _async_return({}))
+    monkeypatch.setattr(main.database, "get_realized_pnl", _async_return(0.0))
+    monkeypatch.setattr(main.database, "get_open_reconciliation_issues", _async_return([]))
+    monkeypatch.setattr(main, "get_market_regime", lambda: {"allow_new_buys": True, "regime": "NEUTRAL", "position_size_factor": 1.0, "min_score_override": None})
+    monkeypatch.setattr(main, "get_market_hours_status", lambda: {"enabled": False, "allowed": True, "reason": ""})
+    monkeypatch.setattr(main.strategy_mode, "get_strategy_mode", _async_return("SWING"))
+    monkeypatch.setattr(main, "get_last_auto_recovery", _async_return(None))
+    payload = TestClient(main.app).get("/api/trading-status").json()
+    assert payload["broker_sync_fresh"] is True
+    assert payload["tws_mirror_fresh"] is True
+    assert payload["execution_sync_fresh"] is True
+
+
+def _async_return(value):
+    async def _fn(*_args, **_kwargs):
+        return value
+    return _fn
