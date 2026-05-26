@@ -84,7 +84,9 @@ def validate_buy_before_order(
     ib: IB,
     symbol: str,
     limit_price: float,
+    row: dict | None = None,
 ) -> dict:
+    row = row or {}
     quote = get_live_quote(
         ib,
         symbol,
@@ -110,7 +112,7 @@ def validate_buy_before_order(
         }
 
     execution_quality = evaluate_execution_quality(
-        row={},
+        row=row,
         quote=quote,
         limit_price=float(limit_price),
         symbol=symbol,

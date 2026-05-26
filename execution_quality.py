@@ -117,6 +117,29 @@ def normalize_volume_metrics(
     }
 
 
+def _execution_payload_snapshot(row: dict[str, Any], quote: dict[str, Any], volume_metrics: dict[str, Any]) -> dict[str, Any]:
+    fields = {
+        "avg_volume": row.get("avg_volume"),
+        "average_volume": row.get("average_volume"),
+        "dollar_volume": row.get("dollar_volume"),
+        "relative_volume": row.get("relative_volume"),
+        "volume_ratio": row.get("volume_ratio"),
+        "volume": row.get("volume"),
+        "current_volume": row.get("current_volume"),
+        "price": row.get("price"),
+        "entry_price": row.get("entry_price"),
+        "current_price": row.get("current_price"),
+        "quote_last": quote.get("last"),
+        "quote_market_price": quote.get("market_price"),
+        "limit_price": volume_metrics.get("reference_price"),
+        "normalized_average_volume": volume_metrics.get("average_volume"),
+        "normalized_dollar_volume": volume_metrics.get("dollar_volume"),
+        "normalized_relative_volume": volume_metrics.get("relative_volume"),
+        "normalized_reference_price": volume_metrics.get("reference_price"),
+    }
+    return {key: value for key, value in fields.items() if value not in (None, "")}
+
+
 def _latest_range_percent(row: dict[str, Any], reference_price: float) -> float | None:
     high = _safe_float(row.get("high") or row.get("day_high") or row.get("latest_high"), None)
     low = _safe_float(row.get("low") or row.get("day_low") or row.get("latest_low"), None)
@@ -287,6 +310,7 @@ def evaluate_execution_quality(
         journal_events.append("EXECUTION_VOLUME_FALLBACK_USED")
     if volume_metrics["computed_dollar_volume"]:
         journal_events.append("EXECUTION_DOLLAR_VOLUME_COMPUTED")
+    journal_events.append("EXECUTION_NORMALIZED_VOLUME_METRICS")
 
     def add_warning(message: str) -> None:
         warnings.append(message)
@@ -359,6 +383,17 @@ def evaluate_execution_quality(
         state = ExecutionQualityState.EXECUTION_SAFE
 
     decision = "allow" if state != ExecutionQualityState.EXECUTION_BLOCK_BUY else "block"
+    payload_snapshot = _execution_payload_snapshot(row, quote, volume_metrics)
+    missing_fields = []
+    for field_name, value in {
+        "average_volume": avg_volume,
+        "dollar_volume": dollar_volume,
+        "current_price": reference_price if reference_price > 0 else None,
+    }.items():
+        if value is None:
+            missing_fields.append(field_name)
+    if missing_fields:
+        journal_events.append("EXECUTION_PAYLOAD_MISSING_FIELDS")
     symbol_value = _symbol(row, quote, symbol)
     liquidity_block_reasons = [
         reason for reason, category in zip(block_reasons, block_categories)
@@ -408,6 +443,8 @@ def evaluate_execution_quality(
             "decision": liquidity_decision,
         },
         "journal_events": journal_events,
+        "payload_snapshot": payload_snapshot,
+        "missing_fields": missing_fields,
         "warnings": warnings,
         "dangers": dangers,
         "metrics": {
