@@ -130,6 +130,66 @@ def _symbol_exposure_percent(portfolio_risk: dict[str, Any], symbol: str) -> flo
     return 0.0
 
 
+
+
+def _conviction_components(row: dict[str, Any], market_regime: dict[str, Any], atr_percent: float, relative_volume: float | None, spread_percent: float | None) -> tuple[float, list[str]]:
+    score = 0.5
+    reasons: list[str] = []
+    ranking = safe_float(row.get("weekly_score") or row.get("score"), 50.0)
+    score += clamp((ranking - 50.0) / 200.0, -0.2, 0.25)
+    if ranking >= 80:
+        reasons.append(f"strong score {ranking:.0f}")
+
+    breakout = bool(row.get("breakout") or row.get("breakout_confirmed") or row.get("new_high_breakout"))
+    if breakout:
+        score += 0.08
+        reasons.append("breakout confirmed")
+
+    momentum = safe_float(row.get("momentum_score") or row.get("intraday_momentum_score") or row.get("rsi"), 0.0)
+    if momentum >= 70:
+        score += 0.06
+        reasons.append("high momentum")
+
+    vwap = safe_float(row.get("vwap"), 0.0)
+    ema = safe_float(row.get("ema20") or row.get("ema"), 0.0)
+    price = _entry_price(row)
+    if price > 0 and ((vwap > 0 and price >= vwap) or (ema > 0 and price >= ema)):
+        score += 0.05
+        reasons.append("above VWAP/EMA")
+
+    if relative_volume is not None:
+        if relative_volume >= 2.0:
+            score += 0.07
+            reasons.append("strong RVOL")
+        elif relative_volume < 1.0:
+            score -= 0.06
+
+    avg_volume = safe_float(row.get("avg_volume") or row.get("average_volume"), 0.0)
+    if avg_volume < threshold("MIN_AVERAGE_VOLUME", 500000.0):
+        score -= 0.05
+        reasons.append("lower liquidity")
+
+    if spread_percent is not None and spread_percent > threshold("MAX_SPREAD_PERCENT", 3.0):
+        score -= 0.08
+        reasons.append("wide spread")
+
+    if atr_percent > threshold("MAX_INTRADAY_VOLATILITY", 6.0):
+        score -= 0.08
+        reasons.append("high volatility")
+
+    regime = str(market_regime.get("regime") or "NEUTRAL").upper()
+    if regime in {"BULL", "MOMENTUM", "RISK_ON"}:
+        score += 0.05
+    elif regime in {"BEAR", "RISK_OFF"}:
+        score -= 0.07
+
+    dd = max(safe_float(market_regime.get("daily_drawdown_percent")), safe_float((market_regime or {}).get("unrealized_drawdown_percent")))
+    if dd >= threshold("MAX_DAILY_DRAWDOWN_PERCENT", 5.0) * 0.7:
+        score -= 0.08
+        reasons.append("drawdown pressure")
+
+    return clamp(score, 0.2, 1.25), reasons
+
 @dataclass(frozen=True)
 class PositionSizingInput:
     row: dict[str, Any]
@@ -193,6 +253,7 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
     avg_volume = safe_float(row.get("avg_volume") or row.get("average_volume"))
     relative_volume = _relative_volume(row)
     spread_percent = _spread_percent(row, execution_quality)
+    conviction_factor, conviction_reasons = _conviction_components(row, market_regime, atr_percent, relative_volume, spread_percent)
 
     if price <= 0 or account_equity <= 0 or risk_per_share <= 0:
         blocking_reasons.append("Invalid price, equity, or stop-loss risk for sizing")
@@ -297,7 +358,8 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
         * liquidity_adjustment
         * regime_adjustment
         * execution_adjustment
-        * concentration_adjustment,
+        * concentration_adjustment
+        * conviction_factor,
         0.0,
         1.0,
     )
@@ -305,6 +367,9 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
     base_by_risk = max_risk_per_trade / risk_per_share * price if risk_per_share > 0 else 0.0
     unadjusted_recommendation = min(base_by_risk, max_position_value, available)
     recommended_position_size_usd = 0.0 if blocking_reasons else unadjusted_recommendation * total_adjustment
+
+    if available < threshold("MIN_TRADE_USD", 50.0) and not blocking_reasons:
+        blocking_reasons.append("Insufficient available capital for minimum trade size")
 
     if recommended_position_size_usd < threshold("MIN_TRADE_USD", 50.0):
         if blocking_reasons:
@@ -363,6 +428,8 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
         "regime_adjustment": round(regime_adjustment, 4),
         "execution_adjustment": round(execution_adjustment, 4),
         "concentration_adjustment": round(concentration_adjustment, 4),
+        "conviction_factor": round(conviction_factor, 4),
+        "conviction_reasons": conviction_reasons,
         "total_adjustment": round(total_adjustment, 4),
         "inputs": {
             "account_equity": round(account_equity, 2),

@@ -508,7 +508,7 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
     account_equity = float(config.effective_virtual_trading_capital())
 
     current_open_count = len(open_positions)
-    max_positions = int(active_rules.get("max_open_positions", getattr(config, "MAX_OPEN_POSITIONS", 10)))
+    emergency_cap = int(getattr(config, "EMERGENCY_MAX_OPEN_POSITIONS", 50))
 
     log.info(
         "AUTO TRADER | regime=%s | allow_buys=%s | min_score=%s | equity=$%s | open=%s/%s",
@@ -517,7 +517,7 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
         min_score_override,
         round(account_equity, 2),
         current_open_count,
-        max_positions,
+        emergency_cap,
     )
 
     for row in scan_results:
@@ -665,13 +665,13 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
                 )
                 continue
 
-            if current_open_count >= max_positions:
-                log.info("AUTO BUY skipped for %s — max positions reached", symbol)
+            if current_open_count >= emergency_cap:
+                log.info("AUTO BUY skipped for %s — emergency position cap reached", symbol)
                 await _journal_buy_decision(
                     row,
                     "BUY_CANDIDATE_REJECTED",
                     "REJECTED",
-                    f"Max positions reached {current_open_count}/{max_positions}",
+                    f"Emergency position cap reached {current_open_count}/{emergency_cap}",
                     market,
                 )
                 continue

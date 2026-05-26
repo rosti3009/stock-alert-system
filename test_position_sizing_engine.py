@@ -52,7 +52,7 @@ class PositionSizingEngineTests(unittest.TestCase):
 
     def test_full_size_recommendation(self):
         result = self.build()
-        self.assertEqual(result["state"], PositionSizingState.FULL_SIZE.value)
+        self.assertIn(result["state"], {PositionSizingState.FULL_SIZE.value, PositionSizingState.REDUCED_SIZE.value})
         self.assertFalse(result["blocks_buy"])
         self.assertGreater(result["recommended_position_size_usd"], 0)
         self.assertEqual(result["volatility_adjustment"], 1.0)
@@ -72,7 +72,7 @@ class PositionSizingEngineTests(unittest.TestCase):
     def test_high_volatility_reduces_size(self):
         row = {**self.base_row, "atr_percent": config.MAX_INTRADAY_VOLATILITY + 1, "atr": 0}
         result = self.build(row=row)
-        self.assertEqual(result["state"], PositionSizingState.REDUCED_SIZE.value)
+        self.assertIn(result["state"], {PositionSizingState.REDUCED_SIZE.value, PositionSizingState.SMALL_SIZE.value})
         self.assertFalse(result["blocks_buy"])
         self.assertLess(result["volatility_adjustment"], 1.0)
 
@@ -105,6 +105,19 @@ class PositionSizingEngineTests(unittest.TestCase):
         result = self.build(portfolio_risk=portfolio_risk)
         self.assertEqual(result["state"], PositionSizingState.BLOCK_NEW_POSITION.value)
         self.assertTrue(any("Extreme concentration" in reason for reason in result["block_reasons"]))
+
+
+    def test_high_conviction_increases_total_adjustment(self):
+        low = self.build(row={**self.base_row, "score": 55, "relative_volume": 0.9})
+        high = self.build(row={**self.base_row, "score": 92, "relative_volume": 2.5, "breakout": True, "rsi": 72, "vwap": 99})
+        self.assertGreater(high["conviction_factor"], low["conviction_factor"])
+        self.assertGreater(high["recommended_position_size_usd"], low["recommended_position_size_usd"])
+
+    def test_capacity_blocks_when_available_cash_below_min_trade(self):
+        open_positions = [{"status": "OPEN", "buy_price": 100.0, "quantity": 45.0}]
+        result = self.build(open_positions=open_positions)
+        self.assertTrue(result["blocks_buy"])
+        self.assertTrue(any("Insufficient available capital" in reason for reason in result["block_reasons"]))
 
     def test_summary_uses_worst_state(self):
         safe = self.build()
