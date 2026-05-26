@@ -133,3 +133,77 @@ def test_rejection_reasons_non_empty_when_rejected():
     assert payload["entry_allowed"] is False
     assert isinstance(payload["aggressive_rejection_reasons"], list)
     assert len(payload["aggressive_rejection_reasons"]) > 0
+
+
+def test_impp_like_payload_allows_aggressive_entry_with_missing_optional_enrichment():
+    row = base_row()
+    row.update(
+        {
+            "symbol": "IMPP",
+            "price": 5.68,
+            "volume": 1_878_955,
+            "dollar_volume": None,
+            "vwap": 5.4023,
+            "ema9": 5.4273,
+            "ema20": None,
+            "relative_volume": 2.3599,
+            "intraday_entry_allowed": True,
+            "spread_quality_score": None,
+            "volume_expansion": None,
+            "volume_confirmation": True,
+        }
+    )
+    payload = ime.detect_intraday_entry_setup(row)
+    assert payload["aggressive_entry_allowed"] is True
+    assert "ema20_missing_but_fast_trend_valid" in payload["aggressive_rejection_reasons"]
+    assert "spread_quality_missing_assumed_ok" in payload["aggressive_rejection_reasons"]
+    assert "volume_expansion_missing_rvol_confirmed" in payload["aggressive_rejection_reasons"]
+    assert "dollar volume below minimum" not in payload["aggressive_rejection_reasons"]
+
+
+def test_dollar_volume_fallback_uses_price_times_volume():
+    row = base_row()
+    row["price"] = 5.68
+    row["volume"] = 1_878_955
+    row["dollar_volume"] = None
+    payload = ime.detect_intraday_entry_setup(row)
+    assert payload["entry_allowed"] is True
+    assert payload["liquidity_quality_score"] == 100
+
+
+def test_true_low_dollar_volume_still_blocks():
+    row = base_row()
+    row["price"] = 2.0
+    row["volume"] = 500_000
+    row["dollar_volume"] = None
+    payload = ime.detect_intraday_entry_setup(row)
+    assert payload["entry_allowed"] is False
+    assert "dollar volume below minimum" in payload["aggressive_rejection_reasons"]
+
+
+def test_missing_ema20_does_not_add_hard_ema_rejection_for_strong_fast_trend():
+    row = base_row()
+    row["price"] = 101.2
+    row["ema20"] = None
+    payload = ime.detect_intraday_entry_setup(row)
+    assert "ema_not_aligned" not in payload["aggressive_rejection_reasons"]
+    assert "ema20_missing_but_fast_trend_valid" in payload["aggressive_rejection_reasons"]
+
+
+def test_missing_spread_quality_score_does_not_hard_block_strong_setup():
+    row = base_row()
+    row["spread_quality_score"] = None
+    row["spread_percent"] = None
+    payload = ime.detect_intraday_entry_setup(row)
+    assert payload["entry_allowed"] is True
+    assert "spread_quality_missing_assumed_ok" in payload["aggressive_rejection_reasons"]
+
+
+def test_missing_volume_expansion_does_not_hard_block_when_rvol_confirms():
+    row = base_row()
+    row["volume_expansion"] = None
+    row["volume_confirmation"] = True
+    row["relative_volume"] = 2.2
+    payload = ime.detect_intraday_entry_setup(row)
+    assert payload["entry_allowed"] is True
+    assert "volume_expansion_missing_rvol_confirmed" in payload["aggressive_rejection_reasons"]
