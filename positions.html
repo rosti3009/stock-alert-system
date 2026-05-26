@@ -343,7 +343,7 @@ async function loadPositions(){
       tradingStatusData
     ] = await Promise.all([
 
-      fetchNoCache("/api/positions"),
+      fetchNoCache("/api/positions").then(data => data.positions || data),
 
       fetchNoCache("/api/trading-status")
 

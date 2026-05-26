@@ -2397,21 +2397,97 @@ async def api_equity_curve(limit: int = 500):
 
 @app.get("/api/positions")
 async def api_positions():
-    positions = await database.get_all_positions(100)
+    db_positions = await database.get_all_positions(100)
     tracker = await live_position_tracker.get_tracker_status()
+    broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
+    merged, missing_tracker = _merge_positions_with_truth(db_positions, tracker, broker_snapshot)
+    payload = {
+        "positions": merged,
+        "position_truth_source": "BROKER_SNAPSHOT",
+        "enrichment_source": "live_position_tracker",
+        "missing_tracker_enrichment_symbols": missing_tracker,
+    }
+    return JSONResponse(payload, headers=no_cache_headers())
+
+
+def _broker_open_positions(snapshot: dict) -> dict[str, dict]:
+    raw_positions = snapshot.get("positions")
+    if raw_positions is None:
+        raw_positions = _safe_json_array(snapshot.get("positions_json"))
+    broker_by_symbol: dict[str, dict] = {}
+    for item in raw_positions or []:
+        symbol = str(item.get("symbol") or "").strip().upper()
+        qty = float(item.get("position", item.get("quantity")) or 0)
+        if symbol and qty > 0:
+            broker_by_symbol[symbol] = item
+    return broker_by_symbol
+
+
+def _merge_positions_with_truth(
+    db_positions: list[dict],
+    tracker: dict,
+    broker_snapshot: dict,
+) -> tuple[list[dict], list[str]]:
     tracker_by_symbol = {
         str(item.get("symbol") or "").upper(): item
         for item in tracker.get("positions", [])
         if item.get("symbol")
     }
-    for position in positions:
-        symbol = str(position.get("symbol") or "").upper()
+    db_by_symbol = {
+        str(item.get("symbol") or "").upper(): item
+        for item in db_positions
+        if item.get("symbol")
+    }
+    broker_by_symbol = _broker_open_positions(broker_snapshot)
+
+    missing_tracker: list[str] = []
+    merged: list[dict] = []
+
+    for symbol, broker in sorted(broker_by_symbol.items()):
+        db_row = db_by_symbol.get(symbol) or {
+            "symbol": symbol,
+            "status": "OPEN",
+            "quantity": float(broker.get("position", broker.get("quantity")) or 0),
+            "buy_price": broker.get("avgCost", broker.get("avg_cost")),
+            "source": "BROKER_SNAPSHOT",
+            "reason": "Present in broker snapshot",
+        }
+        position = dict(db_row)
+        position["position_truth_source"] = "BROKER_SNAPSHOT"
+
         live = tracker_by_symbol.get(symbol)
+        position["live_tracking"] = bool(live)
+        position["live_tracking_source"] = (live or {}).get("source")
+        position["live_tracking_last_refresh_at"] = (live or {}).get("last_refresh_at")
+        position["live_tracking_last_refresh_age_seconds"] = (live or {}).get("last_refresh_age_seconds")
+        position["enrichment_source"] = "live_position_tracker" if live else None
+        position["enrichment_stale"] = not bool(live)
+        if not live:
+            missing_tracker.append(symbol)
+        else:
+            for key in ("current_price", "profit_amount", "profit_percent", "action", "reason"):
+                if live.get(key) is not None:
+                    position[key] = live.get(key)
+        merged.append(position)
+
+    open_statuses = {"OPEN", "CLOSE_REQUESTED", "PENDING_BROKER_CONFIRMATION"}
+    for row in db_positions:
+        symbol = str(row.get("symbol") or "").strip().upper()
+        status = str(row.get("status") or "").strip().upper()
+        if not symbol or symbol in broker_by_symbol or status not in open_statuses:
+            continue
+        position = dict(row)
+        live = tracker_by_symbol.get(symbol)
+        position["position_truth_source"] = "DATABASE"
         position["live_tracking"] = bool(live and str(position.get("status") or "").upper() == "OPEN")
         position["live_tracking_source"] = (live or {}).get("source")
         position["live_tracking_last_refresh_at"] = (live or {}).get("last_refresh_at")
         position["live_tracking_last_refresh_age_seconds"] = (live or {}).get("last_refresh_age_seconds")
-    return JSONResponse(positions, headers=no_cache_headers())
+        position["enrichment_source"] = "live_position_tracker" if live else None
+        position["enrichment_stale"] = not bool(live)
+        merged.append(position)
+
+    return merged, missing_tracker
 
 
 @app.get("/api/live-position-tracker")
