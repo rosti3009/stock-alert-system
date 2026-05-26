@@ -211,6 +211,90 @@ class StartupRecoveryCircuitBreakerTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["exec_id"], "E3")
 
+    def test_startup_recovery_succeeds_with_avg_volume_alias(self):
+        async def scenario():
+            async def fake_tws():
+                return {"connected": True}
+            async def fake_broker_sync():
+                return {"connected": True, "errors": []}
+            async def fake_account():
+                return {"connected": True, "equity": {"buying_power": 10000, "net_liquidation": 5000}}
+            async def ok(*args, **kwargs):
+                return {"ok": True, "issues": [], "issues_count": 0}
+            async def fake_candidates(limit=200):
+                return [{"symbol": "ALIAS", "avg_volume": 800_000, "price": 12.0, "relative_volume": 1.8}]
+
+            with patch("startup_recovery.run_tws_mirror_once", fake_tws), \
+                patch("startup_recovery.broker_sync.run_broker_sync_once", fake_broker_sync), \
+                patch("startup_recovery.account_sync.run_account_sync_once", fake_account), \
+                patch("startup_recovery.execution_sync.sync_executions", ok), \
+                patch("startup_recovery.adopt_tws_positions_as_baseline", ok), \
+                patch("startup_recovery.close_db_positions_flat_in_tws", ok), \
+                patch("startup_recovery.reconciliation_engine.run_reconciliation", ok), \
+                patch("startup_recovery.database.get_latest_candidates", fake_candidates):
+                status = await startup_recovery.run_startup_recovery()
+
+            self.assertTrue(status["ok"], status)
+            rows = await database.get_trade_journal(limit=20, symbol="ALIAS")
+            self.assertTrue(any(r["event_type"] == "STARTUP_RECOVERY_VOLUME_FALLBACK_USED" for r in rows), rows)
+        asyncio.run(scenario())
+
+    def test_startup_recovery_succeeds_with_computed_dollar_volume_fallback(self):
+        async def scenario():
+            async def fake_tws():
+                return {"connected": True}
+            async def fake_broker_sync():
+                return {"connected": True, "errors": []}
+            async def fake_account():
+                return {"connected": True, "equity": {"buying_power": 10000, "net_liquidation": 5000}}
+            async def ok(*args, **kwargs):
+                return {"ok": True, "issues": [], "issues_count": 0}
+            async def fake_candidates(limit=200):
+                return [{"symbol": "FALL", "average_volume": 600_000, "price": 10.0, "relative_volume": 1.2}]
+
+            with patch("startup_recovery.run_tws_mirror_once", fake_tws), \
+                patch("startup_recovery.broker_sync.run_broker_sync_once", fake_broker_sync), \
+                patch("startup_recovery.account_sync.run_account_sync_once", fake_account), \
+                patch("startup_recovery.execution_sync.sync_executions", ok), \
+                patch("startup_recovery.adopt_tws_positions_as_baseline", ok), \
+                patch("startup_recovery.close_db_positions_flat_in_tws", ok), \
+                patch("startup_recovery.reconciliation_engine.run_reconciliation", ok), \
+                patch("startup_recovery.database.get_latest_candidates", fake_candidates):
+                status = await startup_recovery.run_startup_recovery()
+
+            self.assertTrue(status["ok"], status)
+            rows = await database.get_trade_journal(limit=20, symbol="FALL")
+            self.assertTrue(any(r["event_type"] == "STARTUP_RECOVERY_VOLUME_FALLBACK_USED" for r in rows), rows)
+        asyncio.run(scenario())
+
+    def test_startup_recovery_soft_reject_does_not_trip_breaker(self):
+        async def scenario():
+            async def fake_tws():
+                return {"connected": True}
+            async def fake_broker_sync():
+                return {"connected": True, "errors": []}
+            async def fake_account():
+                return {"connected": True, "equity": {"buying_power": 10000, "net_liquidation": 5000}}
+            async def ok(*args, **kwargs):
+                return {"ok": True, "issues": [], "issues_count": 0}
+            async def fake_candidates(limit=200):
+                return [{"symbol": "THIN", "volume_ratio": 0.1}]
+
+            with patch("startup_recovery.run_tws_mirror_once", fake_tws), \
+                patch("startup_recovery.broker_sync.run_broker_sync_once", fake_broker_sync), \
+                patch("startup_recovery.account_sync.run_account_sync_once", fake_account), \
+                patch("startup_recovery.execution_sync.sync_executions", ok), \
+                patch("startup_recovery.adopt_tws_positions_as_baseline", ok), \
+                patch("startup_recovery.close_db_positions_flat_in_tws", ok), \
+                patch("startup_recovery.reconciliation_engine.run_reconciliation", ok), \
+                patch("startup_recovery.database.get_latest_candidates", fake_candidates):
+                status = await startup_recovery.run_startup_recovery()
+            self.assertTrue(status["ok"], status)
+            self.assertFalse((await get_circuit_breaker_state())["tripped"])
+            rows = await database.get_trade_journal(limit=20, symbol="THIN")
+            self.assertTrue(any(r["event_type"] == "STARTUP_RECOVERY_SOFT_REJECT" for r in rows), rows)
+        asyncio.run(scenario())
+
     def test_execution_sync_dedupes_execution_ids_and_preserves_commission(self):
         rows = [
             {

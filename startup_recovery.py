@@ -10,6 +10,7 @@ import database
 import execution_sync
 import broker_sync
 import reconciliation_engine
+from execution_quality import evaluate_execution_quality
 from circuit_breaker import (
     auto_clear_recoverable_circuit_breaker,
     get_circuit_breaker_state,
@@ -152,6 +153,8 @@ async def run_startup_recovery() -> dict:
         await step("validate_equity", lambda: validate_equity(equity, source="startup_recovery"))
         await step("validate_drawdown", lambda: validate_drawdown(source="startup_recovery"))
 
+        candidates = await step("validate_startup_candidates", _validate_startup_candidates)
+
         critical = _critical_issues(reconciliation)
         if critical:
             await trip_circuit_breaker(
@@ -181,6 +184,7 @@ async def run_startup_recovery() -> dict:
             "steps": steps,
             "execution_sync": execution_result,
             "reconciliation": reconciliation,
+            "startup_candidate_validation": candidates,
             "buying_power": buying_power,
             "equity": equity,
             "checked_at": now_iso(),
@@ -207,3 +211,51 @@ async def run_startup_recovery() -> dict:
         await save_startup_recovery_status(status)
         log.warning("Startup recovery failed: %s", exc)
         return status
+
+
+async def _validate_startup_candidates(limit: int = 200) -> dict:
+    """Validate latest startup candidates without tripping startup recovery."""
+    rows = await database.get_latest_candidates(limit=limit)
+    if not rows:
+        return {"ok": True, "validated": 0, "soft_rejected": 0, "warnings": []}
+
+    soft_rejected = 0
+    fallback_events = 0
+    warnings: list[str] = []
+    for row in rows:
+        symbol = str(row.get("symbol") or "").upper() or None
+        result = evaluate_execution_quality(row=row, symbol=symbol)
+
+        for event_type in result.get("journal_events") or []:
+            if event_type in {"EXECUTION_VOLUME_FALLBACK_USED", "EXECUTION_DOLLAR_VOLUME_COMPUTED"}:
+                fallback_events += 1
+                await database.safe_record_trade_journal_event({
+                    "symbol": symbol,
+                    "event_type": "STARTUP_RECOVERY_VOLUME_FALLBACK_USED",
+                    "decision": "WARNING",
+                    "reason": event_type,
+                    "source_module": "startup_recovery",
+                    "raw_payload": {"execution_quality": result},
+                })
+
+        low_liquidity = "low_liquidity" in (result.get("block_categories") or [])
+        if low_liquidity:
+            soft_rejected += 1
+            reason = result.get("blocked_buy_reason") or "Startup recovery liquidity soft reject"
+            warnings.append(f"{symbol}: {reason}")
+            await database.safe_record_trade_journal_event({
+                "symbol": symbol,
+                "event_type": "STARTUP_RECOVERY_SOFT_REJECT",
+                "decision": "SOFT_REJECTED",
+                "reason": reason,
+                "source_module": "startup_recovery",
+                "raw_payload": {"execution_quality": result},
+            })
+
+    return {
+        "ok": True,
+        "validated": len(rows),
+        "soft_rejected": soft_rejected,
+        "fallback_events": fallback_events,
+        "warnings": warnings[:20],
+    }
