@@ -225,6 +225,7 @@ def execute_limit_buy_sync(
     symbol: str,
     quantity: float,
     limit_price: float,
+    execution_payload: dict | None = None,
 ) -> dict:
     symbol = str(symbol).strip().upper()
     require_paper_auto_trading_allowed("AUTO BUY")
@@ -265,6 +266,7 @@ def execute_limit_buy_sync(
             ib=ib,
             symbol=symbol,
             limit_price=float(limit_price),
+            row=execution_payload or {},
         )
 
         if not protection.get("allowed"):
@@ -788,6 +790,12 @@ async def auto_open_position(
         if execution_quality.get("blocks_buy"):
             reason = execution_quality.get("blocked_buy_reason") or "Execution quality blocked BUY"
             log.warning("AUTO BUY blocked for %s — %s", symbol, reason)
+            log.warning(
+                "AUTO BUY EXECUTION PAYLOAD SNAPSHOT | symbol=%s | missing_fields=%s | payload=%s",
+                symbol,
+                execution_quality.get("missing_fields"),
+                execution_quality.get("payload_snapshot"),
+            )
             await database.set_app_state(
                 f"execution_quality_state:{symbol}",
                 execution_quality.get("state"),
@@ -862,6 +870,12 @@ async def auto_open_position(
         if execution_quality.get("blocks_buy"):
             reason = execution_quality.get("blocked_buy_reason") or "Execution quality blocked BUY"
             log.warning("AUTO BUY blocked for %s — %s", symbol, reason)
+            log.warning(
+                "AUTO BUY EXECUTION PAYLOAD SNAPSHOT | symbol=%s | missing_fields=%s | payload=%s",
+                symbol,
+                execution_quality.get("missing_fields"),
+                execution_quality.get("payload_snapshot"),
+            )
             await _journal_buy_decision(
                 row,
                 "EXECUTION_BLOCK_BUY",
@@ -938,6 +952,7 @@ async def auto_open_position(
                 symbol,
                 quantity,
                 limit_price,
+                row,
             )
 
         except Exception as e:

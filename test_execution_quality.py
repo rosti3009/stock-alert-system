@@ -13,6 +13,7 @@ import config
 import database
 import execution_quality
 import auto_trader
+import trade_protection
 
 
 class ExecutionQualityTests(unittest.TestCase):
@@ -213,6 +214,8 @@ class ExecutionQualityTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["dollar_volume"], 9_600_000.0)
         self.assertIn("EXECUTION_VOLUME_FALLBACK_USED", result["journal_events"])
         self.assertIn("EXECUTION_DOLLAR_VOLUME_COMPUTED", result["journal_events"])
+        self.assertIn("EXECUTION_NORMALIZED_VOLUME_METRICS", result["journal_events"])
+        self.assertEqual(result["missing_fields"], [])
 
     def test_missing_price_still_blocks_even_with_avg_volume_alias(self):
         result = execution_quality.evaluate_execution_quality(
@@ -221,6 +224,38 @@ class ExecutionQualityTests(unittest.TestCase):
         )
         self.assertEqual(result["state"], "EXECUTION_BLOCK_BUY")
         self.assertIn("Missing dollar volume", result["blocked_buy_reason"])
+        self.assertIn("EXECUTION_PAYLOAD_MISSING_FIELDS", result["journal_events"])
+        self.assertIn("dollar_volume", result["missing_fields"])
+
+    def test_execution_validation_receives_avg_volume_alias(self):
+        class _IB:
+            pass
+
+        with patch.object(trade_protection, "get_live_quote", return_value={"symbol": "ALIAS", "bid": 11.99, "ask": 12.01, "last": 12.0, "close": 12.0, "market_price": 12.0}):
+            result = trade_protection.validate_buy_before_order(
+                ib=_IB(),
+                symbol="ALIAS",
+                limit_price=12.0,
+                row={"avg_volume": 800_000, "relative_volume": 1.8, "aggressive_entry_allowed": True},
+            )
+
+        self.assertTrue(result["allowed"])
+        self.assertEqual(result["execution_quality"]["metrics"]["average_volume"], 800_000.0)
+
+    def test_execution_validation_computes_dollar_volume_fallback(self):
+        class _IB:
+            pass
+
+        with patch.object(trade_protection, "get_live_quote", return_value={"symbol": "FALL", "bid": 9.99, "ask": 10.01, "last": 10.0, "close": 10.0, "market_price": 10.0}):
+            result = trade_protection.validate_buy_before_order(
+                ib=_IB(),
+                symbol="FALL",
+                limit_price=10.0,
+                row={"avg_volume": 600_000, "relative_volume": 1.3},
+            )
+
+        self.assertTrue(result["allowed"])
+        self.assertEqual(result["execution_quality"]["metrics"]["dollar_volume"], 6_000_000.0)
 
     def test_blocks_buy_when_dollar_volume_below_threshold(self):
         result = execution_quality.evaluate_execution_quality(
