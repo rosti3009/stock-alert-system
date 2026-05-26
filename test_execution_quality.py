@@ -202,6 +202,26 @@ class ExecutionQualityTests(unittest.TestCase):
         self.assertEqual(result["liquidity"]["decision"], "block")
         self.assertIn("Missing average volume", result["liquidity"]["block_reasons"])
 
+    def test_avg_volume_alias_and_dollar_volume_fallback_work(self):
+        result = execution_quality.evaluate_execution_quality(
+            row={"symbol": "ALIAS", "avg_volume": 800_000, "price": 12.0, "relative_volume": 1.8},
+            limit_price=12.0,
+        )
+        self.assertEqual(result["state"], "EXECUTION_SAFE")
+        self.assertTrue(result["allowed"])
+        self.assertEqual(result["metrics"]["average_volume"], 800_000.0)
+        self.assertEqual(result["metrics"]["dollar_volume"], 9_600_000.0)
+        self.assertIn("EXECUTION_VOLUME_FALLBACK_USED", result["journal_events"])
+        self.assertIn("EXECUTION_DOLLAR_VOLUME_COMPUTED", result["journal_events"])
+
+    def test_missing_price_still_blocks_even_with_avg_volume_alias(self):
+        result = execution_quality.evaluate_execution_quality(
+            row={"symbol": "NOPRICE", "avg_volume": 800_000, "relative_volume": 1.8},
+            limit_price=0.0,
+        )
+        self.assertEqual(result["state"], "EXECUTION_BLOCK_BUY")
+        self.assertIn("Missing dollar volume", result["blocked_buy_reason"])
+
     def test_blocks_buy_when_dollar_volume_below_threshold(self):
         result = execution_quality.evaluate_execution_quality(
             row={"symbol": "CHEAP", "average_volume": 600_000, "relative_volume": 1.2, "current_price": 5.0},

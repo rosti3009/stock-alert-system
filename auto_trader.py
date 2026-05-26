@@ -753,6 +753,15 @@ async def auto_open_position(
             limit_price=limit_price,
             symbol=symbol,
         )
+        for exec_event in execution_quality.get("journal_events") or []:
+            await _journal_buy_decision(
+                row,
+                exec_event,
+                "INFO",
+                "Execution volume metrics fallback/normalization applied",
+                market,
+                {"execution_quality": execution_quality},
+            )
         portfolio_risk = await portfolio_risk_engine.get_portfolio_risk()
         sizing = evaluate_position_sizing(PositionSizingInput(
             row=row,
@@ -831,6 +840,15 @@ async def auto_open_position(
             limit_price=limit_price,
             symbol=symbol,
         )
+        for exec_event in execution_quality.get("journal_events") or []:
+            await _journal_buy_decision(
+                row,
+                exec_event,
+                "INFO",
+                "Execution volume metrics fallback/normalization applied",
+                market,
+                {"quantity": quantity, "limit_price": limit_price, "execution_quality": execution_quality},
+            )
         sizing["execution_quality_context"] = execution_quality
         previous_execution_state = await database.get_app_state(
             f"execution_quality_state:{symbol}",
