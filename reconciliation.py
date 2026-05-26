@@ -771,6 +771,10 @@ async def run_reconciliation_once() -> dict:
                     "tws_quantity": tws_qty,
                     "execution_quantity": exec_qty,
                     "details": "DB has an OPEN position but TWS has no matching open position.",
+                    "broker_position_quantity": tws_qty,
+                    "db_position_status": "OPEN",
+                    "reconciliation_decision": "REVIEW_CLOSE_CONFIRMATION_REQUIRED",
+                    "position_truth_source": "BROKER_SNAPSHOT",
                 }
                 issues.append(issue)
 
@@ -798,6 +802,10 @@ async def run_reconciliation_once() -> dict:
                         "tws_quantity": tws_qty,
                         "execution_quantity": exec_qty,
                         "details": "TWS has an open position but DB does not have matching OPEN position.",
+                        "broker_position_quantity": tws_qty,
+                        "db_position_status": "CLOSED_OR_MISSING",
+                        "reconciliation_decision": "REOPEN_FROM_BROKER_TRUTH_CANDIDATE",
+                        "position_truth_source": "BROKER_SNAPSHOT",
                     }
                     issues.append(issue)
 
@@ -811,6 +819,10 @@ async def run_reconciliation_once() -> dict:
                     "tws_quantity": tws_qty,
                     "execution_quantity": exec_qty,
                     "details": "DB position quantity does not match TWS quantity.",
+                    "broker_position_quantity": tws_qty,
+                    "db_position_status": "OPEN",
+                    "reconciliation_decision": "SYNC_QUANTITY_TO_BROKER_REQUIRED",
+                    "position_truth_source": "BROKER_SNAPSHOT",
                 }
                 issues.append(issue)
 
@@ -824,6 +836,10 @@ async def run_reconciliation_once() -> dict:
                     "tws_quantity": tws_qty,
                     "execution_quantity": exec_qty,
                     "details": "Net execution quantity does not match TWS open quantity.",
+                    "broker_position_quantity": tws_qty,
+                    "db_position_status": "OPEN" if db_qty > 0 else "CLOSED_OR_MISSING",
+                    "reconciliation_decision": "EXECUTION_RECON_REQUIRED",
+                    "position_truth_source": "BROKER_SNAPSHOT",
                 }
                 issues.append(issue)
 

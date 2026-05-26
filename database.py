@@ -960,7 +960,7 @@ async def get_open_positions() -> list[dict]:
     sql = """
     SELECT *
     FROM positions
-    WHERE UPPER(TRIM(COALESCE(status, ''))) = 'OPEN'
+    WHERE UPPER(TRIM(COALESCE(status, ''))) IN ('OPEN', 'CLOSE_REQUESTED', 'PENDING_BROKER_CONFIRMATION')
     ORDER BY created_at ASC
     """
 
@@ -989,7 +989,7 @@ async def get_all_positions(limit: int = 100) -> list[dict]:
 
 
 async def count_open_positions() -> int:
-    sql = "SELECT COUNT(*) FROM positions WHERE status = 'OPEN'"
+    sql = "SELECT COUNT(*) FROM positions WHERE UPPER(TRIM(COALESCE(status, ''))) IN ('OPEN', 'CLOSE_REQUESTED', 'PENDING_BROKER_CONFIRMATION')"
 
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(sql) as cursor:

@@ -22,6 +22,7 @@ ALWAYS_REFRESH_POSITION_SOURCES = {
     "TWS_RECONCILIATION_RECOVERY",
     "TWS_BASELINE_ADOPTED",
 }
+PENDING_CLOSE_STATUSES = {"CLOSE_REQUESTED", "PENDING_BROKER_CONFIRMATION"}
 
 _refresh_lock = asyncio.Lock()
 
@@ -209,9 +210,15 @@ async def _resolve_open_symbols_from_sources(open_positions: list[dict[str, Any]
     }
 
     snapshot = await database.get_latest_broker_sync_snapshot() or {}
-    for position in snapshot.get("positions") or []:
+    broker_positions = snapshot.get("positions")
+    if broker_positions is None:
+        try:
+            broker_positions = json.loads(snapshot.get("positions_json") or "[]")
+        except Exception:
+            broker_positions = []
+    for position in broker_positions or []:
         symbol = str(position.get("symbol") or "").strip().upper()
-        qty = position.get("position")
+        qty = position.get("position", position.get("quantity"))
         try:
             has_qty = float(qty) != 0.0
         except Exception:
@@ -289,7 +296,12 @@ async def _refresh_one_position(position: dict[str, Any], scan_symbol: ScanCalla
     previous_action = position.get("action")
     await _record_transition_event(position, enriched_scan, position_update, previous_action)
 
-    new_status = position_update.get("status", "OPEN")
+    requested_status = position_update.get("status", "OPEN")
+    new_status = requested_status
+    new_action = position_update.get("action")
+    if requested_status == "CLOSED":
+        new_status = "PENDING_BROKER_CONFIRMATION"
+        new_action = "CLOSE_REQUESTED"
     updated = await database.update_position(symbol, {
         "current_price": position_update.get("current_price"),
         "profit_amount": position_update.get("profit_amount"),
@@ -298,16 +310,16 @@ async def _refresh_one_position(position: dict[str, Any], scan_symbol: ScanCalla
         "take_profit_1": position_update.get("take_profit_1"),
         "take_profit_2": position_update.get("take_profit_2"),
         "status": new_status,
-        "action": position_update.get("action"),
+        "action": new_action,
         "reason": position_update.get("reason"),
         "updated_at": refreshed_at,
-        "closed_at": refreshed_at if new_status == "CLOSED" else position.get("closed_at"),
+        "closed_at": refreshed_at if new_status == "CLOSED" else None,
     })
 
     updated_or_position = updated or {**position, **position_update}
     metadata = _live_metadata(updated_or_position, enriched_scan, bars_1m, bars_5m, refreshed_at)
     metadata["status"] = new_status
-    metadata["action"] = position_update.get("action")
+    metadata["action"] = new_action
     metadata["exit_engine"] = position_update.get("exit_engine")
     metadata["trailing_stop_logic_refreshed"] = True
     metadata["exit_rules_refreshed"] = True
@@ -374,6 +386,19 @@ async def refresh_live_tracked_positions(scan_symbol: ScanCallable) -> list[dict
 
         latest_open_positions = await database.get_open_positions()
         latest_open_symbols = set(await _resolve_open_symbols_from_sources(latest_open_positions))
+        broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
+        broker_positions = broker_snapshot.get("positions")
+        if broker_positions is None:
+            try:
+                broker_positions = json.loads(broker_snapshot.get("positions_json") or "[]")
+            except Exception:
+                broker_positions = []
+        broker_symbols = {
+            str(item.get("symbol") or "").strip().upper()
+            for item in broker_positions
+            if str(item.get("symbol") or "").strip() and float(item.get("position", item.get("quantity")) or 0) > 0
+        }
+        latest_open_symbols.update(broker_symbols)
         if latest_open_symbols and not metadata_by_symbol:
             for symbol in latest_open_symbols:
                 metadata_by_symbol[symbol] = {
@@ -398,7 +423,7 @@ async def refresh_live_tracked_positions(scan_symbol: ScanCallable) -> list[dict
             "last_refresh_completed_at": now_iso(),
             "interval_seconds": configured_interval_seconds(),
             "swing_interval_seconds": configured_swing_interval_seconds(),
-            "open_position_count": len(latest_open_positions),
+            "open_position_count": len(latest_open_symbols),
             "tracked_count": len(positions_payload),
             "tracked_symbols": [item["symbol"] for item in positions_payload],
             "positions": positions_payload,
@@ -407,6 +432,34 @@ async def refresh_live_tracked_positions(scan_symbol: ScanCallable) -> list[dict
             "errors": errors,
         }
         await database.set_app_state(LIVE_POSITION_TRACKER_STATE_KEY, _json(status))
+
+        # Broker truth recovery: reopen locally closed/pending records if broker still open.
+        for broker_symbol in sorted(broker_symbols):
+            existing = await database.get_position(broker_symbol)
+            existing_status = str((existing or {}).get("status") or "").upper()
+            if existing and existing_status in {"CLOSED", *PENDING_CLOSE_STATUSES}:
+                qty = next((float(p.get("position", p.get("quantity")) or 0) for p in broker_positions if str(p.get("symbol") or "").strip().upper() == broker_symbol), 0.0)
+                await database.update_position(broker_symbol, {
+                    "status": "OPEN",
+                    "action": "POSITION_REOPENED_FROM_BROKER_TRUTH",
+                    "reason": "Broker snapshot still shows open quantity",
+                    "closed_at": None,
+                    "updated_at": started_at,
+                })
+                await database.safe_record_trade_journal_event({
+                    "symbol": broker_symbol,
+                    "event_type": "POSITION_REOPENED_FROM_BROKER_TRUTH",
+                    "decision": "REOPENED",
+                    "reason": "Broker snapshot still reports live position",
+                    "source_module": "live_position_tracker.refresh_live_tracked_positions",
+                    "quantity": qty,
+                    "raw_payload": {
+                        "broker_position_quantity": qty,
+                        "db_position_status": existing_status,
+                        "reconciliation_decision": "REOPENED_FROM_BROKER_TRUTH",
+                        "position_truth_source": "BROKER_SNAPSHOT",
+                    },
+                })
 
         if latest_open_positions:
             await watchdog.refresh_market_data_timestamp(
