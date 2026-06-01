@@ -2489,8 +2489,8 @@ async def api_broker_audit():
         broker_unrealized = _safe_float(broker_snapshot.get("unrealized_pnl"), sum(p["unrealized_pnl"] for p in broker_positions))
         system_used_capital = sum(_safe_float(p.get("avg_cost")) * _safe_float(p.get("quantity")) for p in system_positions)
         system_unrealized = sum(_safe_float(p.get("unrealized_pnl")) for p in system_positions)
-        system_equity = system_used_capital + system_unrealized
         system_cash = max(0.0, float(getattr(config, "ACCOUNT_BALANCE", 0)) - system_used_capital)
+        system_equity = system_cash + system_used_capital + system_unrealized
         differences = {
             "equity_diff": round(broker_net_liquidation - system_equity, 2),
             "cash_diff": round(broker_cash - system_cash, 2),
