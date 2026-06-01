@@ -19,8 +19,8 @@ def normalize_strategy_type(value: Any) -> str:
 
 def default_allocation() -> dict[str, float]:
     return {
-        STRATEGY_SWING: float(getattr(config, "SWING_CAPITAL_PERCENT", 70.0)),
-        STRATEGY_INTRADAY: float(getattr(config, "INTRADAY_CAPITAL_PERCENT", 20.0)),
+        STRATEGY_SWING: float(getattr(config, "SWING_CAPITAL_PERCENT", 50.0)),
+        STRATEGY_INTRADAY: float(getattr(config, "INTRADAY_CAPITAL_PERCENT", 40.0)),
         "RESERVE": float(getattr(config, "RESERVE_CAPITAL_PERCENT", 10.0)),
     }
 
@@ -89,13 +89,16 @@ async def build_strategy_allocation_status() -> dict[str, Any]:
         free = max(0.0, allocated - used)
         total_used += used
         total_free += free
+        exposure_percent = (used / allocated * 100.0) if allocated > 0 else 0.0
         rows.append({
             "strategy": strategy,
             "capital_percent": percentages[strategy],
             "allocated_capital": round(allocated, 2),
             "used_capital": round(used, 2),
             "free_capital": round(free, 2),
+            "remaining_allocated_capital": round(free, 2),
             "open_positions": len(strategy_positions),
+            "strategy_exposure_percent": round(exposure_percent, 2),
             "realized_pnl": round(realized_by_strategy[strategy], 2),
             "unrealized_pnl": round(unrealized, 2),
             "status": "ACTIVE" if free > 0 else "FULLY_ALLOCATED",
@@ -107,6 +110,14 @@ async def build_strategy_allocation_status() -> dict[str, Any]:
         "paper_trading_only": True,
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "total_capital": round(capital, 2),
+        "position_limit_mode": config.position_limit_mode(),
+        "min_position_size_usd": round(float(getattr(config, "MIN_POSITION_SIZE_USD", 500.0)), 2),
+        "max_portfolio_exposure": round(float(getattr(config, "MAX_TOTAL_EXPOSURE_PERCENT", 90.0)), 2),
+        "max_position_size": round(float(getattr(config, "MAX_POSITION_PERCENT", 10.0)), 2),
+        "portfolio_exposure_percent": round((total_used / capital * 100.0) if capital > 0 else 0.0, 2),
+        "current_open_positions": len(open_positions),
+        "capital_used": round(total_used, 2),
+        "remaining_allocated_capital": round(total_free, 2),
         "allocations": percentages,
         "strategies": rows,
         "cards": {

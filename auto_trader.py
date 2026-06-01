@@ -156,7 +156,7 @@ def calculate_position_size(
     broker_account_equity = float(account_equity)
     balance = float(config.effective_virtual_trading_capital())
     strategy_type = normalize_strategy_type(row.get("strategy_type"))
-    allocated_percent = float(getattr(config, "INTRADAY_CAPITAL_PERCENT", 20.0) if strategy_type == STRATEGY_INTRADAY else getattr(config, "SWING_CAPITAL_PERCENT", 70.0))
+    allocated_percent = float(getattr(config, "INTRADAY_CAPITAL_PERCENT", 40.0) if strategy_type == STRATEGY_INTRADAY else getattr(config, "SWING_CAPITAL_PERCENT", 50.0))
     allocated_balance = balance * (allocated_percent / 100.0)
     reserve = balance * (float(getattr(config, "RESERVE_CAPITAL_PERCENT", config.MIN_CASH_RESERVE_PERCENT)) / 100)
 
@@ -204,7 +204,7 @@ def calculate_position_size(
 
     position_size = quantity * entry_price
 
-    if position_size < float(config.MIN_TRADE_USD):
+    if position_size < float(getattr(config, "MIN_POSITION_SIZE_USD", 500.0)):
         return None
 
     return {
@@ -674,7 +674,7 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
                 )
                 continue
 
-            if current_open_count >= emergency_cap:
+            if config.is_fixed_count_position_limit_mode() and current_open_count >= emergency_cap:
                 log.info("AUTO BUY skipped for %s — emergency position cap reached", symbol)
                 await _journal_buy_decision(
                     row,
@@ -1075,6 +1075,7 @@ async def auto_open_position(
             await database.add_position(
                 payload,
                 max_open_positions=int(strategy_mode.active_rules((market or {}).get("strategy_mode")).get("max_open_positions", getattr(config, "MAX_OPEN_POSITIONS", 10))),
+                enforce_max_open_positions=config.is_fixed_count_position_limit_mode(),
             )
 
             log.info(

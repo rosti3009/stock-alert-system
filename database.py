@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import aiosqlite
 
 import learning_analytics
+import config
 
 from config import DB_PATH, ACCOUNT_BALANCE, VIRTUAL_TRADING_CAPITAL_USD
 
@@ -1050,7 +1051,7 @@ async def count_open_positions() -> int:
     return int(row[0]) if row else 0
 
 
-async def add_position(data: dict, max_open_positions: int = 10) -> dict:
+async def add_position(data: dict, max_open_positions: int = 10, enforce_max_open_positions: bool | None = None) -> dict:
     symbol = str(data.get("symbol", "")).strip().upper()
     buy_price = float(data.get("buy_price", 0))
     quantity = float(data.get("quantity", 0) or 0)
@@ -1066,10 +1067,16 @@ async def add_position(data: dict, max_open_positions: int = 10) -> dict:
     if existing and (existing.get("status") or "OPEN") == "OPEN":
         raise ValueError(f"{symbol} already exists as an open position")
 
-    open_count = await count_open_positions()
+    enforce_count_limit = (
+        bool(enforce_max_open_positions)
+        if enforce_max_open_positions is not None
+        else bool(getattr(config, "is_fixed_count_position_limit_mode", lambda: True)())
+    )
+    if enforce_count_limit:
+        open_count = await count_open_positions()
 
-    if open_count >= max_open_positions:
-        raise ValueError(f"Maximum open positions reached: {max_open_positions}")
+        if open_count >= max_open_positions:
+            raise ValueError(f"Maximum open positions reached: {max_open_positions}")
 
     stop_loss = data.get("stop_loss")
     take_profit_1 = data.get("take_profit_1")
@@ -2276,7 +2283,7 @@ async def get_latest_broker_sync_snapshot() -> dict | None:
     return dict(r) if r else None
 
 async def upsert_position(data: dict) -> dict:
-    return await add_position(data, max_open_positions=999999)
+    return await add_position(data, max_open_positions=999999, enforce_max_open_positions=False)
 
 async def insert_reconciliation_event(event_type: str, severity: str, symbol: str | None, details: dict, status: str='OPEN') -> None:
     async with aiosqlite.connect(DB_PATH) as db:

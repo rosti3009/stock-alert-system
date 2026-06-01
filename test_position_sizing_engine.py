@@ -24,8 +24,10 @@ class PositionSizingEngineTests(unittest.TestCase):
         }
         self.original_virtual_capital = config.VIRTUAL_TRADING_CAPITAL_USD
         self.original_training_profile = config.PAPER_TRAINING_PROFILE
+        self.original_min_position_size_usd = getattr(config, "MIN_POSITION_SIZE_USD", 500.0)
         config.VIRTUAL_TRADING_CAPITAL_USD = 5000.0
         config.PAPER_TRAINING_PROFILE = "CONSERVATIVE"
+        config.MIN_POSITION_SIZE_USD = 50.0
         self.base_context = {
             "open_positions": [],
             "account_equity": 10_000.0,
@@ -44,6 +46,7 @@ class PositionSizingEngineTests(unittest.TestCase):
     def tearDown(self):
         config.VIRTUAL_TRADING_CAPITAL_USD = self.original_virtual_capital
         config.PAPER_TRAINING_PROFILE = self.original_training_profile
+        config.MIN_POSITION_SIZE_USD = self.original_min_position_size_usd
 
     def build(self, row=None, **overrides):
         payload = dict(self.base_context)

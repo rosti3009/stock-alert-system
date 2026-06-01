@@ -204,7 +204,7 @@ def evaluate_risk_snapshot(
     account_utilization_percent = total_exposure_percent
 
     thresholds = {
-        "max_total_exposure_percent": configured_threshold("MAX_TOTAL_EXPOSURE_PERCENT", 80.0),
+        "max_total_exposure_percent": configured_threshold("MAX_TOTAL_EXPOSURE_PERCENT", 90.0),
         "max_symbol_exposure_percent": configured_threshold("MAX_SYMBOL_EXPOSURE_PERCENT", 25.0),
         "max_sector_exposure_percent": configured_threshold("MAX_SECTOR_EXPOSURE_PERCENT", 45.0),
         "max_daily_drawdown_percent": configured_threshold("MAX_DAILY_DRAWDOWN_PERCENT", 5.0),

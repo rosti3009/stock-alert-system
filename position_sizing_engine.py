@@ -223,10 +223,10 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
     if strategy_type == STRATEGY_INTRADAY:
         risk_per_trade_percent = threshold("INTRADAY_RISK_PER_TRADE_PERCENT", 0.5)
 
-    allocation_percent = threshold("INTRADAY_CAPITAL_PERCENT", 20.0) if strategy_type == STRATEGY_INTRADAY else threshold("SWING_CAPITAL_PERCENT", 70.0)
+    allocation_percent = threshold("INTRADAY_CAPITAL_PERCENT", 40.0) if strategy_type == STRATEGY_INTRADAY else threshold("SWING_CAPITAL_PERCENT", 50.0)
     allocated_equity = account_equity * (allocation_percent / 100.0)
     max_risk_per_trade = account_equity * (risk_per_trade_percent / 100.0)
-    max_position_value = allocated_equity * (threshold("MAX_POSITION_PERCENT", 20.0) / 100.0)
+    max_position_value = account_equity * (threshold("MAX_POSITION_PERCENT", 10.0) / 100.0)
 
     used = sum(
         safe_float(p.get("buy_price") or p.get("entry_price")) * safe_float(p.get("quantity"))
@@ -241,7 +241,9 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
     execution_quality = context.execution_quality or {}
     thresholds = {
         "max_risk_per_trade_percent": risk_per_trade_percent,
-        "max_position_percent": threshold("MAX_POSITION_PERCENT", 20.0),
+        "max_position_percent": threshold("MAX_POSITION_PERCENT", 10.0),
+        "max_portfolio_exposure_percent": threshold("MAX_TOTAL_EXPOSURE_PERCENT", 90.0),
+        "min_position_size_usd": threshold("MIN_POSITION_SIZE_USD", 500.0),
         "max_sector_exposure_percent": threshold("MAX_SECTOR_EXPOSURE_PERCENT", 45.0),
         "max_single_symbol_exposure": threshold("MAX_SINGLE_SYMBOL_EXPOSURE", 25.0),
         "high_volatility_reduction": threshold("HIGH_VOLATILITY_REDUCTION", 0.5),
@@ -344,8 +346,15 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
     prospective_by_risk = max_risk_per_trade / risk_per_share * price if risk_per_share > 0 else 0.0
     prospective_position_value = min(prospective_by_risk, max_position_value, available)
     projected_position_percent = pct(prospective_position_value, account_equity)
+    current_portfolio_exposure = safe_float(portfolio_risk.get("total_portfolio_exposure_percent"))
+    projected_portfolio_exposure = current_portfolio_exposure + projected_position_percent
     projected_sector_exposure = current_sector_exposure + projected_position_percent
     projected_symbol_exposure = current_symbol_exposure + projected_position_percent
+
+    if projected_portfolio_exposure > thresholds["max_portfolio_exposure_percent"]:
+        blocking_reasons.append(
+            f"Portfolio exposure limit exceeded: {projected_portfolio_exposure:.2f}% > {thresholds['max_portfolio_exposure_percent']:.2f}%"
+        )
 
     if projected_sector_exposure >= thresholds["max_sector_exposure_percent"]:
         blocking_reasons.append(f"Extreme concentration: {sector} sector projected at {projected_sector_exposure:.2f}%")
@@ -375,21 +384,20 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
     unadjusted_recommendation = min(base_by_risk, max_position_value, available)
     recommended_position_size_usd = 0.0 if blocking_reasons else unadjusted_recommendation * total_adjustment
 
-    if available < threshold("MIN_TRADE_USD", 50.0) and not blocking_reasons:
+    min_trade_usd = threshold("MIN_TRADE_USD", 50.0)
+    min_position_size_usd = thresholds["min_position_size_usd"]
+    if available < min_trade_usd and not blocking_reasons:
         blocking_reasons.append("Insufficient available capital for minimum trade size")
-
-    if recommended_position_size_usd < threshold("MIN_TRADE_USD", 50.0):
-        if blocking_reasons:
-            pass
-        elif unadjusted_recommendation >= threshold("MIN_TRADE_USD", 50.0):
-            recommended_position_size_usd = min(unadjusted_recommendation, threshold("MIN_TRADE_USD", 50.0))
-        else:
-            blocking_reasons.append("Insufficient available capital for minimum trade size")
 
     recommended_share_quantity = recommended_position_size_usd / price if price > 0 else 0.0
     if not getattr(config, "ALLOW_FRACTIONAL_SHARES", False):
         recommended_share_quantity = float(int(recommended_share_quantity))
         recommended_position_size_usd = recommended_share_quantity * price
+
+    if not blocking_reasons and recommended_position_size_usd < min_position_size_usd:
+        blocking_reasons.append("Position size below minimum threshold")
+        recommended_position_size_usd = 0.0
+        recommended_share_quantity = 0.0
 
     if blocking_reasons or recommended_share_quantity <= 0:
         state = PositionSizingState.BLOCK_NEW_POSITION
@@ -451,6 +459,9 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
             "broker_account_equity": round(broker_account_equity, 2),
             "risk_calculation_basis": "virtual_trading_capital",
             "portfolio_exposure_percent": portfolio_risk.get("total_portfolio_exposure_percent"),
+            "projected_portfolio_exposure_percent": round(projected_portfolio_exposure, 4),
+            "max_portfolio_exposure_percent": thresholds["max_portfolio_exposure_percent"],
+            "min_position_size_usd": min_position_size_usd,
             "open_risk_percent": portfolio_risk.get("total_open_risk_percent"),
             "current_drawdown_percent": round(current_drawdown, 4),
             "market_regime": market_regime.get("regime"),
