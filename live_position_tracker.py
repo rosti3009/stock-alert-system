@@ -6,6 +6,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
+import broker_adapter
 import config
 import database
 import strategy_mode
@@ -23,7 +24,9 @@ ALWAYS_REFRESH_POSITION_SOURCES = {
     "TWS_RECONCILIATION_RECOVERY",
     "TWS_BASELINE_ADOPTED",
 }
-PENDING_CLOSE_STATUSES = {"CLOSE_REQUESTED", "PENDING_BROKER_CONFIRMATION"}
+PENDING_CLOSE_STATUSES = {"CLOSE_PENDING", "CLOSE_REQUESTED", "PENDING_BROKER_CONFIRMATION"}
+OPEN_ORDER_STATUSES = {"PENDING_SUBMIT", "PRESUBMITTED", "SUBMITTED", "APIPENDING", "PENDINGCANCEL", "CANCELPENDING"}
+TERMINAL_CLOSE_STATUSES = {"FILLED", "CANCELLED", "CANCELED", "APICANCELLED", "INACTIVE", "REJECTED"}
 
 _refresh_lock = asyncio.Lock()
 
@@ -74,6 +77,136 @@ def _age_seconds(value: Any) -> int | None:
 
 def _json(data: dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False, default=str)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _broker_snapshot_list(snapshot: dict[str, Any], key: str) -> list[dict[str, Any]]:
+    value = snapshot.get(key)
+    if value is None:
+        value = snapshot.get(f"{key}_json")
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value or "[]")
+        except Exception:
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return value if isinstance(value, list) else []
+
+
+def _order_symbol(order: dict[str, Any]) -> str:
+    return str(order.get("symbol") or order.get("contract_symbol") or "").strip().upper()
+
+
+def _order_side(order: dict[str, Any]) -> str:
+    return str(order.get("side") or order.get("action") or "").strip().upper()
+
+
+def _order_status(order: dict[str, Any]) -> str:
+    return str(order.get("status") or order.get("order_status") or "").strip().upper()
+
+
+def _has_pending_close_order(position: dict[str, Any] | None, broker_open_orders: list[dict[str, Any]] | None = None) -> bool:
+    if not position:
+        return False
+    symbol = str(position.get("symbol") or "").strip().upper()
+    status = str(position.get("status") or "").strip().upper()
+    close_status = str(position.get("close_status") or "").strip().upper()
+    if status in PENDING_CLOSE_STATUSES and close_status not in TERMINAL_CLOSE_STATUSES:
+        return True
+    if position.get("close_order_id") and close_status not in TERMINAL_CLOSE_STATUSES:
+        return True
+    for order in broker_open_orders or []:
+        if _order_symbol(order) == symbol and _order_side(order) == "SELL" and _order_status(order) in OPEN_ORDER_STATUSES:
+            return True
+    return False
+
+
+async def _submit_close_order(position: dict[str, Any], position_update: dict[str, Any], attempted_at: str) -> dict[str, Any]:
+    symbol = str(position.get("symbol") or "").strip().upper()
+    quantity = abs(_safe_float(position_update.get("sell_quantity"), _safe_float(position.get("quantity"))))
+    audit: dict[str, Any] = {
+        "status": "CLOSE_PENDING",
+        "action": "CLOSE_PENDING",
+        "close_attempted_at": attempted_at,
+        "close_status": "ATTEMPTING",
+    }
+    if not symbol or quantity <= 0:
+        audit["close_status"] = "REJECTED_NO_QUANTITY"
+        audit["reason"] = "Close requested but no positive broker sell quantity was available"
+        return audit
+
+    try:
+        result = await asyncio.to_thread(broker_adapter.place_market_order, symbol, "SELL", quantity, True)
+    except Exception as exc:
+        log.exception("Broker close order submit failed for %s", symbol)
+        await database.safe_record_trade_journal_event({
+            "symbol": symbol,
+            "event_type": "BROKER_CLOSE_ORDER_SUBMIT_FAILED",
+            "decision": "CLOSE_PENDING",
+            "reason": str(exc),
+            "source_module": "live_position_tracker._submit_close_order",
+            "quantity": quantity,
+            "raw_payload": {"position": position, "position_update": position_update, "error": str(exc)},
+        })
+        audit["close_status"] = "SUBMIT_FAILED"
+        audit["reason"] = f"Close requested; broker close order submit failed: {exc}"
+        return audit
+
+    broker_order_id = result.get("broker_order_id")
+    close_status = str(result.get("status") or "SUBMITTED").upper()
+    saved = await database.save_order(
+        broker_order_id=broker_order_id,
+        broker_perm_id=result.get("broker_perm_id"),
+        symbol=symbol,
+        side="SELL",
+        quantity=quantity,
+        order_type=result.get("order_type") or "MKT",
+        status=close_status,
+        filled_quantity=result.get("filled_quantity"),
+        avg_fill_price=result.get("avg_fill_price"),
+        source=LIVE_POSITION_TRACKER_SOURCE,
+        reason=position_update.get("reason") or "Live position tracker close request",
+        raw_json=result,
+        strategy_type=position.get("strategy_type"),
+    )
+    verified_status = close_status
+    verified_order: dict[str, Any] | None = None
+    try:
+        broker_orders = await asyncio.to_thread(broker_adapter.get_orders)
+        for order in broker_orders:
+            same_order_id = broker_order_id and str(order.get("broker_order_id") or order.get("order_id") or "") == str(broker_order_id)
+            same_symbol_sell = _order_symbol(order) == symbol and _order_side(order) == "SELL"
+            if same_order_id or same_symbol_sell:
+                verified_order = order
+                verified_status = _order_status(order) or close_status
+                break
+    except Exception as exc:
+        log.warning("Broker close order status verification failed for %s: %s", symbol, exc)
+
+    if saved.get("id") and verified_status != close_status:
+        await database.update_order_status(saved["id"], status=verified_status, raw_json={"submitted": result, "verified_order": verified_order})
+
+    audit.update({
+        "close_order_id": broker_order_id or saved.get("id"),
+        "close_status": verified_status,
+        "reason": position_update.get("reason"),
+    })
+    await database.safe_record_trade_journal_event({
+        "symbol": symbol,
+        "event_type": "BROKER_CLOSE_ORDER_SUBMITTED",
+        "decision": "CLOSE_PENDING",
+        "reason": position_update.get("reason"),
+        "source_module": "live_position_tracker._submit_close_order",
+        "quantity": quantity,
+        "raw_payload": {"broker_result": result, "verified_order": verified_order, "saved_order": saved, "position_update": position_update},
+    })
+    return audit
 
 
 async def get_tracker_status() -> dict[str, Any]:
@@ -290,6 +423,15 @@ async def _refresh_one_position(position: dict[str, Any], scan_symbol: ScanCalla
         metadata["error"] = scan_result.get("error") or "scan error"
         return updated, metadata
 
+    if str(position.get("status") or "").upper() in PENDING_CLOSE_STATUSES:
+        metadata = _live_metadata(position, scan_result, bars_1m, bars_5m, refreshed_at)
+        metadata["status"] = str(position.get("status") or "CLOSE_PENDING").upper()
+        metadata["action"] = position.get("action") or "CLOSE_PENDING"
+        metadata["close_order_id"] = position.get("close_order_id")
+        metadata["close_status"] = position.get("close_status")
+        metadata["close_attempted_at"] = position.get("close_attempted_at")
+        return position, metadata
+
     enriched_scan = dict(scan_result)
     enriched_scan["strategy_mode"] = str(active_mode)
     enriched_scan["intraday_bars"] = {"1m": bars_1m or [], "5m": bars_5m or []}
@@ -302,9 +444,11 @@ async def _refresh_one_position(position: dict[str, Any], scan_symbol: ScanCalla
     requested_status = position_update.get("status", "OPEN")
     new_status = requested_status
     new_action = position_update.get("action")
-    if requested_status == "CLOSED":
-        new_status = "PENDING_BROKER_CONFIRMATION"
-        new_action = "CLOSE_REQUESTED"
+    close_audit: dict[str, Any] = {}
+    if requested_status in {"CLOSED", "CLOSE_REQUESTED", "CLOSE_PENDING"}:
+        close_audit = await _submit_close_order(position, position_update, refreshed_at)
+        new_status = close_audit.get("status") or "CLOSE_PENDING"
+        new_action = close_audit.get("action") or "CLOSE_PENDING"
     updated = await database.update_position(symbol, {
         "current_price": position_update.get("current_price"),
         "profit_amount": position_update.get("profit_amount"),
@@ -314,9 +458,12 @@ async def _refresh_one_position(position: dict[str, Any], scan_symbol: ScanCalla
         "take_profit_2": position_update.get("take_profit_2"),
         "status": new_status,
         "action": new_action,
-        "reason": position_update.get("reason"),
+        "reason": close_audit.get("reason", position_update.get("reason")),
         "updated_at": refreshed_at,
-        "closed_at": refreshed_at if new_status == "CLOSED" else None,
+        "closed_at": None,
+        "close_attempted_at": close_audit.get("close_attempted_at"),
+        "close_order_id": close_audit.get("close_order_id"),
+        "close_status": close_audit.get("close_status"),
     })
 
     updated_or_position = updated or {**position, **position_update}
@@ -390,12 +537,8 @@ async def refresh_live_tracked_positions(scan_symbol: ScanCallable) -> list[dict
         latest_open_positions = await database.get_open_positions()
         latest_open_symbols = set(await _resolve_open_symbols_from_sources(latest_open_positions))
         broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
-        broker_positions = broker_snapshot.get("positions")
-        if broker_positions is None:
-            try:
-                broker_positions = json.loads(broker_snapshot.get("positions_json") or "[]")
-            except Exception:
-                broker_positions = []
+        broker_positions = _broker_snapshot_list(broker_snapshot, "positions")
+        broker_open_orders = _broker_snapshot_list(broker_snapshot, "open_orders")
         broker_symbols = {
             str(item.get("symbol") or "").strip().upper()
             for item in broker_positions
@@ -440,13 +583,37 @@ async def refresh_live_tracked_positions(scan_symbol: ScanCallable) -> list[dict
         for broker_symbol in sorted(broker_symbols):
             existing = await database.get_position(broker_symbol)
             existing_status = str((existing or {}).get("status") or "").upper()
-            if existing and existing_status in {"CLOSED", *PENDING_CLOSE_STATUSES}:
-                qty = next((float(p.get("position", p.get("quantity")) or 0) for p in broker_positions if str(p.get("symbol") or "").strip().upper() == broker_symbol), 0.0)
+            if existing and existing_status in PENDING_CLOSE_STATUSES:
+                qty = next((_safe_float(p.get("position", p.get("quantity"))) for p in broker_positions if str(p.get("symbol") or "").strip().upper() == broker_symbol), 0.0)
+                await database.safe_record_trade_journal_event({
+                    "symbol": broker_symbol,
+                    "event_type": "BROKER_TRUTH_REOPEN_SUPPRESSED_CLOSE_PENDING",
+                    "decision": "SUPPRESSED",
+                    "reason": "Broker snapshot still shows open quantity while a close order is pending",
+                    "source_module": "live_position_tracker.refresh_live_tracked_positions",
+                    "quantity": qty,
+                    "raw_payload": {
+                        "broker_position_quantity": qty,
+                        "db_position_status": existing_status,
+                        "close_attempted_at": existing.get("close_attempted_at"),
+                        "close_order_id": existing.get("close_order_id"),
+                        "close_status": existing.get("close_status"),
+                        "position_truth_source": "BROKER_SNAPSHOT",
+                    },
+                })
+                continue
+            if existing and existing_status == "CLOSED" and _has_pending_close_order(existing, broker_open_orders):
+                continue
+            if existing and existing_status == "CLOSED":
+                qty = next((_safe_float(p.get("position", p.get("quantity"))) for p in broker_positions if str(p.get("symbol") or "").strip().upper() == broker_symbol), 0.0)
                 await database.update_position(broker_symbol, {
                     "status": "OPEN",
                     "action": "POSITION_REOPENED_FROM_BROKER_TRUTH",
                     "reason": "Broker snapshot still shows open quantity",
                     "closed_at": None,
+                    "close_attempted_at": None,
+                    "close_order_id": None,
+                    "close_status": None,
                     "updated_at": started_at,
                 })
                 await database.safe_record_trade_journal_event({

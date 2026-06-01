@@ -154,6 +154,9 @@ CREATE TABLE IF NOT EXISTS positions (
     created_at TEXT,
     updated_at TEXT,
     closed_at TEXT,
+    close_attempted_at TEXT,
+    close_order_id INTEGER,
+    close_status TEXT,
     strategy_type TEXT DEFAULT 'SWING' CHECK(strategy_type IN ('SWING', 'INTRADAY'))
 )
 """
@@ -477,6 +480,9 @@ async def init_db() -> None:
             "profit_amount": "REAL",
             "profit_percent": "REAL",
             "closed_at": "TEXT",
+            "close_attempted_at": "TEXT",
+            "close_order_id": "INTEGER",
+            "close_status": "TEXT",
             "source": "TEXT",
             "recovery_source_position_id": "INTEGER",
             "strategy_type": "TEXT DEFAULT 'SWING'",
@@ -995,7 +1001,7 @@ async def get_open_positions() -> list[dict]:
     sql = """
     SELECT COALESCE(strategy_type, 'SWING') AS strategy_type, *
     FROM positions
-    WHERE UPPER(TRIM(COALESCE(status, ''))) IN ('OPEN', 'CLOSE_REQUESTED', 'PENDING_BROKER_CONFIRMATION')
+    WHERE UPPER(TRIM(COALESCE(status, ''))) IN ('OPEN', 'CLOSE_PENDING', 'CLOSE_REQUESTED', 'PENDING_BROKER_CONFIRMATION')
     ORDER BY created_at ASC
     """
 
@@ -1003,7 +1009,12 @@ async def get_open_positions() -> list[dict]:
         db.row_factory = aiosqlite.Row
         await apply_sqlite_pragmas(db)
         await db.execute(CREATE_POSITIONS)
-        await _ensure_columns(db, "positions", {"strategy_type": "TEXT DEFAULT 'SWING'"})
+        await _ensure_columns(db, "positions", {
+            "strategy_type": "TEXT DEFAULT 'SWING'",
+            "close_attempted_at": "TEXT",
+            "close_order_id": "INTEGER",
+            "close_status": "TEXT",
+        })
         async with db.execute(sql) as cursor:
             rows = await cursor.fetchall()
 
@@ -1030,7 +1041,7 @@ async def get_all_positions(limit: int = 100) -> list[dict]:
 
 
 async def count_open_positions() -> int:
-    sql = "SELECT COUNT(*) FROM positions WHERE UPPER(TRIM(COALESCE(status, ''))) IN ('OPEN', 'CLOSE_REQUESTED', 'PENDING_BROKER_CONFIRMATION')"
+    sql = "SELECT COUNT(*) FROM positions WHERE UPPER(TRIM(COALESCE(status, ''))) IN ('OPEN', 'CLOSE_PENDING', 'CLOSE_REQUESTED', 'PENDING_BROKER_CONFIRMATION')"
 
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(sql) as cursor:
@@ -1098,6 +1109,9 @@ async def add_position(data: dict, max_open_positions: int = 10) -> dict:
         notes = excluded.notes,
         updated_at = excluded.updated_at,
         closed_at = NULL,
+        close_attempted_at = NULL,
+        close_order_id = NULL,
+        close_status = NULL,
         strategy_type = excluded.strategy_type
     """
 
@@ -1135,7 +1149,12 @@ async def get_position(symbol: str) -> dict | None:
         db.row_factory = aiosqlite.Row
         await apply_sqlite_pragmas(db)
         await db.execute(CREATE_POSITIONS)
-        await _ensure_columns(db, "positions", {"strategy_type": "TEXT DEFAULT 'SWING'"})
+        await _ensure_columns(db, "positions", {
+            "strategy_type": "TEXT DEFAULT 'SWING'",
+            "close_attempted_at": "TEXT",
+            "close_order_id": "INTEGER",
+            "close_status": "TEXT",
+        })
         async with db.execute(sql, (symbol.strip().upper(),)) as cursor:
             row = await cursor.fetchone()
 
@@ -1156,6 +1175,9 @@ async def update_position(symbol: str, updates: dict) -> dict | None:
         "notes",
         "updated_at",
         "closed_at",
+        "close_attempted_at",
+        "close_order_id",
+        "close_status",
         "strategy_type",
     }
 

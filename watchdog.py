@@ -584,9 +584,9 @@ async def _apply_circuit_breaker(status: dict, thresholds: dict) -> None:
 
     if status.get("healthy"):
         circuit = await get_circuit_breaker_state()
-        if circuit.get("tripped") and circuit.get("source") == WATCHDOG_CIRCUIT_SOURCE:
+        if circuit.get("tripped"):
             await auto_clear_recoverable_circuit_breaker(
-                "Watchdog healthy after reconnect and sync validation",
+                "Watchdog has no remaining blocking conditions",
                 source="watchdog.run_watchdog_once",
                 force=True,
             )
