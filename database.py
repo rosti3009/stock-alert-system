@@ -478,6 +478,20 @@ async def init_db() -> None:
             "recovery_source_position_id": "INTEGER",
         })
 
+
+        await _ensure_columns(db, "orders", {
+            "side": "TEXT",
+            "action": "TEXT",
+            "broker_perm_id": "INTEGER",
+            "remaining_quantity": "REAL",
+            "stop_price": "REAL",
+            "avg_fill_price": "REAL",
+            "raw_json": "TEXT",
+            "filled_at": "TEXT",
+            "cancelled_at": "TEXT",
+            "rejected_at": "TEXT",
+        })
+
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_created_at ON signals(created_at)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_symbol ON signals(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_daily_candidates_symbol ON daily_candidates(symbol)")
@@ -2138,6 +2152,7 @@ CREATE TABLE IF NOT EXISTS orders (
     broker_order_id INTEGER,
     broker_perm_id INTEGER,
     symbol TEXT,
+    side TEXT,
     action TEXT,
     order_type TEXT,
     quantity REAL,
@@ -2145,9 +2160,11 @@ CREATE TABLE IF NOT EXISTS orders (
     remaining_quantity REAL,
     limit_price REAL,
     stop_price REAL,
+    avg_fill_price REAL,
     status TEXT,
     source TEXT,
     reason TEXT,
+    raw_json TEXT,
     created_at TEXT,
     updated_at TEXT,
     submitted_at TEXT,
@@ -2233,3 +2250,201 @@ async def reconcile_orders_and_executions(snapshot: dict) -> dict:
             await db.execute("INSERT OR IGNORE INTO executions_v2 (execution_id,broker_order_id,broker_perm_id,symbol,side,shares,price,commission,execution_time,account,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)", (ex.get('execution_id'),ex.get('order_id'),ex.get('perm_id'),ex.get('symbol'),ex.get('side'),ex.get('shares'),ex.get('price'),ex.get('commission'),ex.get('time'),ex.get('account'),now_iso()))
         await db.commit()
     return {'events':events}
+
+
+async def save_order(
+    *,
+    broker_order_id: int | None = None,
+    broker_perm_id: int | None = None,
+    symbol: str | None = None,
+    side: str | None = None,
+    quantity: float | None = None,
+    order_type: str | None = None,
+    limit_price: float | None = None,
+    status: str | None = None,
+    filled_quantity: float | None = None,
+    avg_fill_price: float | None = None,
+    source: str | None = None,
+    reason: str | None = None,
+    raw_json=None,
+) -> dict:
+    now = now_iso()
+    symbol_norm = str(symbol or "").strip().upper() or None
+    side_norm = str(side or "").strip().upper() or None
+    raw_payload = _journal_payload(raw_json if raw_json is not None else {})
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await apply_sqlite_pragmas(db)
+        await db.execute(CREATE_ORDERS)
+        await _ensure_columns(db, "orders", {"side": "TEXT", "action": "TEXT", "avg_fill_price": "REAL", "raw_json": "TEXT"})
+        cur = await db.execute(
+            """
+            INSERT INTO orders (
+                broker_order_id, broker_perm_id, symbol, side, action, quantity,
+                order_type, limit_price, status, filled_quantity, avg_fill_price,
+                submitted_at, updated_at, created_at, source, reason, raw_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (broker_order_id, broker_perm_id, symbol_norm, side_norm, side_norm, quantity,
+             order_type, limit_price, status or "SUBMITTED", filled_quantity or 0, avg_fill_price,
+             now, now, now, source, reason, raw_payload),
+        )
+        order_id = cur.lastrowid
+        await db.commit()
+        async with db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)) as cursor:
+            row = await cursor.fetchone()
+    return dict(row) if row else {}
+
+
+async def update_order_status(
+    order_id: int,
+    *,
+    status: str,
+    filled_quantity: float | None = None,
+    avg_fill_price: float | None = None,
+    raw_json=None,
+) -> dict | None:
+    updates = ["status = ?", "updated_at = ?"]
+    values = [status, now_iso()]
+    if filled_quantity is not None:
+        updates.append("filled_quantity = ?")
+        values.append(filled_quantity)
+    if avg_fill_price is not None:
+        updates.append("avg_fill_price = ?")
+        values.append(avg_fill_price)
+    if raw_json is not None:
+        updates.append("raw_json = ?")
+        values.append(_journal_payload(raw_json))
+    upper_status = str(status or "").upper()
+    if upper_status in {"CANCELLED", "CANCELED", "APICANCELLED"}:
+        updates.append("cancelled_at = ?")
+        values.append(now_iso())
+    elif upper_status in {"FILLED"}:
+        updates.append("filled_at = ?")
+        values.append(now_iso())
+    elif upper_status in {"REJECTED", "INACTIVE"}:
+        updates.append("rejected_at = ?")
+        values.append(now_iso())
+    values.append(order_id)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await apply_sqlite_pragmas(db)
+        await db.execute(CREATE_ORDERS)
+        await db.execute(f"UPDATE orders SET {', '.join(updates)} WHERE id = ?", values)
+        await db.commit()
+        async with db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)) as cursor:
+            row = await cursor.fetchone()
+    return dict(row) if row else None
+
+
+async def get_orders(limit: int = 100) -> list[dict]:
+    limit = max(1, min(int(limit or 100), 1000))
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await apply_sqlite_pragmas(db)
+        await db.execute(CREATE_ORDERS)
+        async with db.execute(
+            "SELECT * FROM orders ORDER BY COALESCE(updated_at, submitted_at, created_at) DESC, id DESC LIMIT ?",
+            (limit,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def get_open_orders() -> list[dict]:
+    open_statuses = ("SUBMITTED", "PRESUBMITTED", "PENDING", "PENDINGSUBMIT", "APIPENDING")
+    placeholders = ",".join("?" for _ in open_statuses)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await apply_sqlite_pragmas(db)
+        await db.execute(CREATE_ORDERS)
+        async with db.execute(
+            f"""
+            SELECT * FROM orders
+            WHERE UPPER(COALESCE(status, '')) IN ({placeholders})
+            ORDER BY COALESCE(updated_at, submitted_at, created_at) DESC, id DESC
+            """,
+            open_statuses,
+        ) as cursor:
+            rows = await cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+async def close_positions_absent_from_broker(open_broker_symbols: set[str], reason: str) -> list[dict]:
+    open_broker_symbols = {str(symbol).strip().upper() for symbol in open_broker_symbols if symbol}
+    closed: list[dict] = []
+    for position in await get_open_positions():
+        symbol = str(position.get("symbol") or "").strip().upper()
+        if symbol and symbol not in open_broker_symbols:
+            updated = await close_position(symbol, reason=reason)
+            if updated:
+                closed.append(updated)
+    return closed
+
+
+async def get_advanced_performance() -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await apply_sqlite_pragmas(db)
+        await db.execute(CREATE_POSITIONS)
+        await db.execute(CREATE_ORDERS)
+        await db.commit()
+
+    closed = await fetch_all(
+        """
+        SELECT symbol, profit_amount, profit_percent, closed_at, updated_at, created_at
+        FROM positions
+        WHERE UPPER(COALESCE(status, '')) = 'CLOSED'
+        ORDER BY COALESCE(closed_at, updated_at, created_at) ASC, id ASC
+        """
+    )
+    pnls = [float(row.get("profit_amount") or 0) for row in closed]
+    wins_list = [p for p in pnls if p > 0]
+    losses_list = [p for p in pnls if p < 0]
+    total_trades = len(pnls)
+    wins = len(wins_list)
+    losses = len(losses_list)
+    gross_profit = sum(wins_list)
+    gross_loss = abs(sum(losses_list))
+    total_pnl = sum(pnls)
+    average_winner = gross_profit / wins if wins else 0
+    average_loser = sum(losses_list) / losses if losses else 0
+    average_trade = total_pnl / total_trades if total_trades else 0
+    win_rate = (wins / total_trades * 100) if total_trades else 0
+    loss_rate = losses / total_trades if total_trades else 0
+    expectancy = ((win_rate / 100) * average_winner) + (loss_rate * average_loser) if total_trades else 0
+    equity = float(ACCOUNT_BALANCE)
+    peak = equity
+    max_drawdown = 0.0
+    equity_curve = [{"label": "START", "equity": round(equity, 2), "pnl": 0, "timestamp": None}]
+    for row, pnl in zip(closed, pnls):
+        equity += pnl
+        peak = max(peak, equity)
+        max_drawdown = min(max_drawdown, equity - peak)
+        equity_curve.append({"label": row.get("symbol"), "equity": round(equity, 2), "pnl": round(pnl, 2), "timestamp": row.get("closed_at") or row.get("updated_at") or row.get("created_at")})
+    open_row = await fetch_one("SELECT SUM(COALESCE(profit_amount, 0)) AS open_unrealized_pnl FROM positions WHERE UPPER(COALESCE(status, '')) <> 'CLOSED'") or {}
+    daily_row = await fetch_one("""
+        SELECT SUM(COALESCE(profit_amount, 0)) AS daily_pnl
+        FROM positions
+        WHERE UPPER(COALESCE(status, '')) = 'CLOSED'
+          AND DATE(COALESCE(closed_at, updated_at, created_at)) = DATE('now')
+        """) or {}
+    return {
+        "total_trades": total_trades,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(win_rate, 2),
+        "total_pnl": round(total_pnl, 2),
+        "gross_profit": round(gross_profit, 2),
+        "gross_loss": round(gross_loss, 2),
+        "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss else 0,
+        "average_winner": round(average_winner, 2),
+        "average_loser": round(average_loser, 2),
+        "expectancy": round(expectancy, 2),
+        "max_drawdown": round(max_drawdown, 2),
+        "largest_win": round(max(wins_list), 2) if wins_list else 0,
+        "largest_loss": round(min(losses_list), 2) if losses_list else 0,
+        "average_trade": round(average_trade, 2),
+        "open_unrealized_pnl": round(float(open_row.get("open_unrealized_pnl") or 0), 2),
+        "daily_pnl": round(float(daily_row.get("daily_pnl") or 0), 2),
+        "equity_curve": equity_curve,
+    }

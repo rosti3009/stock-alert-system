@@ -10,6 +10,9 @@ import aiosqlite
 import config
 from tws_connection_manager import with_shared_ib_sync
 from ibkr_asyncio_compat import ensure_event_loop
+
+ensure_event_loop()
+
 import ib_insync
 import database
 import execution_sync
