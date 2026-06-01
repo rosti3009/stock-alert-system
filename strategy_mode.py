@@ -324,6 +324,7 @@ def strategy_mode_payload(
         ),
         "active_training_profile": config.active_paper_training_profile(),
         "profile_rules": config.active_paper_training_profile_rules(),
+        "position_limit_mode": config.position_limit_mode(),
         "effective_max_positions": int(rules.get("max_open_positions", 0)),
         "effective_score_threshold": int(rules.get("min_score_to_buy", 0)),
         "effective_risk_factor": float(rules.get("position_size_factor", 1.0)),

@@ -41,7 +41,7 @@ class TradeEngine:
         order_value = quantity * limit_price
         max_position_value = (
             float(config.effective_virtual_trading_capital())
-            * float(config.MAX_POSITION_PERCENT)
+            * float(getattr(config, "MAX_POSITION_PERCENT", 10.0))
             / 100
         )
 
@@ -51,10 +51,11 @@ class TradeEngine:
                 f"is above max position value ${max_position_value:.2f}"
             )
 
-        if order_value < float(config.MIN_TRADE_USD):
+        min_position_size = float(getattr(config, "MIN_POSITION_SIZE_USD", 500.0))
+        if order_value < min_position_size:
             raise RuntimeError(
                 f"Risk block: order value ${order_value:.2f} "
-                f"is below minimum trade ${float(config.MIN_TRADE_USD):.2f}"
+                f"is below minimum position size ${min_position_size:.2f}: Position size below minimum threshold"
             )
 
         return {

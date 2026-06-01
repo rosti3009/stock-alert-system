@@ -2736,6 +2736,14 @@ async def api_strategies_status():
     return JSONResponse({
         "ok": True,
         "paper_trading_only": True,
+        "position_limit_mode": allocation.get("position_limit_mode"),
+        "min_position_size_usd": allocation.get("min_position_size_usd"),
+        "max_portfolio_exposure": allocation.get("max_portfolio_exposure"),
+        "max_position_size": allocation.get("max_position_size"),
+        "portfolio_exposure_percent": allocation.get("portfolio_exposure_percent"),
+        "current_open_positions": allocation.get("current_open_positions"),
+        "capital_used": allocation.get("capital_used"),
+        "remaining_allocated_capital": allocation.get("remaining_allocated_capital"),
         "strategies": allocation.get("strategies", []),
         "reserve": allocation.get("reserve", {}),
         "intraday_force_close": {
@@ -3129,7 +3137,7 @@ async def api_trading_status():
     cash_reserve = (
         account_equity
         * (
-            float(config.MIN_CASH_RESERVE_PERCENT)
+            float(getattr(config, "RESERVE_CAPITAL_PERCENT", config.MIN_CASH_RESERVE_PERCENT))
             / 100
         )
     )
@@ -3146,9 +3154,11 @@ async def api_trading_status():
         open_positions_count=len(open_positions),
     )
     emergency_cap = int(getattr(config, "EMERGENCY_MAX_OPEN_POSITIONS", 50))
+    position_limit_mode = config.position_limit_mode()
+    allocation_status = await strategy_portfolio.build_strategy_allocation_status()
 
     open_count = len(open_positions)
-    single_position_cap = account_equity * (float(getattr(config, "MAX_POSITION_PERCENT", 20.0)) / 100.0)
+    single_position_cap = account_equity * (float(getattr(config, "MAX_POSITION_PERCENT", 10.0)) / 100.0)
     portfolio_risk_ctx = await portfolio_risk_engine.get_portfolio_risk()
     exposure_remaining_percent = max(0.0, 100.0 - float(portfolio_risk_ctx.get("total_portfolio_exposure_percent") or 0.0))
 
@@ -3226,7 +3236,7 @@ async def api_trading_status():
     # POSITION LIMIT
     # ==========================================
 
-    if open_count >= emergency_cap:
+    if config.is_fixed_count_position_limit_mode() and open_count >= emergency_cap:
 
         blocked_reasons.append(
             f"Emergency open-position cap reached "
@@ -3333,6 +3343,11 @@ async def api_trading_status():
 
             "profile_rules": active_strategy_payload["profile_rules"],
 
+            "position_limit_mode": position_limit_mode,
+            "min_position_size_usd": float(getattr(config, "MIN_POSITION_SIZE_USD", 500.0)),
+            "max_portfolio_exposure": float(getattr(config, "MAX_TOTAL_EXPOSURE_PERCENT", 90.0)),
+            "max_position_size": float(getattr(config, "MAX_POSITION_PERCENT", 10.0)),
+            "strategy_allocation_usage": allocation_status,
             "effective_max_positions": active_strategy_payload["effective_max_positions"],
 
             "effective_score_threshold": active_strategy_payload["effective_score_threshold"],
@@ -3500,8 +3515,8 @@ async def api_trading_status():
 
             "open_positions": open_count,
 
-            "max_open_positions": emergency_cap,
-            "emergency_max_open_positions": emergency_cap,
+            "max_open_positions": emergency_cap if config.is_fixed_count_position_limit_mode() else None,
+            "emergency_max_open_positions": emergency_cap if config.is_fixed_count_position_limit_mode() else None,
             "remaining_capacity_usd": round(max(0.0, min(available_cash, single_position_cap)), 2),
             "remaining_exposure_percent": round(exposure_remaining_percent, 2),
 

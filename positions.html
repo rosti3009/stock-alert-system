@@ -551,7 +551,9 @@ function renderTradingStatus(){
     <tr>
       <td><b>Open Positions</b></td>
       <td>
-        ${tradingStatusData.open_positions}/${tradingStatusData.max_open_positions}
+        ${tradingStatusData.position_limit_mode === 'CAPITAL_BASED'
+          ? `${tradingStatusData.open_positions} open`
+          : `${tradingStatusData.open_positions}/${tradingStatusData.max_open_positions}`}
       </td>
     </tr>
 

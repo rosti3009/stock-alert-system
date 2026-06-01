@@ -33,7 +33,7 @@
       </div>
       <div class="box">
         <h3>Strategy Status</h3>
-        <div class="table-wrap"><table><thead><tr><th>Strategy</th><th>Capital %</th><th>Allocated Capital</th><th>Used Capital</th><th>Free Capital</th><th>Open Positions</th><th>Realized PnL</th><th>Unrealized PnL</th><th>Status</th></tr></thead><tbody id="strategyRows"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>Strategy</th><th>Capital %</th><th>Allocated Capital</th><th>Used Capital</th><th>Free Capital</th><th>Open Positions</th><th>Strategy Exposure</th><th>Remaining Allocated</th><th>Realized PnL</th><th>Unrealized PnL</th><th>Status</th></tr></thead><tbody id="strategyRows"></tbody></table></div>
       </div>
     </div>
   </main>
@@ -49,13 +49,19 @@ async function loadAllocation(){
   document.getElementById('intradayPct').value = data.allocations.INTRADAY;
   document.getElementById('reservePct').value = data.allocations.RESERVE;
   document.getElementById('cards').innerHTML = [
+    card('Position Limit Mode', data.position_limit_mode || 'CAPITAL_BASED', 'Capital-based mode ignores fixed count blockers'),
+    card('Current Open Positions', num(data.current_open_positions)),
+    card('Capital Used', money(data.capital_used || data.cards.total_used)),
+    card('Remaining Allocated Capital', money(data.remaining_allocated_capital || data.cards.total_free)),
+    card('Portfolio Exposure', `${num(data.portfolio_exposure_percent)}%`, `Max ${num(data.max_portfolio_exposure)}%`),
+    card('Minimum Position Size', money(data.min_position_size_usd)),
     card('Swing Capital', money(data.cards.swing_capital), `${data.allocations.SWING}% allocation`),
     card('Intraday Capital', money(data.cards.intraday_capital), `${data.allocations.INTRADAY}% allocation`),
     card('Reserve', money(data.cards.reserve), 'Never used for buys'),
     card('Total Used', money(data.cards.total_used)),
     card('Total Free', money(data.cards.total_free)),
   ].join('');
-  document.getElementById('strategyRows').innerHTML = (data.strategies||[]).map(r=>`<tr><td>${r.strategy}</td><td>${num(r.capital_percent)}%</td><td>${money(r.allocated_capital)}</td><td>${money(r.used_capital)}</td><td>${money(r.free_capital)}</td><td>${r.open_positions}</td><td>${money(r.realized_pnl)}</td><td>${money(r.unrealized_pnl)}</td><td><span class="pill ${r.status==='ACTIVE'?'ok':'warn'}">${r.status}</span></td></tr>`).join('');
+  document.getElementById('strategyRows').innerHTML = (data.strategies||[]).map(r=>`<tr><td>${r.strategy}</td><td>${num(r.capital_percent)}%</td><td>${money(r.allocated_capital)}</td><td>${money(r.used_capital)}</td><td>${money(r.free_capital)}</td><td>${r.open_positions}</td><td>${num(r.strategy_exposure_percent)}%</td><td>${money(r.remaining_allocated_capital)}</td><td>${money(r.realized_pnl)}</td><td>${money(r.unrealized_pnl)}</td><td><span class="pill ${r.status==='ACTIVE'?'ok':'warn'}">${r.status}</span></td></tr>`).join('');
 }
 async function saveAllocation(){
   const payload = {SWING:Number(swingPct.value), INTRADAY:Number(intradayPct.value), RESERVE:Number(reservePct.value)};
