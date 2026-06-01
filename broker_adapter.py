@@ -206,6 +206,12 @@ class BrokerAdapter:
         self._connect()
         ib = getattr(self.client, "ib", None)
         order_id_int = int(order_id)
+        try:
+            if hasattr(ib, "reqAllOpenOrders"):
+                ib.reqAllOpenOrders()
+                ib.sleep(1)
+        except Exception as exc:
+            log.warning("Failed refreshing open orders before cancel: %s", exc)
         for trade in ib.openTrades() if hasattr(ib, "openTrades") else []:
             order = getattr(trade, "order", None)
             if int(getattr(order, "orderId", -1) or -1) == order_id_int:
