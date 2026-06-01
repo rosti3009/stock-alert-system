@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Strategy Allocation</title>
+  <link rel="stylesheet" href="/layout.css">
+  <style>
+    .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:16px}.allocation-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:14px}.allocation-form label{display:flex;flex-direction:column;gap:6px;color:var(--muted);font-weight:800}.allocation-form input{background:#0b111b;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px}.pill{display:inline-block;border-radius:999px;padding:4px 10px;font-weight:900}.ok{background:#064e3b;color:#d1fae5}.warn{background:#713f12;color:#fef3c7}.table-wrap{overflow:auto}td,th{text-align:left}.metric-sub{color:var(--muted);font-size:12px;margin-top:6px}
+  </style>
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-title">TRADING SYSTEM</div><div class="brand-subtitle">IBKR Paper Dashboard</div></div>
+    <nav class="side-nav">
+      <a href="/dashboard">📊 Dashboard</a><a href="/market">🌐 Market</a><a href="/scanner">🔎 Scanner</a><a href="/analytics">📈 Analytics</a><a href="/positions">💼 Positions</a><a href="/broker-audit">🧾 Broker Audit</a><a href="/orders">🧾 Orders</a><a href="/performance">📊 Performance</a><a href="/strategy-allocation" class="active">🧩 Strategy Allocation</a><a href="/portfolio">📁 Portfolio</a><a href="/history">📜 History</a><a href="/risk">⚠ Risk</a><a href="/system-health">🩺 System Health</a><a href="/strategies">🧠 Strategies</a><a href="/settings">⚙ Settings</a>
+    </nav>
+  </aside>
+  <main class="main-area">
+    <header class="topbar"><div><h1 class="page-title">Strategy Allocation</h1><div class="page-subtitle">Paper-only capital separation for SWING and INTRADAY strategies.</div></div><button class="primary" onclick="loadAllocation()">Refresh</button></header>
+    <div class="container">
+      <div id="message" class="box" style="display:none"></div>
+      <div class="cards" id="cards"></div>
+      <div class="box">
+        <h3>Allocation Settings</h3>
+        <div class="allocation-form">
+          <label>Swing Capital %<input id="swingPct" type="number" min="0" max="100" step="0.1"></label>
+          <label>Intraday Capital %<input id="intradayPct" type="number" min="0" max="100" step="0.1"></label>
+          <label>Reserve Capital %<input id="reservePct" type="number" min="0" max="100" step="0.1"></label>
+        </div>
+        <div class="toolbar"><button class="primary" onclick="saveAllocation()">Save Allocation</button><button onclick="forceCloseIntraday()">Force Close Intraday</button></div>
+      </div>
+      <div class="box">
+        <h3>Strategy Status</h3>
+        <div class="table-wrap"><table><thead><tr><th>Strategy</th><th>Capital %</th><th>Allocated Capital</th><th>Used Capital</th><th>Free Capital</th><th>Open Positions</th><th>Realized PnL</th><th>Unrealized PnL</th><th>Status</th></tr></thead><tbody id="strategyRows"></tbody></table></div>
+      </div>
+    </div>
+  </main>
+</div>
+<script>
+const money = v => Number(v||0).toLocaleString(undefined,{style:'currency',currency:'USD'});
+const num = v => Number(v||0).toLocaleString(undefined,{maximumFractionDigits:2});
+function showMessage(text, error=false){ const el=document.getElementById('message'); el.style.display='block'; el.className='box '+(error?'red':'green'); el.textContent=text; }
+function card(title,value,sub=''){ return `<div class="card"><h3>${title}</h3><div class="value blue">${value}</div>${sub?`<div class="metric-sub">${sub}</div>`:''}</div>`; }
+async function loadAllocation(){
+  const res = await fetch('/api/strategy-allocation',{cache:'no-store'}); const data = await res.json();
+  document.getElementById('swingPct').value = data.allocations.SWING;
+  document.getElementById('intradayPct').value = data.allocations.INTRADAY;
+  document.getElementById('reservePct').value = data.allocations.RESERVE;
+  document.getElementById('cards').innerHTML = [
+    card('Swing Capital', money(data.cards.swing_capital), `${data.allocations.SWING}% allocation`),
+    card('Intraday Capital', money(data.cards.intraday_capital), `${data.allocations.INTRADAY}% allocation`),
+    card('Reserve', money(data.cards.reserve), 'Never used for buys'),
+    card('Total Used', money(data.cards.total_used)),
+    card('Total Free', money(data.cards.total_free)),
+  ].join('');
+  document.getElementById('strategyRows').innerHTML = (data.strategies||[]).map(r=>`<tr><td>${r.strategy}</td><td>${num(r.capital_percent)}%</td><td>${money(r.allocated_capital)}</td><td>${money(r.used_capital)}</td><td>${money(r.free_capital)}</td><td>${r.open_positions}</td><td>${money(r.realized_pnl)}</td><td>${money(r.unrealized_pnl)}</td><td><span class="pill ${r.status==='ACTIVE'?'ok':'warn'}">${r.status}</span></td></tr>`).join('');
+}
+async function saveAllocation(){
+  const payload = {SWING:Number(swingPct.value), INTRADAY:Number(intradayPct.value), RESERVE:Number(reservePct.value)};
+  const res = await fetch('/api/strategy-allocation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}); const data = await res.json();
+  if(!res.ok){ showMessage(data.error||'Save failed', true); return; }
+  showMessage('Allocation saved.'); loadAllocation();
+}
+async function forceCloseIntraday(){
+  const res = await fetch('/api/intraday/force-close',{method:'POST'}); const data = await res.json();
+  showMessage((data.operation&&data.operation.message)||'Force close submitted', !res.ok); loadAllocation();
+}
+loadAllocation();
+</script>
+</body>
+</html>

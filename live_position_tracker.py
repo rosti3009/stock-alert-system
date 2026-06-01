@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable
 import config
 import database
 import strategy_mode
+from strategy_portfolio import STRATEGY_INTRADAY, normalize_strategy_type
 import watchdog
 from data_fetcher import fetch_intraday_bars
 from position_manager import evaluate_position
@@ -144,6 +145,8 @@ def _is_reconciliation_managed_position(position: dict[str, Any]) -> bool:
 
 
 def _is_position_intraday(position: dict[str, Any], active_mode: strategy_mode.StrategyMode | str) -> bool:
+    if normalize_strategy_type(position.get("strategy_type")) == STRATEGY_INTRADAY:
+        return True
     return strategy_mode.is_intraday_mode(position.get("strategy_mode") or active_mode)
 
 

@@ -128,7 +128,8 @@ CREATE TABLE IF NOT EXISTS daily_candidates (
     weekly_reasons TEXT,
     error TEXT,
     skip_reason TEXT,
-    created_at TEXT
+    created_at TEXT,
+    strategy_type TEXT DEFAULT 'SWING' CHECK(strategy_type IN ('SWING', 'INTRADAY'))
 )
 """
 
@@ -152,7 +153,8 @@ CREATE TABLE IF NOT EXISTS positions (
     source TEXT,
     created_at TEXT,
     updated_at TEXT,
-    closed_at TEXT
+    closed_at TEXT,
+    strategy_type TEXT DEFAULT 'SWING' CHECK(strategy_type IN ('SWING', 'INTRADAY'))
 )
 """
 
@@ -467,6 +469,7 @@ async def init_db() -> None:
             "weekly_reasons": "TEXT",
             "error": "TEXT",
             "skip_reason": "TEXT",
+            "strategy_type": "TEXT DEFAULT 'SWING'",
         })
 
         await _ensure_columns(db, "positions", {
@@ -476,6 +479,7 @@ async def init_db() -> None:
             "closed_at": "TEXT",
             "source": "TEXT",
             "recovery_source_position_id": "INTEGER",
+            "strategy_type": "TEXT DEFAULT 'SWING'",
         })
 
 
@@ -490,6 +494,7 @@ async def init_db() -> None:
             "filled_at": "TEXT",
             "cancelled_at": "TEXT",
             "rejected_at": "TEXT",
+            "strategy_type": "TEXT DEFAULT 'SWING'",
         })
 
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_created_at ON signals(created_at)")
@@ -497,6 +502,9 @@ async def init_db() -> None:
         await db.execute("CREATE INDEX IF NOT EXISTS idx_daily_candidates_symbol ON daily_candidates(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_daily_candidates_score ON daily_candidates(weekly_score)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_positions_strategy_status ON positions(strategy_type, status)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_orders_strategy ON orders(strategy_type)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_daily_candidates_strategy ON daily_candidates(strategy_type)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trade_journal_timestamp ON trade_journal(timestamp)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trade_journal_symbol ON trade_journal(symbol)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_trade_journal_event_type ON trade_journal(event_type)")
@@ -654,6 +662,11 @@ async def get_trade_journal(limit: int = 200, symbol: str | None = None) -> list
             rows = await cursor.fetchall()
 
     return [dict(row) for row in rows]
+
+
+def _normalize_strategy_type(value) -> str:
+    normalized = str(value or "SWING").strip().upper()
+    return normalized if normalized in {"SWING", "INTRADAY"} else "SWING"
 
 
 def _row_to_dict(row) -> dict:
@@ -879,14 +892,14 @@ async def save_daily_candidate(row: dict, scan_run_id: int) -> None:
         volume, avg_volume, atr, trend, signal,
         entry_price, stop_loss, take_profit_1, take_profit_2,
         risk_percent, rr_ratio, score, weekly_score, weekly_rank,
-        reasons, weekly_reasons, error, skip_reason, created_at
+        reasons, weekly_reasons, error, skip_reason, created_at, strategy_type
     )
     VALUES (
         :scan_run_id, :symbol, :price, :rsi, :ma20, :ma50, :ma200,
         :volume, :avg_volume, :atr, :trend, :signal,
         :entry_price, :stop_loss, :take_profit_1, :take_profit_2,
         :risk_percent, :rr_ratio, :score, :weekly_score, :weekly_rank,
-        :reasons, :weekly_reasons, :error, :skip_reason, :created_at
+        :reasons, :weekly_reasons, :error, :skip_reason, :created_at, :strategy_type
     )
     """
 
@@ -917,9 +930,12 @@ async def save_daily_candidate(row: dict, scan_run_id: int) -> None:
         "error": row.get("error"),
         "skip_reason": row.get("skip_reason"),
         "created_at": row.get("created_at") or now_iso(),
+        "strategy_type": _normalize_strategy_type(row.get("strategy_type")),
     }
 
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(CREATE_DAILY_CANDIDATES)
+        await _ensure_columns(db, "daily_candidates", {"strategy_type": "TEXT DEFAULT 'SWING'"})
         await db.execute(sql, safe)
         await db.commit()
 
@@ -1052,9 +1068,9 @@ async def add_position(data: dict, max_open_positions: int = 10) -> dict:
     INSERT INTO positions (
         symbol, buy_price, quantity, buy_date, current_price,
         profit_amount, profit_percent, stop_loss, take_profit_1, take_profit_2,
-        status, action, reason, notes, created_at, updated_at, closed_at
+        status, action, reason, notes, created_at, updated_at, closed_at, strategy_type
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 'HOLD', ?, ?, ?, ?, NULL)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 'HOLD', ?, ?, ?, ?, NULL, ?)
     ON CONFLICT(symbol) DO UPDATE SET
         buy_price = excluded.buy_price,
         quantity = excluded.quantity,
@@ -1070,7 +1086,8 @@ async def add_position(data: dict, max_open_positions: int = 10) -> dict:
         reason = excluded.reason,
         notes = excluded.notes,
         updated_at = excluded.updated_at,
-        closed_at = NULL
+        closed_at = NULL,
+        strategy_type = excluded.strategy_type
     """
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1089,6 +1106,7 @@ async def add_position(data: dict, max_open_positions: int = 10) -> dict:
             data.get("notes"),
             now,
             now,
+            _normalize_strategy_type(data.get("strategy_type")),
         ))
         await db.commit()
 
@@ -1124,6 +1142,7 @@ async def update_position(symbol: str, updates: dict) -> dict | None:
         "notes",
         "updated_at",
         "closed_at",
+        "strategy_type",
     }
 
     fields = []
@@ -2170,7 +2189,8 @@ CREATE TABLE IF NOT EXISTS orders (
     submitted_at TEXT,
     filled_at TEXT,
     cancelled_at TEXT,
-    rejected_at TEXT
+    rejected_at TEXT,
+    strategy_type TEXT DEFAULT 'SWING' CHECK(strategy_type IN ('SWING', 'INTRADAY'))
 )
 """
 CREATE_EXECUTIONS_V2 = """
@@ -2267,6 +2287,7 @@ async def save_order(
     source: str | None = None,
     reason: str | None = None,
     raw_json=None,
+    strategy_type: str | None = None,
 ) -> dict:
     now = now_iso()
     symbol_norm = str(symbol or "").strip().upper() or None
@@ -2276,18 +2297,18 @@ async def save_order(
         db.row_factory = aiosqlite.Row
         await apply_sqlite_pragmas(db)
         await db.execute(CREATE_ORDERS)
-        await _ensure_columns(db, "orders", {"side": "TEXT", "action": "TEXT", "avg_fill_price": "REAL", "raw_json": "TEXT"})
+        await _ensure_columns(db, "orders", {"side": "TEXT", "action": "TEXT", "avg_fill_price": "REAL", "raw_json": "TEXT", "strategy_type": "TEXT DEFAULT 'SWING'"})
         cur = await db.execute(
             """
             INSERT INTO orders (
                 broker_order_id, broker_perm_id, symbol, side, action, quantity,
                 order_type, limit_price, status, filled_quantity, avg_fill_price,
-                submitted_at, updated_at, created_at, source, reason, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                submitted_at, updated_at, created_at, source, reason, raw_json, strategy_type
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (broker_order_id, broker_perm_id, symbol_norm, side_norm, side_norm, quantity,
              order_type, limit_price, status or "SUBMITTED", filled_quantity or 0, avg_fill_price,
-             now, now, now, source, reason, raw_payload),
+             now, now, now, source, reason, raw_payload, _normalize_strategy_type(strategy_type)),
         )
         order_id = cur.lastrowid
         await db.commit()
@@ -2391,7 +2412,7 @@ async def get_advanced_performance() -> dict:
 
     closed = await fetch_all(
         """
-        SELECT symbol, profit_amount, profit_percent, closed_at, updated_at, created_at
+        SELECT symbol, profit_amount, profit_percent, closed_at, updated_at, created_at, COALESCE(strategy_type, 'SWING') AS strategy_type
         FROM positions
         WHERE UPPER(COALESCE(status, '')) = 'CLOSED'
         ORDER BY COALESCE(closed_at, updated_at, created_at) ASC, id ASC
@@ -2422,6 +2443,33 @@ async def get_advanced_performance() -> dict:
         max_drawdown = min(max_drawdown, equity - peak)
         equity_curve.append({"label": row.get("symbol"), "equity": round(equity, 2), "pnl": round(pnl, 2), "timestamp": row.get("closed_at") or row.get("updated_at") or row.get("created_at")})
     open_row = await fetch_one("SELECT SUM(COALESCE(profit_amount, 0)) AS open_unrealized_pnl FROM positions WHERE UPPER(COALESCE(status, '')) <> 'CLOSED'") or {}
+    by_strategy_rows = await fetch_all("""
+        SELECT COALESCE(strategy_type, 'SWING') AS strategy_type,
+               SUM(CASE WHEN UPPER(COALESCE(status, '')) = 'CLOSED' THEN COALESCE(profit_amount, 0) ELSE 0 END) AS realized_pnl,
+               SUM(CASE WHEN UPPER(COALESCE(status, '')) <> 'CLOSED' THEN COALESCE(profit_amount, 0) ELSE 0 END) AS unrealized_pnl,
+               SUM(CASE WHEN UPPER(COALESCE(status, '')) <> 'CLOSED' THEN 1 ELSE 0 END) AS open_positions,
+               SUM(CASE WHEN UPPER(COALESCE(status, '')) = 'CLOSED' THEN 1 ELSE 0 END) AS closed_trades,
+               SUM(CASE WHEN UPPER(COALESCE(status, '')) = 'CLOSED' AND COALESCE(profit_amount, 0) > 0 THEN 1 ELSE 0 END) AS wins
+        FROM positions
+        GROUP BY COALESCE(strategy_type, 'SWING')
+    """)
+    strategy_keys = {"SWING", "INTRADAY"}
+    realized_pnl_by_strategy = {key: 0.0 for key in strategy_keys}
+    unrealized_pnl_by_strategy = {key: 0.0 for key in strategy_keys}
+    total_pnl_by_strategy = {key: 0.0 for key in strategy_keys}
+    open_positions_by_strategy = {key: 0 for key in strategy_keys}
+    win_rate_by_strategy = {key: 0.0 for key in strategy_keys}
+    for row in by_strategy_rows:
+        strategy = _normalize_strategy_type(row.get("strategy_type"))
+        realized = float(row.get("realized_pnl") or 0)
+        unrealized = float(row.get("unrealized_pnl") or 0)
+        closed_trades = int(row.get("closed_trades") or 0)
+        wins_count = int(row.get("wins") or 0)
+        realized_pnl_by_strategy[strategy] = round(realized, 2)
+        unrealized_pnl_by_strategy[strategy] = round(unrealized, 2)
+        total_pnl_by_strategy[strategy] = round(realized + unrealized, 2)
+        open_positions_by_strategy[strategy] = int(row.get("open_positions") or 0)
+        win_rate_by_strategy[strategy] = round((wins_count / closed_trades * 100) if closed_trades else 0.0, 2)
     daily_row = await fetch_one("""
         SELECT SUM(COALESCE(profit_amount, 0)) AS daily_pnl
         FROM positions
@@ -2447,4 +2495,9 @@ async def get_advanced_performance() -> dict:
         "open_unrealized_pnl": round(float(open_row.get("open_unrealized_pnl") or 0), 2),
         "daily_pnl": round(float(daily_row.get("daily_pnl") or 0), 2),
         "equity_curve": equity_curve,
+        "total_pnl_by_strategy": total_pnl_by_strategy,
+        "win_rate_by_strategy": win_rate_by_strategy,
+        "open_positions_by_strategy": open_positions_by_strategy,
+        "realized_pnl_by_strategy": realized_pnl_by_strategy,
+        "unrealized_pnl_by_strategy": unrealized_pnl_by_strategy,
     }
