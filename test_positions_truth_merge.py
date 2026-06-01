@@ -89,3 +89,43 @@ def test_open_count_stable_across_partial_refreshes(monkeypatch):
     second = client.get('/api/positions').json()
     assert len(first["positions"]) == 3
     assert len(second["positions"]) == 3
+
+
+def test_positions_endpoint_bootstraps_companion_tables_and_coalesces_strategy_type(tmp_path, monkeypatch):
+    import sqlite3
+    import config
+    import database
+
+    db_path = str(tmp_path / "positions_api.db")
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            """
+            CREATE TABLE positions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL UNIQUE,
+                buy_price REAL NOT NULL,
+                quantity REAL DEFAULT 0,
+                status TEXT DEFAULT 'OPEN',
+                created_at TEXT,
+                updated_at TEXT,
+                strategy_type TEXT
+            )
+            """
+        )
+        db.execute(
+            """
+            INSERT INTO positions (symbol, buy_price, quantity, status, created_at, updated_at, strategy_type)
+            VALUES ('AAPL', 100, 1, 'OPEN', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00', NULL)
+            """
+        )
+
+    monkeypatch.setattr(config, "DB_PATH", db_path)
+    monkeypatch.setattr(database, "DB_PATH", db_path)
+    monkeypatch.setattr(main.database, "DB_PATH", db_path)
+
+    response = TestClient(main.app, raise_server_exceptions=False).get("/api/positions")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["positions"][0]["symbol"] == "AAPL"
+    assert payload["positions"][0]["strategy_type"] == "SWING"

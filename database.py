@@ -686,6 +686,7 @@ async def get_app_state(key: str, default: str | None = None) -> str | None:
 
     async with aiosqlite.connect(DB_PATH) as db:
         await apply_sqlite_pragmas(db)
+        await db.execute(CREATE_APP_STATE)
         async with db.execute(sql, (key,)) as cursor:
             row = await cursor.fetchone()
 
@@ -942,7 +943,7 @@ async def save_daily_candidate(row: dict, scan_run_id: int) -> None:
 
 async def get_latest_candidates(limit: int = 500) -> list[dict]:
     sql = """
-    SELECT dc.*
+    SELECT COALESCE(dc.strategy_type, 'SWING') AS strategy_type, dc.*
     FROM daily_candidates dc
     INNER JOIN (
         SELECT symbol, MAX(id) AS max_id
@@ -956,6 +957,8 @@ async def get_latest_candidates(limit: int = 500) -> list[dict]:
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        await db.execute(CREATE_DAILY_CANDIDATES)
+        await _ensure_columns(db, "daily_candidates", {"strategy_type": "TEXT DEFAULT 'SWING'"})
         async with db.execute(sql, (limit,)) as cursor:
             rows = await cursor.fetchall()
 
@@ -964,7 +967,7 @@ async def get_latest_candidates(limit: int = 500) -> list[dict]:
 
 async def get_top_weekly(limit: int = 10) -> list[dict]:
     sql = """
-    SELECT *
+    SELECT COALESCE(strategy_type, 'SWING') AS strategy_type, *
     FROM daily_candidates
     WHERE weekly_score IS NOT NULL
       AND weekly_score > 0
@@ -975,6 +978,8 @@ async def get_top_weekly(limit: int = 10) -> list[dict]:
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        await db.execute(CREATE_DAILY_CANDIDATES)
+        await _ensure_columns(db, "daily_candidates", {"strategy_type": "TEXT DEFAULT 'SWING'"})
         async with db.execute(sql, (limit,)) as cursor:
             rows = await cursor.fetchall()
 
@@ -988,7 +993,7 @@ async def get_top_weekly(limit: int = 10) -> list[dict]:
 
 async def get_open_positions() -> list[dict]:
     sql = """
-    SELECT *
+    SELECT COALESCE(strategy_type, 'SWING') AS strategy_type, *
     FROM positions
     WHERE UPPER(TRIM(COALESCE(status, ''))) IN ('OPEN', 'CLOSE_REQUESTED', 'PENDING_BROKER_CONFIRMATION')
     ORDER BY created_at ASC
@@ -996,6 +1001,9 @@ async def get_open_positions() -> list[dict]:
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        await apply_sqlite_pragmas(db)
+        await db.execute(CREATE_POSITIONS)
+        await _ensure_columns(db, "positions", {"strategy_type": "TEXT DEFAULT 'SWING'"})
         async with db.execute(sql) as cursor:
             rows = await cursor.fetchall()
 
@@ -1004,7 +1012,7 @@ async def get_open_positions() -> list[dict]:
 
 async def get_all_positions(limit: int = 100) -> list[dict]:
     sql = """
-    SELECT *
+    SELECT COALESCE(strategy_type, 'SWING') AS strategy_type, *
     FROM positions
     ORDER BY status ASC, updated_at DESC, created_at DESC
     LIMIT ?
@@ -1012,6 +1020,9 @@ async def get_all_positions(limit: int = 100) -> list[dict]:
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        await apply_sqlite_pragmas(db)
+        await db.execute(CREATE_POSITIONS)
+        await _ensure_columns(db, "positions", {"strategy_type": "TEXT DEFAULT 'SWING'"})
         async with db.execute(sql, (limit,)) as cursor:
             rows = await cursor.fetchall()
 
@@ -1115,13 +1126,16 @@ async def add_position(data: dict, max_open_positions: int = 10) -> dict:
 
 async def get_position(symbol: str) -> dict | None:
     sql = """
-    SELECT *
+    SELECT COALESCE(strategy_type, 'SWING') AS strategy_type, *
     FROM positions
     WHERE symbol = ?
     """
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        await apply_sqlite_pragmas(db)
+        await db.execute(CREATE_POSITIONS)
+        await _ensure_columns(db, "positions", {"strategy_type": "TEXT DEFAULT 'SWING'"})
         async with db.execute(sql, (symbol.strip().upper(),)) as cursor:
             row = await cursor.fetchone()
 
@@ -2261,6 +2275,7 @@ async def reconcile_orders_and_executions(snapshot: dict) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory=aiosqlite.Row
         await db.execute(CREATE_ORDERS); await db.execute(CREATE_EXECUTIONS_V2)
+        await _ensure_columns(db, "orders", {"strategy_type": "TEXT DEFAULT 'SWING'"})
         for o in snapshot.get('open_orders',[]):
             cur=await db.execute("SELECT id FROM orders WHERE broker_order_id=? OR broker_perm_id=?", (o.get('order_id'), o.get('perm_id')))
             if not await cur.fetchone():
@@ -2364,8 +2379,9 @@ async def get_orders(limit: int = 100) -> list[dict]:
         db.row_factory = aiosqlite.Row
         await apply_sqlite_pragmas(db)
         await db.execute(CREATE_ORDERS)
+        await _ensure_columns(db, "orders", {"strategy_type": "TEXT DEFAULT 'SWING'"})
         async with db.execute(
-            "SELECT * FROM orders ORDER BY COALESCE(updated_at, submitted_at, created_at) DESC, id DESC LIMIT ?",
+            "SELECT COALESCE(strategy_type, 'SWING') AS strategy_type, * FROM orders ORDER BY COALESCE(updated_at, submitted_at, created_at) DESC, id DESC LIMIT ?",
             (limit,),
         ) as cursor:
             rows = await cursor.fetchall()
@@ -2379,9 +2395,10 @@ async def get_open_orders() -> list[dict]:
         db.row_factory = aiosqlite.Row
         await apply_sqlite_pragmas(db)
         await db.execute(CREATE_ORDERS)
+        await _ensure_columns(db, "orders", {"strategy_type": "TEXT DEFAULT 'SWING'"})
         async with db.execute(
             f"""
-            SELECT * FROM orders
+            SELECT COALESCE(strategy_type, 'SWING') AS strategy_type, * FROM orders
             WHERE UPPER(COALESCE(status, '')) IN ({placeholders})
             ORDER BY COALESCE(updated_at, submitted_at, created_at) DESC, id DESC
             """,

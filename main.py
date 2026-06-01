@@ -160,6 +160,14 @@ def no_cache_headers() -> dict:
     }
 
 
+def _safe_json_array(value) -> list:
+    try:
+        parsed = json.loads(value or "[]")
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -2787,17 +2795,25 @@ async def api_equity_curve(limit: int = 500):
 
 @app.get("/api/positions")
 async def api_positions():
-    db_positions = await database.get_all_positions(100)
-    tracker = await live_position_tracker.get_tracker_status()
-    broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
-    merged, missing_tracker = _merge_positions_with_truth(db_positions, tracker, broker_snapshot)
-    payload = {
-        "positions": merged,
-        "position_truth_source": "BROKER_SNAPSHOT",
-        "enrichment_source": "live_position_tracker",
-        "missing_tracker_enrichment_symbols": missing_tracker,
-    }
-    return JSONResponse(payload, headers=no_cache_headers())
+    try:
+        db_positions = await database.get_all_positions(100)
+        tracker = await live_position_tracker.get_tracker_status()
+        broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
+        merged, missing_tracker = _merge_positions_with_truth(db_positions, tracker, broker_snapshot)
+        payload = {
+            "positions": merged,
+            "position_truth_source": "BROKER_SNAPSHOT",
+            "enrichment_source": "live_position_tracker",
+            "missing_tracker_enrichment_symbols": missing_tracker,
+        }
+        return JSONResponse(payload, headers=no_cache_headers())
+    except Exception as exc:
+        log.exception("/api/positions failed")
+        return JSONResponse(
+            {"positions": [], "error": "positions_unavailable", "detail": str(exc)},
+            status_code=500,
+            headers=no_cache_headers(),
+        )
 
 
 def _broker_open_positions(snapshot: dict) -> dict[str, dict]:
