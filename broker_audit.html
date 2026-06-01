@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Broker Audit — Trading System</title>
+  <link rel="stylesheet" href="/layout.css">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-title">TRADING SYSTEM</div><div class="brand-subtitle">IBKR Paper Dashboard</div></div>
+    <nav class="side-nav">
+      <a href="/dashboard">📊 Dashboard</a><a href="/market">🌐 Market</a><a href="/scanner">🔎 Scanner</a><a href="/analytics">📈 Analytics</a><a href="/positions">💼 Positions</a><a href="/broker-audit" class="active">🧾 Broker Audit</a><a href="/orders">🧾 Orders</a><a href="/performance">📊 Performance</a><a href="/portfolio">📁 Portfolio</a><a href="/history">📜 History</a><a href="/risk">⚠ Risk</a><a href="/system-health">🩺 System Health</a><a href="/strategies">🧠 Strategies</a><a href="/settings">⚙ Settings</a>
+    </nav>
+  </aside>
+  <main class="main-area">
+    <header class="topbar"><div><h1 class="page-title">Broker Audit</h1><div class="page-subtitle">Compares IBKR PAPER broker snapshot against internal SQLite state.</div></div><div class="status-row"><span class="live-dot"></span><span id="statusText">Loading...</span></div></header>
+    <div class="container">
+      <div class="toolbar"><button class="primary" onclick="loadAudit()">Refresh Audit</button><span class="muted" id="sourceText"></span></div>
+      <div class="box"><h3>Account Comparison</h3><div class="table-wrap"><table><thead><tr><th>Item</th><th>Broker</th><th>System</th><th>Difference</th><th>Status</th></tr></thead><tbody id="summaryRows"></tbody></table></div></div>
+      <h2 class="section-title">Position Comparison</h2>
+      <div class="box"><div class="table-wrap"><table><thead><tr><th>Symbol</th><th>Broker Qty</th><th>System Qty</th><th>Broker Avg Cost</th><th>System Avg Cost</th><th>Broker Value</th><th>System Value</th><th>Status</th></tr></thead><tbody id="positionRows"></tbody></table></div></div>
+      <div class="box"><h3>Differences</h3><pre id="diffJson" class="muted"></pre></div>
+    </div>
+  </main>
+</div>
+<script>
+const money = v => Number(v || 0).toLocaleString(undefined,{style:'currency',currency:'USD'});
+const qty = v => Number(v || 0).toLocaleString(undefined,{maximumFractionDigits:6});
+const badge = s => `<span class="badge ${s==='OK'?'green':(s==='MISMATCH'?'red':'yellow')}">${s}</span>`;
+async function loadAudit(){
+  const res = await fetch('/api/broker-audit',{cache:'no-store'});
+  const data = await res.json();
+  document.getElementById('statusText').textContent = data.status || (data.ok?'OK':'WARNING');
+  document.getElementById('sourceText').textContent = `Source: ${data.broker_snapshot_source || 'live_ibkr_paper'} | Mode: ${data.mode || 'PAPER_ONLY'}`;
+  const rows = [
+    ['Net Liquidation', money(data.broker_net_liquidation), money(data.system_equity), money((data.differences||{}).equity_diff), Math.abs((data.differences||{}).equity_diff||0) <= 1 ? 'OK':'WARNING'],
+    ['Cash', money(data.broker_cash), money(data.system_cash), money((data.differences||{}).cash_diff), Math.abs((data.differences||{}).cash_diff||0) <= 1 ? 'OK':'WARNING'],
+    ['Positions Count', data.broker_positions_count||0, data.system_positions_count||0, (data.differences||{}).position_count_diff||0, ((data.differences||{}).position_count_diff||0)===0 ? 'OK':'MISMATCH'],
+    ['Unrealized PnL', money(data.broker_unrealized_pnl), money((data.system_positions||[]).reduce((a,p)=>a+Number(p.unrealized_pnl||0),0)), '', data.status || 'WARNING']
+  ];
+  document.getElementById('summaryRows').innerHTML = rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td>${r[3]}</td><td>${badge(r[4])}</td></tr>`).join('');
+  const broker = Object.fromEntries((data.broker_positions||[]).map(p=>[p.symbol,p]));
+  const system = Object.fromEntries((data.system_positions||[]).map(p=>[p.symbol,p]));
+  const symbols = Array.from(new Set([...Object.keys(broker),...Object.keys(system)])).sort();
+  document.getElementById('positionRows').innerHTML = symbols.map(sym=>{
+    const b=broker[sym]||{}, s=system[sym]||{};
+    const status = Math.abs(Number(b.quantity||0)-Number(s.quantity||0))<0.0001 ? 'OK':'MISMATCH';
+    return `<tr><td>${sym}</td><td>${qty(b.quantity)}</td><td>${qty(s.quantity)}</td><td>${money(b.avg_cost)}</td><td>${money(s.avg_cost)}</td><td>${money(b.market_value)}</td><td>${money(s.market_value)}</td><td>${badge(status)}</td></tr>`;
+  }).join('') || '<tr><td colspan="8" class="muted">No positions found.</td></tr>';
+  document.getElementById('diffJson').textContent = JSON.stringify(data.differences || {}, null, 2);
+}
+loadAudit();
+</script>
+</body>
+</html>

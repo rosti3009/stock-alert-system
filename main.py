@@ -16,6 +16,7 @@ import config
 import database
 import account_sync
 import broker_sync
+import broker_adapter
 import execution_sync
 import tws_mirror
 import reconciliation_engine
@@ -2256,6 +2257,21 @@ async def serve_history_route():
     return serve_html_file("history.html", fallback_to_index=True)
 
 
+@app.get("/broker-audit", response_class=HTMLResponse)
+async def serve_broker_audit_route():
+    return serve_html_file("broker_audit.html", fallback_to_index=True)
+
+
+@app.get("/orders", response_class=HTMLResponse)
+async def serve_orders_route():
+    return serve_html_file("orders.html", fallback_to_index=True)
+
+
+@app.get("/performance", response_class=HTMLResponse)
+async def serve_performance_route():
+    return serve_html_file("performance.html", fallback_to_index=True)
+
+
 @app.get("/api/stocks")
 async def api_stocks():
     rows = []
@@ -2385,9 +2401,203 @@ async def api_scan_runs():
     return JSONResponse(await database.get_scan_runs(20), headers=no_cache_headers())
 
 
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _normalize_broker_position(position: dict) -> dict:
+    quantity = _safe_float(position.get("quantity", position.get("position")))
+    avg_cost = _safe_float(position.get("avg_cost", position.get("avgCost")))
+    market_price = _safe_float(position.get("market_price", position.get("marketPrice")), avg_cost)
+    market_value = _safe_float(position.get("market_value"), quantity * market_price)
+    unrealized = _safe_float(position.get("unrealized_pnl", position.get("unrealizedPNL")), (market_price - avg_cost) * quantity)
+    return {
+        "symbol": str(position.get("symbol") or "").strip().upper(),
+        "quantity": quantity,
+        "avg_cost": avg_cost,
+        "market_price": market_price,
+        "market_value": market_value,
+        "unrealized_pnl": unrealized,
+    }
+
+
+def _normalize_system_position(position: dict) -> dict:
+    quantity = _safe_float(position.get("quantity"))
+    avg_cost = _safe_float(position.get("buy_price"))
+    current_price = _safe_float(position.get("current_price"), avg_cost)
+    return {
+        "symbol": str(position.get("symbol") or "").strip().upper(),
+        "quantity": quantity,
+        "avg_cost": avg_cost,
+        "market_price": current_price,
+        "market_value": round(quantity * current_price, 2),
+        "unrealized_pnl": _safe_float(position.get("profit_amount"), (current_price - avg_cost) * quantity),
+        "status": position.get("status"),
+    }
+
+
+async def _get_broker_snapshot_for_audit() -> tuple[dict, list[dict], list[str]]:
+    errors: list[str] = []
+    try:
+        snapshot = await asyncio.to_thread(broker_adapter.get_account_snapshot)
+        positions = await asyncio.to_thread(broker_adapter.get_positions)
+        return snapshot, [_normalize_broker_position(p) for p in positions], errors
+    except Exception as exc:
+        log.warning("Broker audit live snapshot failed; falling back to latest DB snapshot: %s", exc)
+        errors.append(str(exc))
+        latest = await database.get_latest_broker_sync_snapshot() or {}
+        raw_positions = latest.get("positions_json") or "[]"
+        try:
+            positions = json.loads(raw_positions) if isinstance(raw_positions, str) else raw_positions
+        except Exception:
+            positions = []
+        snapshot = {
+            "ok": bool(latest),
+            "mode": "PAPER_ONLY",
+            "synced_at": latest.get("synced_at"),
+            "net_liquidation": latest.get("net_liquidation"),
+            "cash": latest.get("total_cash"),
+            "unrealized_pnl": sum(_safe_float(p.get("unrealized_pnl", p.get("unrealizedPNL"))) for p in positions if isinstance(p, dict)),
+            "source": "latest_broker_sync_snapshot",
+        }
+        return snapshot, [_normalize_broker_position(p) for p in positions if isinstance(p, dict)], errors
+
+
+@app.get("/api/broker-audit")
+async def api_broker_audit():
+    try:
+        broker_snapshot, broker_positions, errors = await _get_broker_snapshot_for_audit()
+        system_positions_raw = await database.get_open_positions()
+        system_positions = [_normalize_system_position(p) for p in system_positions_raw]
+        broker_by_symbol = {p["symbol"]: p for p in broker_positions if p.get("symbol")}
+        system_by_symbol = {p["symbol"]: p for p in system_positions if p.get("symbol")}
+        missing_in_system = sorted(set(broker_by_symbol) - set(system_by_symbol))
+        missing_in_broker = sorted(set(system_by_symbol) - set(broker_by_symbol))
+        quantity_mismatches = []
+        for symbol in sorted(set(broker_by_symbol) & set(system_by_symbol)):
+            bqty = _safe_float(broker_by_symbol[symbol].get("quantity"))
+            sqty = _safe_float(system_by_symbol[symbol].get("quantity"))
+            if abs(bqty - sqty) > 0.0001:
+                quantity_mismatches.append({"symbol": symbol, "broker_quantity": bqty, "system_quantity": sqty, "difference": round(bqty - sqty, 6)})
+        broker_cash = _safe_float(broker_snapshot.get("cash"))
+        broker_net_liquidation = _safe_float(broker_snapshot.get("net_liquidation"))
+        broker_unrealized = _safe_float(broker_snapshot.get("unrealized_pnl"), sum(p["unrealized_pnl"] for p in broker_positions))
+        system_used_capital = sum(_safe_float(p.get("avg_cost")) * _safe_float(p.get("quantity")) for p in system_positions)
+        system_unrealized = sum(_safe_float(p.get("unrealized_pnl")) for p in system_positions)
+        system_equity = system_used_capital + system_unrealized
+        system_cash = max(0.0, float(getattr(config, "ACCOUNT_BALANCE", 0)) - system_used_capital)
+        differences = {
+            "equity_diff": round(broker_net_liquidation - system_equity, 2),
+            "cash_diff": round(broker_cash - system_cash, 2),
+            "position_count_diff": len(broker_positions) - len(system_positions),
+            "missing_in_system": missing_in_system,
+            "missing_in_broker": missing_in_broker,
+            "quantity_mismatches": quantity_mismatches,
+        }
+        if missing_in_system or missing_in_broker or quantity_mismatches:
+            status = "MISMATCH"
+        elif errors or abs(differences["equity_diff"]) > 1 or abs(differences["cash_diff"]) > 1:
+            status = "WARNING"
+        else:
+            status = "OK"
+        return JSONResponse({
+            "ok": status != "MISMATCH",
+            "mode": "PAPER_ONLY",
+            "broker_net_liquidation": round(broker_net_liquidation, 2),
+            "broker_cash": round(broker_cash, 2),
+            "broker_unrealized_pnl": round(broker_unrealized, 2),
+            "broker_positions_count": len(broker_positions),
+            "broker_positions": broker_positions,
+            "system_equity": round(system_equity, 2),
+            "system_cash": round(system_cash, 2),
+            "system_used_capital": round(system_used_capital, 2),
+            "system_positions_count": len(system_positions),
+            "system_positions": system_positions,
+            "differences": differences,
+            "status": status,
+            "errors": errors,
+            "broker_snapshot_source": broker_snapshot.get("source", "live_ibkr_paper"),
+        }, headers=no_cache_headers())
+    except Exception as exc:
+        log.exception("api_broker_audit failed")
+        return JSONResponse({"ok": False, "status": "WARNING", "errors": [str(exc)]}, status_code=500, headers=no_cache_headers())
+
+
+@app.post("/api/paper-trading/close-all")
+async def api_paper_trading_close_all():
+    operation_name = "paper_trading_close_all"
+    try:
+        broker_adapter.validate_paper_only_environment()
+    except PermissionError as exc:
+        log.warning("PAPER_ONLY close-all rejected: %s", exc)
+        return await _operation_response(
+            operation_name,
+            "blocked",
+            {"ok": False, "mode": "PAPER_ONLY", "submitted_orders": [], "skipped": [], "errors": [str(exc)]},
+            message=str(exc),
+            status_code=403,
+        )
+    submitted_orders = []
+    skipped = []
+    errors = []
+    try:
+        positions = await asyncio.to_thread(broker_adapter.get_positions)
+        for position in positions:
+            symbol = str(position.get("symbol") or "").strip().upper()
+            quantity = _safe_float(position.get("quantity"))
+            if not symbol or quantity == 0:
+                skipped.append({"symbol": symbol, "quantity": quantity, "reason": "No open broker quantity"})
+                continue
+            side = "SELL" if quantity > 0 else "BUY"
+            try:
+                result = await asyncio.to_thread(broker_adapter.place_market_order, symbol, side, abs(quantity), True)
+                saved = await database.save_order(
+                    broker_order_id=result.get("broker_order_id"),
+                    broker_perm_id=result.get("broker_perm_id"),
+                    symbol=symbol,
+                    side=side,
+                    quantity=abs(quantity),
+                    order_type="MKT",
+                    status=result.get("status") or "SUBMITTED",
+                    filled_quantity=result.get("filled_quantity"),
+                    avg_fill_price=result.get("avg_fill_price"),
+                    source="paper_close_all",
+                    reason="Close all IBKR PAPER positions only",
+                    raw_json=result,
+                )
+                submitted_orders.append({**result, "internal_order_id": saved.get("id")})
+            except Exception as exc:
+                log.exception("PAPER_ONLY close-all order failed for %s", symbol)
+                errors.append({"symbol": symbol, "quantity": quantity, "side": side, "error": str(exc)})
+        post_positions = await asyncio.to_thread(broker_adapter.get_positions)
+        open_symbols = {str(p.get("symbol") or "").strip().upper() for p in post_positions if abs(_safe_float(p.get("quantity"))) > 0.0001}
+        reconciled = await database.close_positions_absent_from_broker(open_symbols, "IBKR PAPER close-all reconciliation")
+        payload = {"ok": not errors, "mode": "PAPER_ONLY", "submitted_orders": submitted_orders, "skipped": skipped, "errors": errors, "reconciled_positions": reconciled}
+        return await _operation_response(operation_name, "success" if not errors else "warning", payload, message="IBKR PAPER close-all completed")
+    except Exception as exc:
+        log.exception("api_paper_trading_close_all failed")
+        return await _operation_response(
+            operation_name,
+            "failed",
+            {"ok": False, "mode": "PAPER_ONLY", "submitted_orders": submitted_orders, "skipped": skipped, "errors": errors + [str(exc)]},
+            message=str(exc),
+            status_code=500,
+        )
+
+
 @app.get("/api/performance")
 async def api_performance():
     return JSONResponse(await database.get_performance_summary(), headers=no_cache_headers())
+
+
+@app.get("/api/performance/advanced")
+async def api_performance_advanced():
+    return JSONResponse(await database.get_advanced_performance(), headers=no_cache_headers())
 
 
 @app.get("/api/equity-curve")
@@ -3120,37 +3330,40 @@ async def api_trading_status():
 )
 
 @app.get("/api/orders")
-async def api_orders(limit: int = 200):
+async def api_orders(limit: int = 100):
     try:
-        rows = await database.fetch_all("SELECT * FROM orders ORDER BY COALESCE(updated_at, created_at) DESC LIMIT ?", (max(1, min(limit, 1000)),)) or []
-        return {
-            "ok": True,
-            "connected": True,
-            "orders": rows if isinstance(rows, list) else [],
-            "count": len(rows if isinstance(rows, list) else []),
-            "errors": [],
-            "last_synced_at": None,
-            "heartbeat_age_seconds": None,
-            "open_orders_count": 0,
-            "executions_count": 0,
-            "positions_count": 0,
-            "source": "orders_table",
-        }
+        rows = await database.get_orders(limit=limit)
+        return JSONResponse({"ok": True, "orders": rows, "count": len(rows), "source": "orders_table"}, headers=no_cache_headers())
     except Exception as exc:
         log.exception("api_orders failed")
-        return {
-            "ok": False,
-            "connected": False,
-            "orders": [],
-            "count": 0,
-            "errors": [str(exc)],
-            "last_synced_at": None,
-            "heartbeat_age_seconds": None,
-            "open_orders_count": 0,
-            "executions_count": 0,
-            "positions_count": 0,
-            "source": "orders_table",
-        }
+        return JSONResponse({"ok": False, "orders": [], "count": 0, "errors": [str(exc)], "source": "orders_table"}, status_code=500, headers=no_cache_headers())
+
+
+@app.get("/api/orders/open")
+async def api_orders_open():
+    try:
+        rows = await database.get_open_orders()
+        return JSONResponse({"ok": True, "orders": rows, "count": len(rows), "source": "orders_table"}, headers=no_cache_headers())
+    except Exception as exc:
+        log.exception("api_orders_open failed")
+        return JSONResponse({"ok": False, "orders": [], "count": 0, "errors": [str(exc)], "source": "orders_table"}, status_code=500, headers=no_cache_headers())
+
+
+@app.post("/api/orders/{order_id}/cancel")
+async def api_order_cancel(order_id: int):
+    try:
+        broker_adapter.validate_paper_only_environment()
+        local_order = await database.fetch_one("SELECT * FROM orders WHERE id = ?", (order_id,)) or {}
+        broker_order_id = local_order.get("broker_order_id") or order_id
+        result = await asyncio.to_thread(broker_adapter.cancel_order, broker_order_id)
+        updated = await database.update_order_status(order_id, status=result.get("status") or "CANCEL_REQUESTED", raw_json=result) if local_order else None
+        return JSONResponse({"ok": bool(result.get("ok")), "mode": "PAPER_ONLY", "result": result, "order": updated}, headers=no_cache_headers())
+    except PermissionError as exc:
+        log.warning("PAPER_ONLY order cancel rejected: %s", exc)
+        return JSONResponse({"ok": False, "mode": "PAPER_ONLY", "errors": [str(exc)]}, status_code=403, headers=no_cache_headers())
+    except Exception as exc:
+        log.exception("api_order_cancel failed")
+        return JSONResponse({"ok": False, "mode": "PAPER_ONLY", "errors": [str(exc)]}, status_code=500, headers=no_cache_headers())
 
 
 @app.get("/api/broker-sync/status")

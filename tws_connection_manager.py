@@ -6,10 +6,13 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, TypeVar
 
+from ibkr_asyncio_compat import ensure_event_loop
+
+ensure_event_loop()
+
 import ib_insync
 
 import config
-from ibkr_asyncio_compat import ensure_event_loop
 
 log = logging.getLogger(__name__)
 

@@ -205,6 +205,10 @@
         💼 Positions
       </a>
 
+      <a href="/broker-audit">🧾 Broker Audit</a>
+      <a href="/orders">🧾 Orders</a>
+      <a href="/performance">📊 Performance</a>
+
       <a href="/portfolio">
         📁 Portfolio
       </a>
@@ -421,7 +425,7 @@
           <div class="control-group">
             <h4>Emergency Controls</h4>
             <div class="control-actions">
-              <button class="danger-btn" onclick="runOperation('close_all_positions')">Close All Positions (paper only)</button>
+              <button class="danger-btn" onclick="runOperation('close_all_positions')">Close All Broker Paper Positions</button>
               <button class="danger-btn" onclick="runOperation('emergency_stop')">Emergency STOP</button>
             </div>
             <div class="last-op" id="lastOpEmergency">Paper-only protections remain enforced by API.</div>
@@ -1168,7 +1172,7 @@ function closeConfirmModal(result){
 
 async function runOperation(action){
   const dangerText = {
-    close_all_positions:"This paper-only action will submit liquidation requests for all paper positions. Continue?",
+    close_all_positions:"Are you sure? This will close all IBKR PAPER positions only.",
     emergency_stop:"Emergency STOP disables auto trading and trips the circuit breaker. Continue?",
     disable_auto_trading:"Auto trading will be disabled. Existing broker orders are not cancelled by this action. Continue?",
     reset_circuit_breaker:"Protections are not disabled, but the circuit breaker state will be reset. Continue?"
@@ -1193,7 +1197,7 @@ async function runOperation(action){
     refresh_live_tracker:["/api/live-position-tracker/refresh", {}],
     reconcile_positions:["/api/reconciliation/reconcile-positions", {}],
     rebuild_trade_reviews:["/api/trade-reviews/rebuild", {}],
-    close_all_positions:["/api/paper/liquidate-all", {restart_auto_trading_after:false,dry_run:false}],
+    close_all_positions:["/api/paper-trading/close-all", {}],
     emergency_stop:["/api/emergency-stop", {reason:"Dashboard emergency stop"}],
     switch_strategy_mode:["/api/strategy-mode/switch", {mode}],
     switch_training_profile:["/api/training-profile/switch", {profile:nextProfile}],
