@@ -42,6 +42,7 @@ import position_exit_priority_engine
 import sector_intelligence
 import strategy_mode
 import intraday_momentum_engine
+import strategy_portfolio
 from broker_freshness import evaluate_broker_freshness
 from tws_connection_manager import is_ib_connected as shared_ib_connected
 from execution_quality import evaluate_execution_quality, summarize_execution_quality
@@ -199,6 +200,95 @@ def _require_paper_session_reset_allowed() -> None:
 async def _reset_paper_session() -> dict:
     _require_paper_session_reset_allowed()
     return await database.reset_active_paper_session()
+
+
+async def force_close_intraday_positions(source: str = "scheduled") -> dict:
+    operation_name = "force_close_intraday_positions"
+    broker_adapter.validate_paper_only_environment()
+    intraday_positions = [
+        position for position in await database.get_open_positions()
+        if strategy_portfolio.normalize_strategy_type(position.get("strategy_type")) == strategy_portfolio.STRATEGY_INTRADAY
+    ]
+    submitted_orders: list[dict] = []
+    skipped: list[dict] = []
+    errors: list[dict] = []
+
+    if not intraday_positions:
+        return {"ok": True, "mode": "PAPER_ONLY", "source": source, "submitted_orders": [], "skipped": [], "errors": [], "reconciled_positions": [], "message": "No INTRADAY positions to close"}
+
+    broker_positions = await asyncio.to_thread(broker_adapter.get_positions)
+    broker_by_symbol = {str(p.get("symbol") or "").strip().upper(): p for p in broker_positions}
+
+    for position in intraday_positions:
+        symbol = str(position.get("symbol") or "").strip().upper()
+        quantity = _safe_float((broker_by_symbol.get(symbol) or {}).get("quantity"), _safe_float(position.get("quantity")))
+        if not symbol or quantity <= 0:
+            skipped.append({"symbol": symbol, "quantity": quantity, "reason": "No long paper broker quantity found"})
+            continue
+        try:
+            result = await asyncio.to_thread(broker_adapter.place_market_order, symbol, "SELL", abs(quantity), True)
+            saved = await database.save_order(
+                broker_order_id=result.get("broker_order_id"),
+                broker_perm_id=result.get("broker_perm_id"),
+                symbol=symbol,
+                side="SELL",
+                quantity=abs(quantity),
+                order_type="MKT",
+                status=result.get("status") or "SUBMITTED",
+                filled_quantity=result.get("filled_quantity"),
+                avg_fill_price=result.get("avg_fill_price"),
+                source=operation_name,
+                reason="Intraday paper force-close before market close",
+                raw_json=result,
+                strategy_type=strategy_portfolio.STRATEGY_INTRADAY,
+            )
+            submitted_orders.append({**result, "internal_order_id": saved.get("id")})
+        except Exception as exc:
+            log.exception("INTRADAY force-close order failed for %s", symbol)
+            errors.append({"symbol": symbol, "quantity": quantity, "error": str(exc)})
+
+    post_positions = await asyncio.to_thread(broker_adapter.get_positions)
+    open_symbols = {str(p.get("symbol") or "").strip().upper() for p in post_positions if abs(_safe_float(p.get("quantity"))) > 0.0001}
+    reconciled_positions = []
+    for position in intraday_positions:
+        symbol = str(position.get("symbol") or "").strip().upper()
+        if symbol and symbol not in open_symbols:
+            closed = await database.close_position(symbol, "AUTO: INTRADAY_FORCE_CLOSE")
+            if closed:
+                reconciled_positions.append(closed)
+
+    payload = {
+        "ok": not errors,
+        "mode": "PAPER_ONLY",
+        "source": source,
+        "submitted_orders": submitted_orders,
+        "skipped": skipped,
+        "errors": errors,
+        "reconciled_positions": reconciled_positions,
+        "intraday_positions_seen": len(intraday_positions),
+    }
+    await database.safe_record_trade_journal_event({
+        "event_type": "INTRADAY_FORCE_CLOSE",
+        "decision": "SUCCESS" if not errors else "WARNING",
+        "reason": "Intraday force close completed",
+        "source_module": "main.force_close_intraday_positions",
+        "raw_payload": payload,
+    })
+    return payload
+
+
+def _force_close_intraday_positions_job() -> None:
+    ensure_event_loop()
+    try:
+        asyncio.run(force_close_intraday_positions(source="scheduled"))
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(force_close_intraday_positions(source="scheduled"))
+        finally:
+            loop.close()
+    except Exception as exc:
+        log.exception("Scheduled intraday force-close failed: %s", exc)
 
 
 AUTO_TRADING_ENABLED_KEY = "auto_trading_enabled"
@@ -940,6 +1030,7 @@ async def run_full_scan() -> dict:
                     if not symbol:
                         continue
 
+                    result = {**result, "strategy_type": strategy_portfolio.STRATEGY_INTRADAY if strategy_mode.is_intraday_mode(active_mode) else strategy_portfolio.normalize_strategy_type(result.get("strategy_type"))}
                     _latest[symbol] = result
                     all_results.append(result)
 
@@ -1203,6 +1294,26 @@ async def lifespan(app: FastAPI):
         log.info("Stale order cleanup started — every 1 minute")
     else:
         log.info("Stale order cleanup disabled | reason=%s", broker_jobs_reason)
+
+    if broker_jobs_enabled and bool(getattr(config, "INTRADAY_FORCE_CLOSE_ENABLED", True)):
+        try:
+            close_hour, close_minute = [int(part) for part in str(getattr(config, "INTRADAY_FORCE_CLOSE_TIME", "15:50")).split(":", 1)]
+            scheduler.add_job(
+                _force_close_intraday_positions_job,
+                "cron",
+                hour=close_hour,
+                minute=close_minute,
+                id="force_close_intraday_positions",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                timezone=str(getattr(config, "MARKET_TIMEZONE", "America/New_York")),
+            )
+            log.info("Intraday force-close scheduled at %02d:%02d", close_hour, close_minute)
+        except Exception as exc:
+            log.warning("Intraday force-close schedule disabled: %s", exc)
+    else:
+        log.info("Intraday force-close disabled | broker_jobs_enabled=%s", broker_jobs_enabled)
     # ==========================================
     # EMERGENCY EXIT PROTECTION
     # ==========================================
@@ -2271,6 +2382,10 @@ async def serve_orders_route():
 async def serve_performance_route():
     return serve_html_file("performance.html", fallback_to_index=True)
 
+@app.get("/strategy-allocation", response_class=HTMLResponse)
+async def serve_strategy_allocation_route():
+    return serve_html_file("strategy_allocation.html", fallback_to_index=True)
+
 
 @app.get("/api/stocks")
 async def api_stocks():
@@ -2585,6 +2700,71 @@ async def api_paper_trading_close_all():
             operation_name,
             "failed",
             {"ok": False, "mode": "PAPER_ONLY", "submitted_orders": submitted_orders, "skipped": skipped, "errors": errors + [str(exc)]},
+            message=str(exc),
+            status_code=500,
+        )
+
+
+
+
+@app.get("/api/strategy-allocation")
+async def api_strategy_allocation():
+    return JSONResponse(await strategy_portfolio.build_strategy_allocation_status(), headers=no_cache_headers())
+
+
+@app.post("/api/strategy-allocation")
+async def api_update_strategy_allocation(payload: dict = Body(...)):
+    try:
+        allocation = await strategy_portfolio.set_allocation_percentages(payload.get("allocations") if "allocations" in payload else payload)
+        status = await strategy_portfolio.build_strategy_allocation_status()
+        return JSONResponse({**status, "allocations": allocation}, headers=no_cache_headers())
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400, headers=no_cache_headers())
+
+
+@app.get("/api/strategies/status")
+async def api_strategies_status():
+    allocation = await strategy_portfolio.build_strategy_allocation_status()
+    return JSONResponse({
+        "ok": True,
+        "paper_trading_only": True,
+        "strategies": allocation.get("strategies", []),
+        "reserve": allocation.get("reserve", {}),
+        "intraday_force_close": {
+            "enabled": bool(getattr(config, "INTRADAY_FORCE_CLOSE_ENABLED", True)),
+            "time": getattr(config, "INTRADAY_FORCE_CLOSE_TIME", "15:50"),
+            "max_hold_minutes": int(getattr(config, "INTRADAY_MAX_HOLD_MINUTES", 360)),
+        },
+        "swing": {"max_hold_days": int(getattr(config, "SWING_MAX_HOLD_DAYS", 20))},
+        "safety": broker_adapter.paper_only_status(),
+    }, headers=no_cache_headers())
+
+
+@app.post("/api/intraday/force-close")
+async def api_intraday_force_close():
+    try:
+        result = await force_close_intraday_positions(source="api")
+        return await _operation_response(
+            "force_close_intraday_positions",
+            "success" if result.get("ok") else "warning",
+            result,
+            message="Intraday force-close completed",
+            status_code=200 if result.get("ok") else 500,
+        )
+    except PermissionError as exc:
+        return await _operation_response(
+            "force_close_intraday_positions",
+            "blocked",
+            {"ok": False, "mode": "PAPER_ONLY", "errors": [str(exc)]},
+            message=str(exc),
+            status_code=403,
+        )
+    except Exception as exc:
+        log.exception("api_intraday_force_close failed")
+        return await _operation_response(
+            "force_close_intraday_positions",
+            "failed",
+            {"ok": False, "mode": "PAPER_ONLY", "errors": [str(exc)]},
             message=str(exc),
             status_code=500,
         )

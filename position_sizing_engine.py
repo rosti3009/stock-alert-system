@@ -11,6 +11,7 @@ import config
 import database
 import portfolio_risk_engine
 import sector_intelligence
+from strategy_portfolio import STRATEGY_INTRADAY, STRATEGY_SWING, normalize_strategy_type
 from execution_quality import evaluate_execution_quality, summarize_execution_quality
 from market_regime_engine import get_cached_market_regime
 from reason_summarizer import summarize_reason_list
@@ -214,20 +215,26 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
     risk_per_share = max(0.0, price - stop_loss)
     atr_percent = pct(atr, price) if atr > 0 and price > 0 else safe_float(row.get("atr_percent"))
 
+    strategy_type = normalize_strategy_type(row.get("strategy_type") or (context.market_regime or {}).get("strategy_type"))
+    if str((context.market_regime or {}).get("strategy_mode") or "").upper() in {"INTRADAY_TECHNICAL", "INTRADAY_MOMENTUM", "INTRADAY_AGGRESSIVE"}:
+        strategy_type = STRATEGY_INTRADAY
+
     risk_per_trade_percent = threshold("MAX_RISK_PER_TRADE_PERCENT", 1.0)
-    if str((context.market_regime or {}).get("strategy_mode") or "").upper() in {"INTRADAY_TECHNICAL", "INTRADAY_MOMENTUM"}:
+    if strategy_type == STRATEGY_INTRADAY:
         risk_per_trade_percent = threshold("INTRADAY_RISK_PER_TRADE_PERCENT", 0.5)
 
+    allocation_percent = threshold("INTRADAY_CAPITAL_PERCENT", 20.0) if strategy_type == STRATEGY_INTRADAY else threshold("SWING_CAPITAL_PERCENT", 70.0)
+    allocated_equity = account_equity * (allocation_percent / 100.0)
     max_risk_per_trade = account_equity * (risk_per_trade_percent / 100.0)
-    max_position_value = account_equity * (threshold("MAX_POSITION_PERCENT", 20.0) / 100.0)
+    max_position_value = allocated_equity * (threshold("MAX_POSITION_PERCENT", 20.0) / 100.0)
 
     used = sum(
         safe_float(p.get("buy_price") or p.get("entry_price")) * safe_float(p.get("quantity"))
         for p in context.open_positions or []
-        if (p.get("status") or "OPEN") == "OPEN"
+        if (p.get("status") or "OPEN") == "OPEN" and normalize_strategy_type(p.get("strategy_type")) == strategy_type
     )
-    reserve = account_equity * (threshold("MIN_CASH_RESERVE_PERCENT", 10.0) / 100.0)
-    available = max(0.0, account_equity - reserve - used)
+    reserve = account_equity * (threshold("RESERVE_CAPITAL_PERCENT", threshold("MIN_CASH_RESERVE_PERCENT", 10.0)) / 100.0)
+    available = max(0.0, allocated_equity - used)
 
     portfolio_risk = context.portfolio_risk or {}
     market_regime = context.market_regime or {}
@@ -414,6 +421,9 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
         "position_size": round(recommended_position_size_usd, 2),
         "risk": round(recommended_share_quantity * risk_per_share, 2),
         "account_equity": round(account_equity, 2),
+        "allocated_equity": round(allocated_equity, 2),
+        "strategy_type": strategy_type,
+        "allocation_percent": round(allocation_percent, 2),
         "effective_equity": round(account_equity, 2),
         "virtual_trading_capital": round(account_equity, 2),
         "broker_account_equity": round(broker_account_equity, 2),
@@ -433,6 +443,9 @@ def evaluate_position_sizing(context: PositionSizingInput) -> dict[str, Any]:
         "total_adjustment": round(total_adjustment, 4),
         "inputs": {
             "account_equity": round(account_equity, 2),
+            "allocated_equity": round(allocated_equity, 2),
+            "strategy_type": strategy_type,
+            "allocation_percent": round(allocation_percent, 2),
             "effective_equity": round(account_equity, 2),
             "virtual_trading_capital": round(account_equity, 2),
             "broker_account_equity": round(broker_account_equity, 2),

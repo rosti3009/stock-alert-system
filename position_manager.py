@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 import config
 import strategy_mode
+from strategy_portfolio import STRATEGY_INTRADAY, normalize_strategy_type
 
 
 def evaluate_position(position: dict, market: dict, mode: str | None = None) -> dict:
@@ -47,7 +48,7 @@ def evaluate_position(position: dict, market: dict, mode: str | None = None) -> 
     sell_quantity = 0
 
     active_mode = mode or market.get("strategy_mode") or position.get("strategy_mode")
-    if strategy_mode.is_intraday_mode(active_mode):
+    if normalize_strategy_type(position.get("strategy_type") or market.get("strategy_type")) == STRATEGY_INTRADAY or strategy_mode.is_intraday_mode(active_mode):
         return evaluate_intraday_position(
             position=position,
             market=market,
@@ -159,6 +160,25 @@ def evaluate_position(position: dict, market: dict, mode: str | None = None) -> 
             "sell_quantity": quantity,
         }
 
+    entered_at = position.get("buy_date") or position.get("created_at")
+    age_minutes = _age_minutes(entered_at)
+    max_hold_minutes = int(getattr(config, "SWING_MAX_HOLD_DAYS", 20)) * 24 * 60
+    if age_minutes is not None and age_minutes >= max_hold_minutes:
+        return {
+            "current_price": current_price,
+            "highest_price": round(highest_price, 4),
+            "profit_amount": round(profit_amount, 2),
+            "profit_percent": round(profit_percent, 2),
+            "stop_loss": stop_loss,
+            "take_profit_1": take_profit_1,
+            "take_profit_2": take_profit_2,
+            "status": "CLOSE_REQUESTED",
+            "action": "SWING_MAX_HOLD_DAYS",
+            "reason": "Swing max hold days reached",
+            "partial_sell": False,
+            "sell_quantity": quantity,
+        }
+
     # =========================
     # WARNING ZONES
     # =========================
@@ -254,7 +274,7 @@ def evaluate_intraday_position(
 
     entered_at = position.get("opened_at") or position.get("created_at") or position.get("buy_time")
     age_minutes = _age_minutes(entered_at)
-    if age_minutes is not None and age_minutes >= int(getattr(config, "INTRADAY_TIME_EXIT_MINUTES", 30)) and profit_percent <= 0.25:
+    if age_minutes is not None and age_minutes >= int(getattr(config, "INTRADAY_MAX_HOLD_MINUTES", getattr(config, "INTRADAY_TIME_EXIT_MINUTES", 30))) and profit_percent <= 0.25:
         return payload("INTRADAY_TIME_EXIT", "Intraday time exit: trade did not move", "CLOSED", False, quantity)
 
     if market.get("signal") == "SELL":

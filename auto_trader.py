@@ -29,6 +29,7 @@ from position_sizing_engine import (
     record_position_sizing_event,
 )
 from market_regime import get_market_regime
+from strategy_portfolio import STRATEGY_INTRADAY, normalize_strategy_type
 
 log = logging.getLogger(__name__)
 
@@ -154,21 +155,24 @@ def calculate_position_size(
 
     broker_account_equity = float(account_equity)
     balance = float(config.effective_virtual_trading_capital())
-    reserve = balance * (float(config.MIN_CASH_RESERVE_PERCENT) / 100)
+    strategy_type = normalize_strategy_type(row.get("strategy_type"))
+    allocated_percent = float(getattr(config, "INTRADAY_CAPITAL_PERCENT", 20.0) if strategy_type == STRATEGY_INTRADAY else getattr(config, "SWING_CAPITAL_PERCENT", 70.0))
+    allocated_balance = balance * (allocated_percent / 100.0)
+    reserve = balance * (float(getattr(config, "RESERVE_CAPITAL_PERCENT", config.MIN_CASH_RESERVE_PERCENT)) / 100)
 
     used = sum(
         float(p.get("buy_price") or 0) * float(p.get("quantity") or 0)
         for p in open_positions
-        if (p.get("status") or "OPEN") == "OPEN"
+        if (p.get("status") or "OPEN") == "OPEN" and normalize_strategy_type(p.get("strategy_type")) == strategy_type
     )
 
-    available = balance - reserve - used
+    available = allocated_balance - used
 
     if available <= float(config.MIN_TRADE_USD):
         return None
 
     risk_amount = (
-        balance
+        allocated_balance
         * (float(config.RISK_PER_TRADE_PERCENT) / 100)
         * float(size_factor)
     )
@@ -179,7 +183,7 @@ def calculate_position_size(
         return None
 
     max_position = (
-        balance
+        allocated_balance
         * (float(config.MAX_POSITION_PERCENT) / 100)
         * float(size_factor)
     )
@@ -210,6 +214,9 @@ def calculate_position_size(
         "position_size": round(position_size, 2),
         "risk": round(quantity * risk_per_share, 2),
         "account_equity": round(balance, 2),
+        "allocated_equity": round(allocated_balance, 2),
+        "strategy_type": strategy_type,
+        "allocation_percent": round(allocated_percent, 2),
         "effective_equity": round(balance, 2),
         "virtual_trading_capital": round(balance, 2),
         "broker_account_equity": round(broker_account_equity, 2),
@@ -525,6 +532,7 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
         signal = row.get("signal")
         intraday_mode_active = strategy_mode.is_intraday_mode(active_strategy_mode)
         if intraday_mode_active:
+            row = {**row, "strategy_type": STRATEGY_INTRADAY}
             intraday_entry = intraday_momentum_engine.detect_intraday_entry_setup(row)
             row = {**row, **intraday_entry, "intraday_score_reasons": intraday_entry.get("score_reasons", [])}
             score = int(
@@ -544,6 +552,7 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
                     "raw_payload": row,
                 })
         else:
+            row = {**row, "strategy_type": normalize_strategy_type(row.get("strategy_type"))}
             score = int(row.get("weekly_score") or row.get("score") or 0)
 
         if not symbol:
@@ -697,7 +706,7 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
                 open_positions=open_positions,
                 account_equity=account_equity,
                 size_factor=size_factor,
-                market={**market, "strategy_mode": active_strategy_mode.value},
+                market={**market, "strategy_mode": active_strategy_mode.value, "strategy_type": normalize_strategy_type(row.get("strategy_type"))},
             )
 
             if opened:
@@ -1049,6 +1058,7 @@ async def auto_open_position(
             "take_profit_1": row.get("take_profit_1"),
             "take_profit_2": row.get("take_profit_2"),
             "reason": "AUTO BUY FILLED IN TWS",
+            "strategy_type": normalize_strategy_type(row.get("strategy_type") or (market or {}).get("strategy_type")),
             "notes": (
                 f"AUTO TRADE FILLED | "
                 f"order_id={order_result.get('order_id')} "
