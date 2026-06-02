@@ -31,6 +31,10 @@ def _setup(monkeypatch, *, allow_open=True):
     async def fake_positions():
         return []
 
+    async def fake_broker_snapshot():
+        from datetime import datetime, timezone
+        return {"connected": 1, "synced_at": datetime.now(timezone.utc).isoformat(), "source": "LOCAL_GATEWAY_PUSH"}
+
     async def fake_realized():
         return 0.0
 
@@ -50,6 +54,7 @@ def _setup(monkeypatch, *, allow_open=True):
     monkeypatch.setattr("watchdog.get_watchdog_status", fake_watchdog)
     monkeypatch.setattr(auto_trader.strategy_mode, "get_strategy_mode", fake_mode)
     monkeypatch.setattr(auto_trader.database, "get_open_positions", fake_positions)
+    monkeypatch.setattr(auto_trader.database, "get_latest_broker_sync_snapshot", fake_broker_snapshot)
     monkeypatch.setattr(auto_trader.database, "get_realized_pnl", fake_realized)
     monkeypatch.setattr(auto_trader.database, "safe_record_trade_journal_event", fake_event)
     monkeypatch.setattr(auto_trader.database, "record_trade_decision", fake_record)

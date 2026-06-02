@@ -154,6 +154,38 @@ async def _get_dashboard_operations() -> dict:
         return {}
 
 
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def broker_snapshot_freshness(snapshot: dict | None, *, max_age_seconds: int | None = None) -> dict:
+    snapshot = snapshot or {}
+    max_age = int(max_age_seconds or getattr(config, "BROKER_SNAPSHOT_MAX_AGE_SECONDS", 60))
+    synced_at = _parse_iso_datetime(snapshot.get("synced_at") or snapshot.get("received_at"))
+    age = None
+    if synced_at:
+        if synced_at.tzinfo is None:
+            synced_at = synced_at.replace(tzinfo=timezone.utc)
+        age = max(0.0, (utc_now() - synced_at.astimezone(timezone.utc)).total_seconds())
+    connected = bool(snapshot.get("connected"))
+    fresh = bool(snapshot) and connected and age is not None and age <= max_age
+    reasons = []
+    if not snapshot:
+        reasons.append("No broker snapshot has been pushed by the local gateway")
+    if snapshot and not connected:
+        reasons.append("TWS local gateway is disconnected")
+    if snapshot and age is None:
+        reasons.append("Broker snapshot is missing synced_at")
+    if age is not None and age > max_age:
+        reasons.append(f"Broker snapshot is stale ({age:.1f}s > {max_age}s)")
+    return {"fresh": fresh, "connected": connected, "age_seconds": age, "max_age_seconds": max_age, "reasons": reasons}
+
 def no_cache_headers() -> dict:
     return {
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -2501,22 +2533,57 @@ async def api_rebuild_top_weekly():
 
 
 
+def _is_actionable_buy_candidate(row: dict) -> bool:
+    signal = str(row.get("signal") or "").strip().upper()
+    if signal != "BUY" or signal in {"SKIPPED", "ERROR", "NEUTRAL"}:
+        return False
+    if row.get("rejected_by_ranking"):
+        return False
+    price = _safe_float(row.get("price") or row.get("current_price") or row.get("entry_price"))
+    volume = _safe_float(row.get("volume") or row.get("current_volume") or row.get("avg_volume"))
+    if price < float(getattr(config, "MIN_PRICE", 0) or 0):
+        return False
+    min_volume = float(getattr(config, "MIN_AVG_VOLUME", getattr(config, "MIN_AVERAGE_VOLUME", 0)) or 0)
+    if volume < min_volume:
+        return False
+    if _safe_float(row.get("entry_price")) <= 0:
+        return False
+    if _safe_float(row.get("stop_loss")) <= 0:
+        return False
+    return True
+
+
+async def _get_actionable_ranking_top(strategy_type: str, limit: int) -> list[dict]:
+    fetch_limit = max(int(limit or 5) * 5, 50)
+    rows = await database.get_ranking_candidates(strategy_type, rejected=False, limit=fetch_limit)
+    rows = [row for row in rows if _is_actionable_buy_candidate(row)]
+    if len(rows) < int(limit or 5):
+        latest = [
+            r for r in await database.get_latest_candidates(200)
+            if strategy_portfolio.normalize_strategy_type(r.get("strategy_type")) == strategy_type
+            and _is_actionable_buy_candidate(r)
+        ]
+        ranked = rank_candidates(latest, strategy_type, top_n=fetch_limit)
+        existing_symbols = {str(row.get("symbol") or "").upper() for row in rows}
+        for row in ranked["selected"]:
+            symbol = str(row.get("symbol") or "").upper()
+            if symbol not in existing_symbols and _is_actionable_buy_candidate(row):
+                rows.append(row)
+                existing_symbols.add(symbol)
+    rows.sort(key=lambda item: (item.get("ranking_score") or 0, item.get("score") or item.get("weekly_score") or 0), reverse=True)
+    return rows[: int(limit or 5)]
+
+
 @app.get("/api/ranking/top-intraday")
 async def api_ranking_top_intraday(limit: int = 5):
-    rows = await database.get_ranking_candidates(STRATEGY_INTRADAY, rejected=False, limit=limit)
-    if not rows:
-        ranked = rank_candidates([r for r in await database.get_latest_candidates(200) if strategy_portfolio.normalize_strategy_type(r.get("strategy_type")) == STRATEGY_INTRADAY], STRATEGY_INTRADAY, top_n=limit)
-        rows = ranked["selected"]
-    return JSONResponse({"ok": True, "strategy_type": STRATEGY_INTRADAY, "candidates": rows[:limit]}, headers=no_cache_headers())
+    rows = await _get_actionable_ranking_top(STRATEGY_INTRADAY, limit)
+    return JSONResponse({"ok": True, "strategy_type": STRATEGY_INTRADAY, "candidates": rows}, headers=no_cache_headers())
 
 
 @app.get("/api/ranking/top-swing")
 async def api_ranking_top_swing(limit: int = 5):
-    rows = await database.get_ranking_candidates(STRATEGY_SWING, rejected=False, limit=limit)
-    if not rows:
-        ranked = rank_candidates([r for r in await database.get_latest_candidates(200) if strategy_portfolio.normalize_strategy_type(r.get("strategy_type")) == STRATEGY_SWING], STRATEGY_SWING, top_n=limit)
-        rows = ranked["selected"]
-    return JSONResponse({"ok": True, "strategy_type": STRATEGY_SWING, "candidates": rows[:limit]}, headers=no_cache_headers())
+    rows = await _get_actionable_ranking_top(STRATEGY_SWING, limit)
+    return JSONResponse({"ok": True, "strategy_type": STRATEGY_SWING, "candidates": rows}, headers=no_cache_headers())
 
 
 @app.get("/api/ranking/rejected")
@@ -3828,9 +3895,7 @@ async def api_broker_sync_run():
         }
 
 
-@app.get("/api/broker/source-of-truth")
-async def api_broker_source_of_truth():
-    latest = await database.get_latest_broker_sync_snapshot() or {}
+def _broker_snapshot_response(latest: dict) -> dict:
     positions = _safe_json_array(latest.get("positions_json"))
     open_orders = _safe_json_array(latest.get("open_orders_json"))
     executions = _safe_json_array(latest.get("executions_json"))
@@ -3838,17 +3903,92 @@ async def api_broker_source_of_truth():
     equity = {
         "net_liquidation": latest.get("net_liquidation"),
         "cash": latest.get("total_cash"),
+        "total_cash": latest.get("total_cash"),
         "available_funds": latest.get("available_funds"),
         "buying_power": latest.get("buying_power"),
         "unrealized_pnl": sum(_safe_float(p.get("unrealized_pnl")) for p in positions if isinstance(p, dict)),
         "exposure": sum(abs(_safe_float(p.get("market_value"))) for p in positions if isinstance(p, dict)),
     }
-    return JSONResponse({
-        "ok": bool(latest), "connected": bool(latest.get("connected")), "account": latest.get("account"),
-        "synced_at": latest.get("synced_at"), "position_truth_source": "IBKR", "source": "IBKR_TWS_SOURCE_OF_TRUTH",
-        "equity": equity, "positions": positions, "open_orders": open_orders, "executions": executions, "errors": errors,
+    freshness = broker_snapshot_freshness(latest)
+    return {
+        "ok": bool(latest),
+        "connected": bool(latest.get("connected")),
+        "local_gateway_connected": bool(latest.get("connected")),
+        "stale": not bool(freshness.get("fresh")),
+        "age_seconds": freshness.get("age_seconds"),
+        "max_age_seconds": freshness.get("max_age_seconds"),
+        "stale_reasons": freshness.get("reasons") or [],
+        "account": latest.get("account"),
+        "synced_at": latest.get("synced_at"),
+        "received_at": latest.get("received_at"),
+        "position_truth_source": "LOCAL_GATEWAY_PUSH" if str(latest.get("source") or "").upper() == "LOCAL_GATEWAY_PUSH" else "IBKR",
+        "source": latest.get("source") or "IBKR_TWS_SOURCE_OF_TRUTH",
+        "equity": equity,
+        "positions": positions,
+        "open_orders": open_orders,
+        "executions": executions,
+        "errors": errors,
         "metrics": {"broker_positions": len(positions), "broker_open_orders": len(open_orders), "broker_executions": len(executions)},
-    }, headers=no_cache_headers())
+    }
+
+
+def _authorized_broker_push(request: Request) -> bool:
+    expected = str(getattr(config, "BROKER_PUSH_TOKEN", "") or "")
+    if not expected or expected == "change-me":
+        # Still require the configured default token so local development remains explicit.
+        expected = "change-me"
+    auth = str(request.headers.get("authorization") or "")
+    bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    supplied = request.headers.get("x-broker-push-token") or bearer
+    return bool(supplied) and str(supplied) == expected
+
+
+def _validate_pushed_broker_snapshot(payload: dict) -> tuple[bool, list[str], dict]:
+    errors: list[str] = []
+    if not isinstance(payload, dict):
+        return False, ["Payload must be a JSON object"], {}
+    normalized = dict(payload)
+    normalized.setdefault("synced_at", utc_now().isoformat())
+    normalized.setdefault("source", "LOCAL_GATEWAY_PUSH")
+    normalized.setdefault("pushed_by", "local_ibkr_gateway")
+    for key in ("positions", "open_orders", "executions", "errors"):
+        if normalized.get(key) is None:
+            normalized[key] = []
+        if not isinstance(normalized.get(key), list):
+            errors.append(f"{key} must be a list")
+    equity = normalized.get("equity") or {}
+    if not isinstance(equity, dict):
+        errors.append("equity must be an object")
+        equity = {}
+    normalized["equity"] = equity
+    normalized["connected"] = bool(normalized.get("connected"))
+    normalized["ok"] = bool(normalized.get("ok", normalized.get("connected")))
+    for pos in normalized.get("positions") or []:
+        if not isinstance(pos, dict):
+            errors.append("positions entries must be objects")
+            continue
+        if not str(pos.get("symbol") or "").strip():
+            errors.append("position symbol is required")
+    return len(errors) == 0, errors, normalized
+
+
+@app.post("/api/broker/push-snapshot")
+async def api_broker_push_snapshot(request: Request, payload: dict = Body(...)):
+    if not _authorized_broker_push(request):
+        return JSONResponse({"ok": False, "errors": ["Unauthorized broker push token"]}, status_code=401, headers=no_cache_headers())
+    valid, errors, snapshot = _validate_pushed_broker_snapshot(payload)
+    if not valid:
+        return JSONResponse({"ok": False, "errors": errors}, status_code=422, headers=no_cache_headers())
+    await database.save_broker_sync_snapshot(snapshot)
+    reconciliation = await database.reconcile_broker_source_of_truth(snapshot)
+    orders = await database.reconcile_orders_and_executions(snapshot)
+    return JSONResponse({"ok": True, "source": "LOCAL_GATEWAY_PUSH", "synced_at": snapshot.get("synced_at"), "reconciliation": reconciliation, "orders_and_executions": orders}, headers=no_cache_headers())
+
+
+@app.get("/api/broker/source-of-truth")
+async def api_broker_source_of_truth():
+    latest = await database.get_latest_broker_sync_snapshot() or {}
+    return JSONResponse(_broker_snapshot_response(latest), headers=no_cache_headers())
 
 
 @app.post("/api/broker/sync")

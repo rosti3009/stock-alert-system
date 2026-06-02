@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from ibkr_asyncio_compat import ensure_event_loop
 
@@ -41,6 +42,55 @@ PAPER_TRADING_ENABLED = True
 MIN_SCORE_TO_BUY = 80
 
 BUY_CLIENT_ID_OFFSET = 100
+
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _broker_snapshot_freshness(snapshot: dict | None) -> dict:
+    snapshot = snapshot or {}
+    max_age = int(getattr(config, "BROKER_SNAPSHOT_MAX_AGE_SECONDS", 60))
+    synced_at = _parse_iso_datetime(snapshot.get("synced_at") or snapshot.get("received_at"))
+    age = None
+    if synced_at:
+        if synced_at.tzinfo is None:
+            synced_at = synced_at.replace(tzinfo=timezone.utc)
+        age = max(0.0, (datetime.now(timezone.utc) - synced_at.astimezone(timezone.utc)).total_seconds())
+    connected = bool(snapshot.get("connected"))
+    fresh = bool(snapshot) and connected and age is not None and age <= max_age
+    reasons = []
+    if not snapshot:
+        reasons.append("No broker snapshot has been pushed by the local gateway")
+    if snapshot and not connected:
+        reasons.append("TWS local gateway is disconnected")
+    if snapshot and age is None:
+        reasons.append("Broker snapshot is missing synced_at")
+    if age is not None and age > max_age:
+        reasons.append(f"Broker snapshot is stale ({age:.1f}s > {max_age}s)")
+    return {"fresh": fresh, "connected": connected, "age_seconds": age, "max_age_seconds": max_age, "reasons": reasons}
+
+
+async def _require_fresh_broker_snapshot_for_auto_trading() -> tuple[bool, dict]:
+    snapshot = await database.get_latest_broker_sync_snapshot() or {}
+    freshness = _broker_snapshot_freshness(snapshot)
+    if freshness.get("fresh"):
+        return True, {"snapshot": snapshot, "freshness": freshness}
+    payload = {"snapshot_synced_at": snapshot.get("synced_at"), "snapshot_source": snapshot.get("source"), **freshness}
+    await database.safe_record_trade_journal_event({
+        "event_type": "AUTO_TRADING_BLOCKED_BY_BROKER_SNAPSHOT",
+        "decision": "BLOCKED",
+        "reason": "; ".join(freshness.get("reasons") or ["Broker snapshot is not fresh"]),
+        "source_module": "auto_trader.process_auto_trading",
+        "raw_payload": payload,
+    })
+    return False, payload
 
 FILLED_STATUSES = {
     "Filled",
@@ -500,6 +550,11 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
 
     if not PAPER_TRADING_ENABLED:
         log.warning("Real trading is disabled. PAPER_TRADING_ENABLED must stay True.")
+        return
+
+    broker_ok, broker_gate = await _require_fresh_broker_snapshot_for_auto_trading()
+    if not broker_ok:
+        log.warning("AUTO TRADER blocked by stale/disconnected local broker gateway: %s", broker_gate)
         return
 
     market_hours = get_market_hours_status()

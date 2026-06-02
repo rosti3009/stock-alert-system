@@ -293,6 +293,13 @@
         <div class="card">
           <h3>Broker Net Liquidation</h3>
           <div class="value green" id="brokerNetLiquidation">-</div>
+          <div class="sub" id="brokerGatewayStatus">Broker: -</div>
+        </div>
+
+        <div class="card">
+          <h3>Broker Cash</h3>
+          <div class="value" id="brokerCash">-</div>
+          <div class="sub" id="brokerLastSync">Last broker sync: -</div>
         </div>
 
         <div class="card">
@@ -313,6 +320,12 @@
         <div class="card">
           <h3>Realized PnL</h3>
           <div class="value" id="realizedPnl">-</div>
+        </div>
+
+        <div class="card">
+          <h3>Broker Open Positions</h3>
+          <div class="value blue" id="brokerOpenPositions">-</div>
+          <div class="sub" id="brokerUnrealizedPnl">Broker unrealized PnL: -</div>
         </div>
 
         <div class="card">
@@ -796,6 +809,7 @@ let setupPerformance = [];
 let tradeOutcomes = [];
 let tradeReviews = [];
 let dashboardHealth = {};
+let brokerSourceTruth = {};
 let equityChart;
 let isLoading = false;
 let pendingConfirmResolve = null;
@@ -936,7 +950,8 @@ async function loadDashboard(){
       setupPerformance,
       tradeOutcomes,
       tradeReviews,
-      dashboardHealth
+      dashboardHealth,
+      brokerSourceTruth
     ] = await Promise.all([
 
       fetchNoCache("/api/stocks"),
@@ -965,7 +980,9 @@ async function loadDashboard(){
 
       fetchNoCache("/api/trade-reviews?limit=10"),
 
-      fetchNoCache("/api/dashboard/health")
+      fetchNoCache("/api/dashboard/health"),
+
+      fetchNoCache("/api/broker/source-of-truth")
 
     ]);
 
@@ -1353,10 +1370,66 @@ function updateCards(){
   ).textContent =
     money(lastEquity);
 
+  const brokerEquity = brokerSourceTruth.equity || {};
+  const brokerNetLiquidation = Number(
+    brokerEquity.net_liquidation
+    ?? portfolioRisk.broker_net_liquidation
+    ?? 0
+  );
+  const brokerCash = Number(
+    brokerEquity.cash
+    ?? brokerEquity.total_cash
+    ?? 0
+  );
+  const brokerUnrealized = Number(
+    brokerEquity.unrealized_pnl
+    ?? 0
+  );
+  const brokerPositionCount = Number(
+    brokerSourceTruth.metrics?.broker_positions
+    ?? (brokerSourceTruth.positions || []).length
+    ?? 0
+  );
+  const gatewayConnected = Boolean(brokerSourceTruth.connected);
+  const gatewayStale = Boolean(brokerSourceTruth.stale);
+
   document.getElementById(
     "brokerNetLiquidation"
   ).textContent =
-    money(portfolioRisk.broker_net_liquidation);
+    money(brokerNetLiquidation);
+
+  document.getElementById(
+    "brokerGatewayStatus"
+  ).textContent = gatewayConnected && !gatewayStale
+    ? "Broker Connected via Local Gateway"
+    : gatewayConnected
+      ? "Broker Local Gateway stale"
+      : "Broker Local Gateway disconnected";
+
+  document.getElementById(
+    "brokerCash"
+  ).textContent =
+    money(brokerCash);
+
+  document.getElementById(
+    "brokerLastSync"
+  ).textContent =
+    "Last broker sync: " + (brokerSourceTruth.synced_at || brokerSourceTruth.received_at || "-");
+
+  document.getElementById(
+    "brokerOpenPositions"
+  ).textContent =
+    brokerPositionCount;
+
+  document.getElementById(
+    "brokerUnrealizedPnl"
+  ).textContent =
+    "Broker unrealized PnL: " + money(brokerUnrealized);
+
+  document.getElementById(
+    "brokerUnrealizedPnl"
+  ).className =
+    "sub " + pnlClass(brokerUnrealized);
 
   document.getElementById(
     "freeCapital"

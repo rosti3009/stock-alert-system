@@ -2509,7 +2509,10 @@ CREATE TABLE IF NOT EXISTS broker_sync_snapshots (
     positions_json TEXT,
     open_orders_json TEXT,
     executions_json TEXT,
-    errors_json TEXT
+    errors_json TEXT,
+    source TEXT,
+    received_at TEXT,
+    raw_json TEXT
 )
 """
 
@@ -2583,9 +2586,12 @@ CREATE TABLE IF NOT EXISTS reconciliation_events (
 async def save_broker_sync_snapshot(snapshot: dict) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(CREATE_BROKER_SYNC_SNAPSHOTS)
+        await _ensure_columns(db, "broker_sync_snapshots", {"source": "TEXT", "received_at": "TEXT", "raw_json": "TEXT"})
         eq=snapshot.get('equity') or {}
-        await db.execute("""INSERT INTO broker_sync_snapshots (synced_at,ok,connected,account,net_liquidation,total_cash,available_funds,buying_power,positions_json,open_orders_json,executions_json,errors_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
-            snapshot.get('synced_at'), 1 if snapshot.get('ok') else 0, 1 if snapshot.get('connected') else 0, snapshot.get('account'), eq.get('net_liquidation'), eq.get('total_cash'), eq.get('available_funds'), eq.get('buying_power'), json.dumps(snapshot.get('positions',[])), json.dumps(snapshot.get('open_orders',[])), json.dumps(snapshot.get('executions',[])), json.dumps(snapshot.get('errors',[]))
+        synced_at = snapshot.get('synced_at') or now_iso()
+        source = snapshot.get('source') or ("LOCAL_GATEWAY_PUSH" if snapshot.get('pushed_by') else "BROKER_SYNC")
+        await db.execute("""INSERT INTO broker_sync_snapshots (synced_at,ok,connected,account,net_liquidation,total_cash,available_funds,buying_power,positions_json,open_orders_json,executions_json,errors_json,source,received_at,raw_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+            synced_at, 1 if snapshot.get('ok') else 0, 1 if snapshot.get('connected') else 0, snapshot.get('account'), eq.get('net_liquidation'), eq.get('total_cash'), eq.get('available_funds'), eq.get('buying_power'), json.dumps(snapshot.get('positions',[])), json.dumps(snapshot.get('open_orders',[])), json.dumps(snapshot.get('executions',[])), json.dumps(snapshot.get('errors',[])), source, now_iso(), json.dumps(snapshot)
         ))
         await db.commit()
 
@@ -2593,6 +2599,7 @@ async def get_latest_broker_sync_snapshot() -> dict | None:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory=aiosqlite.Row
         await db.execute(CREATE_BROKER_SYNC_SNAPSHOTS)
+        await _ensure_columns(db, "broker_sync_snapshots", {"source": "TEXT", "received_at": "TEXT", "raw_json": "TEXT"})
         async with db.execute("SELECT * FROM broker_sync_snapshots ORDER BY id DESC LIMIT 1") as c:
             r=await c.fetchone()
     return dict(r) if r else None
