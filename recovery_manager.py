@@ -395,8 +395,8 @@ def evaluate_recovery_status_sync() -> dict[str, Any]:
     with closing(sqlite3.connect(config.DB_PATH)) as db:
         watchdog_row = db.execute("SELECT value FROM app_state WHERE key='watchdog_status'").fetchone()
         watchdog_status = json.loads(watchdog_row[0]) if watchdog_row and watchdog_row[0] else {}
-        broker_row = db.execute("SELECT connected, synced_at FROM broker_sync_snapshots ORDER BY id DESC LIMIT 1").fetchone()
-        broker_snapshot = {"connected": bool(broker_row[0]), "synced_at": broker_row[1]} if broker_row else {}
+        broker_row = db.execute("SELECT connected, synced_at, source, received_at FROM broker_sync_snapshots ORDER BY id DESC LIMIT 1").fetchone()
+        broker_snapshot = {"connected": bool(broker_row[0]), "synced_at": broker_row[1], "source": broker_row[2], "received_at": broker_row[3]} if broker_row else {}
         freshness = evaluate_broker_freshness(watchdog_status, broker_snapshot)
         fallback_active = bool(freshness.get("broker_sync_connected") and freshness.get("broker_sync_fresh"))
 
