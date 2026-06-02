@@ -30,6 +30,7 @@ from position_sizing_engine import (
 )
 from market_regime import get_market_regime
 from strategy_portfolio import STRATEGY_INTRADAY, normalize_strategy_type
+from trade_quality_engine import STRATEGY_REJECT, classify_candidate
 
 log = logging.getLogger(__name__)
 
@@ -256,7 +257,16 @@ def execute_limit_buy_sync(
             "source_module": "auto_trader.execute_limit_buy_sync",
             "state": order_lifecycle.OrderState.CREATED,
             "reason": "AUTO BUY limit order created locally before TWS submission",
-            "raw_payload": {"symbol": symbol, "quantity": quantity, "limit_price": limit_price},
+            "raw_payload": {
+                "symbol": symbol,
+                "quantity": quantity,
+                "limit_price": limit_price,
+                "strategy_type": (execution_payload or {}).get("strategy_type"),
+                "trade_quality_score": (execution_payload or {}).get("trade_quality_score"),
+                "quality_grade": (execution_payload or {}).get("quality_grade"),
+                "quality_components": (execution_payload or {}).get("quality_components"),
+                "trade_quality": (execution_payload or {}).get("trade_quality"),
+            },
         })
 
         ib.connect(
@@ -382,7 +392,14 @@ def execute_limit_buy_sync(
             "source_module": "auto_trader.execute_limit_buy_sync",
             "state": order_lifecycle.OrderState.SUBMITTED,
             "reason": "AUTO BUY limit order submitted to TWS",
-            "raw_payload": {"order": getattr(trade.order, "__dict__", {})},
+            "raw_payload": {
+                "order": getattr(trade.order, "__dict__", {}),
+                "strategy_type": (execution_payload or {}).get("strategy_type"),
+                "trade_quality_score": (execution_payload or {}).get("trade_quality_score"),
+                "quality_grade": (execution_payload or {}).get("quality_grade"),
+                "quality_components": (execution_payload or {}).get("quality_components"),
+                "trade_quality": (execution_payload or {}).get("trade_quality"),
+            },
         })
 
         ib.sleep(3)
@@ -663,6 +680,30 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
                     )
                     continue
 
+            trade_quality = classify_candidate(row, market_regime=market, market_hours=market_hours)
+            row = {
+                **row,
+                "strategy_type": trade_quality.get("strategy_type"),
+                "trade_quality_score": trade_quality.get("trade_quality_score"),
+                "quality_grade": trade_quality.get("quality_grade"),
+                "quality_components": trade_quality.get("quality_components"),
+                "trade_quality": trade_quality,
+                "stop_loss": trade_quality.get("suggested_stop_loss") or row.get("stop_loss"),
+                "take_profit_1": trade_quality.get("suggested_take_profit") or row.get("take_profit_1"),
+            }
+            if trade_quality.get("strategy_type") == STRATEGY_REJECT or trade_quality.get("quality_grade") == "REJECT":
+                reason = trade_quality.get("primary_reason") or "Trade quality classifier rejected candidate"
+                log.info("AUTO BUY skipped for %s — %s", symbol, reason)
+                await _journal_buy_decision(
+                    row,
+                    "TRADE_QUALITY_REJECTED",
+                    "REJECTED",
+                    reason,
+                    market,
+                    {"trade_quality": trade_quality},
+                )
+                continue
+
             if symbol in open_symbols:
                 log.info("AUTO BUY skipped for %s — position already open", symbol)
                 await _journal_buy_decision(
@@ -689,8 +730,9 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
                 row,
                 "BUY_CANDIDATE_ACCEPTED",
                 "ACCEPTED",
-                "BUY candidate passed auto-trading filters",
+                "BUY candidate passed auto-trading filters and trade-quality classifier",
                 market,
+                {"trade_quality": row.get("trade_quality")},
             )
             await database.safe_record_trade_journal_event({
                 "symbol": symbol,
@@ -1059,6 +1101,10 @@ async def auto_open_position(
             "take_profit_2": row.get("take_profit_2"),
             "reason": "AUTO BUY FILLED IN TWS",
             "strategy_type": normalize_strategy_type(row.get("strategy_type") or (market or {}).get("strategy_type")),
+            "trade_quality_score": row.get("trade_quality_score"),
+            "quality_grade": row.get("quality_grade"),
+            "quality_components": row.get("quality_components"),
+            "trade_quality": row.get("trade_quality"),
             "notes": (
                 f"AUTO TRADE FILLED | "
                 f"order_id={order_result.get('order_id')} "

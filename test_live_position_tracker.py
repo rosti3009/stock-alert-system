@@ -374,6 +374,36 @@ class LivePositionTrackerTests(unittest.TestCase):
         self.assertEqual(status["tracked_symbols"], ["TSCO"])
         self.assertIsNotNone(status["last_refresh_at"])
 
+    def test_live_tracker_self_heals_missing_open_broker_positions(self):
+        self.insert_position("AZTA")
+
+        async def _snapshot() -> None:
+            await database.save_broker_sync_snapshot({
+                "synced_at": database.now_iso(),
+                "ok": True,
+                "connected": True,
+                "positions": [
+                    {"symbol": "AZTA", "position": 1},
+                    {"symbol": "TSCO", "position": 2},
+                    {"symbol": "CLDX", "quantity": 3},
+                ],
+                "open_orders": [],
+                "executions": [],
+                "errors": [],
+            })
+        asyncio.run(_snapshot())
+
+        async def fake_scan(symbol: str) -> dict:
+            return {"symbol": symbol, "price": 101, "signal": "HOLD"}
+
+        asyncio.run(live_position_tracker.refresh_live_tracked_positions(fake_scan))
+        status = asyncio.run(live_position_tracker.get_tracker_status())
+
+        self.assertEqual(status["open_position_count"], 3)
+        self.assertEqual(status["tracked_count"], 3)
+        self.assertEqual(set(status["tracked_symbols"]), {"AZTA", "TSCO", "CLDX"})
+        self.assertEqual(status.get("missing_tracker_enrichment_symbols"), [])
+
 
 if __name__ == "__main__":
     unittest.main()
