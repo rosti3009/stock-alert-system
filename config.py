@@ -297,7 +297,7 @@ RECOVERY_POSITION_STALE_SECONDS = get_int("RECOVERY_POSITION_STALE_SECONDS", 180
 # STRATEGY MODE / INTRADAY
 # ==============================
 STRATEGY_MODE_DEFAULT = get_str("STRATEGY_MODE_DEFAULT", "SWING_DEFAULT").upper()
-INTRADAY_MIN_SCORE_TO_BUY = get_int("INTRADAY_MIN_SCORE_TO_BUY", 85)
+INTRADAY_MIN_SCORE_TO_BUY = get_int("INTRADAY_MIN_SCORE_TO_BUY", 55)
 INTRADAY_MAX_OPEN_POSITIONS = get_int("INTRADAY_MAX_OPEN_POSITIONS", 3)
 INTRADAY_POSITION_SIZE_FACTOR = get_float("INTRADAY_POSITION_SIZE_FACTOR", 0.25)
 INTRADAY_RISK_PER_TRADE_PERCENT = get_float("INTRADAY_RISK_PER_TRADE_PERCENT", 0.5)
@@ -313,6 +313,14 @@ INTRADAY_ALLOW_OVERNIGHT = get_bool("INTRADAY_ALLOW_OVERNIGHT", False)
 INTRADAY_BREAK_EVEN_PROFIT_PERCENT = get_float("INTRADAY_BREAK_EVEN_PROFIT_PERCENT", 1.0)
 INTRADAY_TIME_EXIT_MINUTES = get_int("INTRADAY_TIME_EXIT_MINUTES", 30)
 
+
+
+# ==============================
+# RANKING / BEST CANDIDATE SELECTION
+# ==============================
+INTRADAY_TOP_N = get_int("INTRADAY_TOP_N", 5)
+SWING_TOP_N = get_int("SWING_TOP_N", 5)
+RANKING_MIN_SCORE = get_float("RANKING_MIN_SCORE", 65.0)
 
 # ==============================
 # PAPER TRAINING PROFILES
@@ -354,7 +362,7 @@ PAPER_TRAINING_PROFILES = {
     "INTRADAY_AGGRESSIVE": {
         "paper_capital": 500000.0,
         "intraday": {
-            "min_score_to_buy": 60,
+            "min_score_to_buy": 55,
             "risk_per_trade_percent": 1.25,
             "max_daily_loss_percent": 5.0,
             "max_consecutive_losses": 4,
@@ -362,7 +370,7 @@ PAPER_TRAINING_PROFILES = {
             "max_open_positions": 5,
             "max_total_intraday_exposure_percent": 75.0,
             "max_single_position_percent": 15.0,
-            "min_relative_volume": 1.7,
+            "min_relative_volume": 1.5,
             "min_dollar_volume": 3000000.0,
             "max_spread_percent": 2.5,
             "max_slippage_estimate": 1.5,

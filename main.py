@@ -53,7 +53,7 @@ from market_regime_engine import get_cached_market_regime, get_market_regime_his
 from market_regime import get_market_regime
 from data_fetcher import fetch_intraday_bars, fetch_stock_data
 from indicators import compute_indicators
-from ranking_engine import calculate_weekly_score, rank_top_weekly_setups
+from ranking_engine import STRATEGY_INTRADAY, STRATEGY_SWING, calculate_ranking, calculate_weekly_score, rank_candidates, rank_top_weekly_setups
 from signal_logic import evaluate_signal
 from symbol_loader import get_cached_symbols, load_nasdaq_symbols
 from telegram_notifier import send_buy_alert, send_sell_alert, send_position_alert
@@ -2391,6 +2391,10 @@ async def serve_orders_route():
 async def serve_performance_route():
     return serve_html_file("performance.html", fallback_to_index=True)
 
+@app.get("/performance-strategy", response_class=HTMLResponse)
+async def serve_performance_strategy_route():
+    return serve_html_file("performance_strategy.html", fallback_to_index=True)
+
 @app.get("/strategy-allocation", response_class=HTMLResponse)
 async def serve_strategy_allocation_route():
     return serve_html_file("strategy_allocation.html", fallback_to_index=True)
@@ -2453,6 +2457,43 @@ async def api_rebuild_top_weekly():
     top = rebuild_top_weekly(limit=10)
     return JSONResponse({"status": "rebuilt", "count": len(top), "top": top}, headers=no_cache_headers())
 
+
+
+@app.get("/api/ranking/top-intraday")
+async def api_ranking_top_intraday(limit: int = 5):
+    rows = await database.get_ranking_candidates(STRATEGY_INTRADAY, rejected=False, limit=limit)
+    if not rows:
+        ranked = rank_candidates([r for r in await database.get_latest_candidates(200) if strategy_portfolio.normalize_strategy_type(r.get("strategy_type")) == STRATEGY_INTRADAY], STRATEGY_INTRADAY, top_n=limit)
+        rows = ranked["selected"]
+    return JSONResponse({"ok": True, "strategy_type": STRATEGY_INTRADAY, "candidates": rows[:limit]}, headers=no_cache_headers())
+
+
+@app.get("/api/ranking/top-swing")
+async def api_ranking_top_swing(limit: int = 5):
+    rows = await database.get_ranking_candidates(STRATEGY_SWING, rejected=False, limit=limit)
+    if not rows:
+        ranked = rank_candidates([r for r in await database.get_latest_candidates(200) if strategy_portfolio.normalize_strategy_type(r.get("strategy_type")) == STRATEGY_SWING], STRATEGY_SWING, top_n=limit)
+        rows = ranked["selected"]
+    return JSONResponse({"ok": True, "strategy_type": STRATEGY_SWING, "candidates": rows[:limit]}, headers=no_cache_headers())
+
+
+@app.get("/api/ranking/rejected")
+async def api_ranking_rejected(limit: int = 100):
+    return JSONResponse({"ok": True, "candidates": await database.get_ranking_candidates(rejected=True, limit=limit)}, headers=no_cache_headers())
+
+
+@app.get("/api/ranking/summary")
+async def api_ranking_summary(limit: int = 200):
+    latest = await database.get_latest_candidates(limit)
+    intraday = rank_candidates([r for r in latest if strategy_portfolio.normalize_strategy_type(r.get("strategy_type")) == STRATEGY_INTRADAY], STRATEGY_INTRADAY, top_n=int(getattr(config, "INTRADAY_TOP_N", 5)))
+    swing = rank_candidates([r for r in latest if strategy_portfolio.normalize_strategy_type(r.get("strategy_type")) == STRATEGY_SWING], STRATEGY_SWING, top_n=int(getattr(config, "SWING_TOP_N", 5)))
+    return JSONResponse({
+        "ok": True,
+        "config": {"INTRADAY_TOP_N": int(getattr(config, "INTRADAY_TOP_N", 5)), "SWING_TOP_N": int(getattr(config, "SWING_TOP_N", 5))},
+        "top_intraday": intraday["selected"],
+        "top_swing": swing["selected"],
+        "rejected": intraday["rejected"] + swing["rejected"],
+    }, headers=no_cache_headers())
 
 
 @app.get("/api/trade-quality/candidates")
@@ -2823,6 +2864,10 @@ async def api_intraday_force_close():
 @app.get("/api/performance")
 async def api_performance():
     return JSONResponse(await database.get_performance_summary(), headers=no_cache_headers())
+
+@app.get("/api/performance/by-strategy")
+async def api_performance_by_strategy():
+    return JSONResponse(await database.get_performance_by_strategy(), headers=no_cache_headers())
 
 
 @app.get("/api/performance/advanced")

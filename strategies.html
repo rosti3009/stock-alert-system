@@ -22,7 +22,7 @@
     <nav class="side-nav">
       <a href="/dashboard">📊 Dashboard</a>
       <a href="/analytics">📈 Analytics</a>
-      <a href="/positions">💼 Positions</a><a href="/broker-audit">🧾 Broker Audit</a><a href="/orders">🧾 Orders</a><a href="/performance">📊 Performance</a><a href="/strategy-allocation">🧩 Strategy Allocation</a>
+      <a href="/positions">💼 Positions</a><a href="/broker-audit">🧾 Broker Audit</a><a href="/orders">🧾 Orders</a><a href="/performance">📊 Performance</a><a href="/performance-strategy">📈 Strategy Performance</a><a href="/strategy-allocation">🧩 Strategy Allocation</a>
       <a href="/portfolio">📁 Portfolio</a>
       <a href="/history">📜 History</a>
       <a href="/risk">⚠ Risk</a>
@@ -66,6 +66,7 @@
         <div class="card">
           <h3>Scanner Mode</h3>
           <div class="value yellow" id="scannerMode">Balanced</div>
+          <div class="muted" id="activeRules">Loading rules...</div>
         </div>
 
         <div class="card">
@@ -227,5 +228,18 @@
 
 </div>
 
+<script>
+async function loadStrategyRules(){
+  const [modeRes, statusRes] = await Promise.all([fetch('/api/strategy-mode',{cache:'no-store'}), fetch('/api/strategies/status',{cache:'no-store'})]);
+  const mode = await modeRes.json();
+  const status = await statusRes.json();
+  const rules = mode.rules || {};
+  document.getElementById('scannerMode').textContent = mode.strategy_mode || '-';
+  document.getElementById('riskProfile').textContent = mode.active_risk_profile || '-';
+  document.getElementById('maxPositions').textContent = mode.effective_max_positions ?? '-';
+  document.getElementById('activeRules').textContent = `Score ≥ ${rules.min_score_to_buy ?? '-'} · RVOL ≥ ${rules.min_relative_volume ?? '-'} · Spread ≤ ${rules.max_spread_percent ?? '-'}% · Slippage ≤ ${rules.max_slippage_estimate ?? '-'}% · Force close ${rules.force_exit_before_close === false ? 'off' : 'on'} · Paper only ${status.paper_trading_only ? 'on' : 'off'}`;
+}
+loadStrategyRules().catch(() => {});
+</script>
 </body>
 </html>

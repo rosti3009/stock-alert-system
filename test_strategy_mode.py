@@ -20,7 +20,7 @@ def run_async(coro):
 
 def test_switching_to_intraday_changes_buy_threshold():
     rules = strategy_mode.active_rules(strategy_mode.StrategyMode.INTRADAY_MOMENTUM)
-    assert rules["min_score_to_buy"] == 60
+    assert rules["min_score_to_buy"] == 55
     assert rules["min_score_to_buy"] < strategy_mode.active_rules(strategy_mode.StrategyMode.SWING_DEFAULT)["min_score_to_buy"]
 
 
@@ -117,7 +117,7 @@ def test_intraday_sell_logic_uses_intraday_exits():
     # Keep production force-exit priority intact; pin this test outside force-exit window.
     with patch.object(strategy_mode, "force_exit_before_close_status", return_value={"enabled": True, "active": False, "minutes_before_close": 15}):
         result = position_manager.evaluate_position(
-            {"symbol": "AAPL", "buy_price": 100, "quantity": 2, "stop_loss": 98.5},
+            {"symbol": "AAPL", "strategy_type": "INTRADAY", "buy_price": 100, "quantity": 2, "stop_loss": 98.5},
             {"symbol": "AAPL", "price": 98.4, "signal": "NEUTRAL"},
             mode=strategy_mode.StrategyMode.INTRADAY_TECHNICAL.value,
         )
@@ -190,9 +190,9 @@ def test_aggressive_learning_profile_increases_capital_and_max_positions():
         assert config.effective_virtual_trading_capital() == 500000.0
         assert profile["profile"] == "INTRADAY_AGGRESSIVE"
         assert rules["max_open_positions"] == 5
-        assert rules["min_score_to_buy"] == 60
+        assert rules["min_score_to_buy"] == 55
         assert rules["risk_per_trade_percent"] == 1.25
-        assert rules["min_relative_volume"] == 1.7
+        assert rules["min_relative_volume"] == 1.5
         assert rules["min_dollar_volume"] == 3000000.0
         assert rules["max_daily_trades"] == 20
         assert rules["max_consecutive_losses"] == 4
@@ -242,7 +242,7 @@ def test_strategy_payload_exposes_effective_training_profile():
         assert payload["active_training_profile"] == "INTRADAY_AGGRESSIVE"
         assert payload["profile_rules"]["paper_capital"] == 500000.0
         assert payload["effective_max_positions"] == 5
-        assert payload["effective_score_threshold"] == 60
+        assert payload["effective_score_threshold"] == 55
         assert payload["effective_max_daily_trades"] == 20
         assert "market_hours_guard" in payload["profile_rules"]["hard_protections_kept"]
         assert payload["force_exit_before_close"]["enabled"] is True
