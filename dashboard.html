@@ -208,7 +208,7 @@
 
       <a href="/broker-audit">🧾 Broker Audit</a>
       <a href="/orders">🧾 Orders</a>
-      <a href="/performance">📊 Performance</a><a href="/strategy-allocation">🧩 Strategy Allocation</a>
+      <a href="/performance">📊 Performance</a><a href="/performance-strategy">📈 Strategy Performance</a><a href="/strategy-allocation">🧩 Strategy Allocation</a>
 
       <a href="/portfolio">
         📁 Portfolio
@@ -366,6 +366,7 @@
         <h3>Strategy Mode</h3>
         <div>Active mode: <span id="strategyModeLabel" class="strategy-pill">Loading...</span></div>
         <div class="muted" id="strategyEngines">Loading engines...</div>
+        <div class="muted" id="strategyActiveRules">Loading active rules...</div>
         <div class="strategy-toggle">
           <button id="swingModeBtn" onclick="switchStrategyMode('swing')">Swing Default</button>
           <button id="intradayModeBtn" class="primary" onclick="switchStrategyMode('intraday')">Day Trading / Intraday</button>
@@ -1227,6 +1228,14 @@ function updateStrategyMode(){
     "BUY: " + (strategyMode.active_buy_engine || "-")
     + " · SELL: " + (strategyMode.active_sell_engine || "-")
     + " · Risk: " + (strategyMode.active_risk_profile || "-");
+  const rules = strategyMode.rules || {};
+  document.getElementById("strategyActiveRules").textContent =
+    "Score ≥ " + (rules.min_score_to_buy ?? strategyMode.effective_score_threshold ?? "-")
+    + " · RVOL ≥ " + (rules.min_relative_volume ?? "-")
+    + " · Max spread " + (rules.max_spread_percent ?? "-") + "%"
+    + " · Max slippage " + (rules.max_slippage_estimate ?? "-") + "%"
+    + " · Overnight " + (rules.allow_overnight ? "allowed" : "blocked")
+    + " · Force close before close " + (rules.force_exit_before_close === false ? "off" : "on");
 
   document.getElementById("swingModeBtn").disabled = mode === "SWING_DEFAULT";
   document.getElementById("intradayModeBtn").disabled = mode === "INTRADAY_MOMENTUM";

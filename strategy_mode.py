@@ -330,6 +330,10 @@ def strategy_mode_payload(
         "effective_risk_factor": float(rules.get("position_size_factor", 1.0)),
         "effective_max_daily_trades": int(rules.get("max_daily_trades", 0)) if "max_daily_trades" in rules else None,
         "rules": rules,
+        "ranking_config": {
+            "INTRADAY_TOP_N": int(getattr(config, "INTRADAY_TOP_N", 5)),
+            "SWING_TOP_N": int(getattr(config, "SWING_TOP_N", 5)),
+        },
         "intraday_rules": intraday_rules(),
         "intraday_enrichment_status": intraday_enrichment_status(),
         "force_exit_before_close": force_exit_before_close_status(),

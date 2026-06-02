@@ -31,6 +31,7 @@ from position_sizing_engine import (
 from market_regime import get_market_regime
 from strategy_portfolio import STRATEGY_INTRADAY, normalize_strategy_type
 from trade_quality_engine import STRATEGY_REJECT, classify_candidate
+from ranking_engine import rank_candidates
 
 log = logging.getLogger(__name__)
 
@@ -544,6 +545,7 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
         emergency_cap,
     )
 
+    prepared_rows: list[dict] = []
     for row in scan_results:
         symbol = str(row.get("symbol", "")).strip().upper()
         signal = row.get("signal")
@@ -552,28 +554,39 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
             row = {**row, "strategy_type": STRATEGY_INTRADAY}
             intraday_entry = intraday_momentum_engine.detect_intraday_entry_setup(row)
             row = {**row, **intraday_entry, "intraday_score_reasons": intraday_entry.get("score_reasons", [])}
-            score = int(
-                row.get("aggressive_score")
-                or row.get("intraday_aggressive_score")
-                or intraday_entry.get("intraday_momentum_score")
-                or row.get("intraday_momentum_score")
-                or 0
-            )
-            if row.get("regime_override_active"):
-                await database.safe_record_trade_journal_event({
-                    "symbol": symbol or "UNKNOWN",
-                    "event_type": "REGIME_OVERRIDE_ACTIVATED",
-                    "decision": "OVERRIDE",
-                    "reason": "HIGH_MOMENTUM_EXCEPTION",
-                    "source_module": "auto_trader",
-                    "raw_payload": row,
-                })
         else:
             row = {**row, "strategy_type": normalize_strategy_type(row.get("strategy_type"))}
-            score = int(row.get("weekly_score") or row.get("score") or 0)
+        if symbol:
+            prepared_rows.append(row)
 
-        if not symbol:
-            continue
+    intraday_rows = [r for r in prepared_rows if normalize_strategy_type(r.get("strategy_type")) == STRATEGY_INTRADAY and (bool(r.get("aggressive_entry_allowed")) or bool(r.get("intraday_entry_allowed")) or bool(r.get("entry_allowed")) or r.get("signal") == "BUY")]
+    swing_rows = [r for r in prepared_rows if normalize_strategy_type(r.get("strategy_type")) != STRATEGY_INTRADAY and r.get("signal") == "BUY"]
+    ranking_selected: dict[str, dict] = {}
+    ranking_rejected: dict[str, dict] = {}
+    for strategy, rows, limit in ((STRATEGY_INTRADAY, intraday_rows, getattr(config, "INTRADAY_TOP_N", 5)), ("SWING", swing_rows, getattr(config, "SWING_TOP_N", 5))):
+        result = rank_candidates(rows, strategy, top_n=int(limit))
+        for item in result["selected"]:
+            ranking_selected[str(item.get("symbol", "")).upper()] = item
+        for item in result["rejected"]:
+            ranking_rejected[str(item.get("symbol", "")).upper()] = item
+            await database.safe_record_trade_journal_event({
+                "symbol": str(item.get("symbol", "")).upper() or "UNKNOWN",
+                "event_type": "BUY_CANDIDATE_REJECTED_BY_RANKING",
+                "decision": "REJECTED",
+                "reason": item.get("ranking_reason"),
+                "source_module": "auto_trader.ranking",
+                "raw_payload": item,
+            })
+
+    for row in prepared_rows:
+        symbol = str(row.get("symbol", "")).strip().upper()
+        signal = row.get("signal")
+        intraday_mode_active = strategy_mode.is_intraday_mode(active_strategy_mode)
+        if symbol in ranking_selected:
+            row = {**row, **ranking_selected[symbol], "rejected_by_ranking": False}
+        elif symbol in ranking_rejected:
+            row = {**row, **ranking_rejected[symbol], "rejected_by_ranking": True}
+        score = int(row.get("aggressive_score") or row.get("intraday_aggressive_score") or row.get("intraday_momentum_score") or row.get("weekly_score") or row.get("score") or 0)
 
         aggressive_entry_allowed = bool(row.get("aggressive_entry_allowed"))
         intraday_entry_allowed = bool(row.get("intraday_entry_allowed"))
@@ -587,99 +600,42 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
                 "decision": "CANDIDATE",
                 "reason": "intraday_candidate_detected",
                 "source_module": "auto_trader",
-                "raw_payload": {
-                    "symbol": symbol,
-                    "aggressive_entry_allowed": aggressive_entry_allowed,
-                    "intraday_entry_allowed": intraday_entry_allowed,
-                    "entry_allowed": legacy_entry_allowed,
-                    "aggressive_score": row.get("aggressive_score"),
-                    "intraday_aggressive_score": row.get("intraday_aggressive_score"),
-                    "intraday_momentum_score": row.get("intraday_momentum_score"),
-                    "rejection_reasons": row.get("rejection_reasons") or [],
-                },
+                "raw_payload": row,
             })
-        elif intraday_mode_active:
+
+        if intraday_mode_active and not intraday_candidate:
             await database.safe_record_trade_journal_event({
                 "symbol": symbol,
                 "event_type": "AUTO_TRADER_INTRADAY_CANDIDATE_SKIPPED",
                 "decision": "SKIPPED",
                 "reason": "no_aggressive_or_intraday_entry_allowed",
                 "source_module": "auto_trader",
-                "raw_payload": {
-                    "symbol": symbol,
-                    "aggressive_entry_allowed": aggressive_entry_allowed,
-                    "intraday_entry_allowed": intraday_entry_allowed,
-                    "entry_allowed": legacy_entry_allowed,
-                    "signal": signal,
-                    "rejection_reasons": row.get("rejection_reasons") or [],
-                },
+                "raw_payload": row,
             })
 
         is_buy_candidate = intraday_candidate if intraday_mode_active else (signal == "BUY")
 
         if is_buy_candidate:
+            if row.get("rejected_by_ranking"):
+                await _journal_buy_decision(row, "BUY_CANDIDATE_REJECTED", "REJECTED", row.get("ranking_reason") or "Rejected by ranking", market, {"ranking": row})
+                try:
+                    await database.save_daily_candidate(row, 0)
+                except Exception:
+                    pass
+                continue
             if not market_is_open:
                 reason = market_hours.get("reason") or "US regular market is closed"
-                log.info("AUTO BUY skipped for %s — %s", symbol, reason)
-                await _journal_buy_decision(
-                    row,
-                    "BUY_BLOCKED_BY_SAFETY_GATE",
-                    "BLOCKED",
-                    reason,
-                    market,
-                    {"market_hours": market_hours},
-                )
+                await _journal_buy_decision(row, "BUY_BLOCKED_BY_SAFETY_GATE", "BLOCKED", reason, market, {"market_hours": market_hours})
                 continue
-
             if not allow_new_buys:
-                log.info("AUTO BUY blocked for %s — market regime is %s", symbol, regime)
-                await _journal_buy_decision(
-                    row,
-                    "BUY_CANDIDATE_REJECTED",
-                    "REJECTED",
-                    f"Market regime blocks new buys: {regime}",
-                    market,
-                )
+                await _journal_buy_decision(row, "BUY_CANDIDATE_REJECTED", "REJECTED", f"Market regime blocks new buys: {regime}", market)
                 continue
-
-            if (not strategy_mode.is_intraday_mode(active_strategy_mode)) and score < min_score_override:
-                log.info(
-                    "AUTO BUY skipped for %s — score too low (%s < %s)",
-                    symbol,
-                    score,
-                    min_score_override,
-                )
-                await _journal_buy_decision(
-                    row,
-                    "BUY_CANDIDATE_REJECTED",
-                    "REJECTED",
-                    f"Score too low ({score} < {min_score_override})",
-                    market,
-                )
+            if (not intraday_mode_active) and score < min_score_override:
+                await _journal_buy_decision(row, "BUY_CANDIDATE_REJECTED", "REJECTED", f"Score too low ({score} < {min_score_override})", market)
                 continue
-
-            if intraday_mode_active:
-                if not (aggressive_entry_allowed or intraday_entry_allowed or legacy_entry_allowed):
-                    reason = "; ".join(row.get("rejection_reasons") or ["Intraday BUY blocked"])
-                    await database.safe_record_trade_journal_event({
-                        "symbol": symbol,
-                        "event_type": "AGGRESSIVE_REJECTION",
-                        "decision": "BLOCKED",
-                        "reason": reason,
-                        "source_module": "auto_trader",
-                        "raw_payload": row,
-                    })
-                    log.info("AUTO BUY skipped for %s — %s", symbol, reason)
-                    await _journal_buy_decision(
-                        row,
-                        "INTRADAY_BUY_BLOCKED",
-                        "BLOCKED",
-                        reason,
-                        market,
-                        {"intraday_decision": row},
-                    )
-                    continue
-
+            if intraday_mode_active and not (aggressive_entry_allowed or intraday_entry_allowed or legacy_entry_allowed):
+                await _journal_buy_decision(row, "INTRADAY_BUY_BLOCKED", "BLOCKED", "; ".join(row.get("rejection_reasons") or ["Intraday BUY blocked"]), market)
+                continue
             trade_quality = classify_candidate(row, market_regime=market, market_hours=market_hours)
             row = {
                 **row,
@@ -693,47 +649,15 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
             }
             if trade_quality.get("strategy_type") == STRATEGY_REJECT or trade_quality.get("quality_grade") == "REJECT":
                 reason = trade_quality.get("primary_reason") or "Trade quality classifier rejected candidate"
-                log.info("AUTO BUY skipped for %s — %s", symbol, reason)
-                await _journal_buy_decision(
-                    row,
-                    "TRADE_QUALITY_REJECTED",
-                    "REJECTED",
-                    reason,
-                    market,
-                    {"trade_quality": trade_quality},
-                )
+                await _journal_buy_decision(row, "TRADE_QUALITY_REJECTED", "REJECTED", reason, market, {"trade_quality": trade_quality})
                 continue
-
             if symbol in open_symbols:
-                log.info("AUTO BUY skipped for %s — position already open", symbol)
-                await _journal_buy_decision(
-                    row,
-                    "BUY_CANDIDATE_REJECTED",
-                    "REJECTED",
-                    "Position already open",
-                    market,
-                )
+                await _journal_buy_decision(row, "BUY_CANDIDATE_REJECTED", "REJECTED", "Position already open", market)
                 continue
-
             if config.is_fixed_count_position_limit_mode() and current_open_count >= emergency_cap:
-                log.info("AUTO BUY skipped for %s — emergency position cap reached", symbol)
-                await _journal_buy_decision(
-                    row,
-                    "BUY_CANDIDATE_REJECTED",
-                    "REJECTED",
-                    f"Emergency position cap reached {current_open_count}/{emergency_cap}",
-                    market,
-                )
+                await _journal_buy_decision(row, "BUY_CANDIDATE_REJECTED", "REJECTED", f"Emergency position cap reached {current_open_count}/{emergency_cap}", market)
                 continue
-
-            await _journal_buy_decision(
-                row,
-                "BUY_CANDIDATE_ACCEPTED",
-                "ACCEPTED",
-                "BUY candidate passed auto-trading filters and trade-quality classifier",
-                market,
-                {"trade_quality": row.get("trade_quality")},
-            )
+            await _journal_buy_decision(row, "BUY_CANDIDATE_ACCEPTED", "ACCEPTED", "BUY candidate passed auto-trading filters, ranking, and trade-quality classifier", market, {"trade_quality": row.get("trade_quality"), "ranking": row})
             await database.safe_record_trade_journal_event({
                 "symbol": symbol,
                 "event_type": "AGGRESSIVE_ENTRY_ACCEPTED",
@@ -742,51 +666,19 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
                 "source_module": "auto_trader",
                 "raw_payload": row,
             })
-
-            opened = await auto_open_position(
-                row=row,
-                open_positions=open_positions,
-                account_equity=account_equity,
-                size_factor=size_factor,
-                market={**market, "strategy_mode": active_strategy_mode.value, "strategy_type": normalize_strategy_type(row.get("strategy_type"))},
-            )
-
+            opened = await auto_open_position(row=row, open_positions=open_positions, account_equity=account_equity, size_factor=size_factor, market={**market, "strategy_mode": active_strategy_mode.value, "strategy_type": normalize_strategy_type(row.get("strategy_type"))})
             if opened:
                 current_open_count += 1
                 open_symbols.add(symbol)
                 open_positions = await database.get_open_positions()
-                realized_pnl = await database.get_realized_pnl()
-                account_equity = float(config.effective_virtual_trading_capital())
 
-        elif signal == "SELL":
-            if symbol in open_symbols:
-                await database.safe_record_trade_journal_event({
-                    "symbol": symbol,
-                    "event_type": "SELL_SIGNAL_DETECTED",
-                    "decision": "CLOSE",
-                    "reason": "SELL signal",
-                    "source_module": "auto_trader",
-                    "signal_score": row.get("score"),
-                    "weekly_score": row.get("weekly_score"),
-                    "market_regime": regime,
-                    "price": row.get("price"),
-                    "raw_payload": row,
-                })
-
-                closed = await auto_close_position(symbol, "SELL signal")
-
-                if closed:
-                    open_positions = await database.get_open_positions()
-
-                    open_symbols = {
-                        str(p.get("symbol", "")).upper()
-                        for p in open_positions
-                        if p.get("symbol")
-                    }
-
-                    current_open_count = len(open_positions)
-                    realized_pnl = await database.get_realized_pnl()
-                    account_equity = float(config.effective_virtual_trading_capital())
+        elif signal == "SELL" and symbol in open_symbols:
+            await database.safe_record_trade_journal_event({"symbol": symbol, "event_type": "AUTO_SELL_SIGNAL", "decision": "CLOSE", "reason": "SELL signal", "source_module": "auto_trader", "signal_score": row.get("score"), "weekly_score": row.get("weekly_score"), "market_regime": regime, "price": row.get("price"), "raw_payload": row})
+            closed = await auto_close_position(symbol, "SELL signal")
+            if closed:
+                open_positions = await database.get_open_positions()
+                open_symbols = {str(p.get("symbol", "")).upper() for p in open_positions if p.get("symbol")}
+                current_open_count = len(open_positions)
 
 
 async def auto_open_position(
@@ -1105,6 +997,12 @@ async def auto_open_position(
             "quality_grade": row.get("quality_grade"),
             "quality_components": row.get("quality_components"),
             "trade_quality": row.get("trade_quality"),
+            "ranking_score": row.get("ranking_score"),
+            "ranking_grade": row.get("ranking_grade"),
+            "ranking_components": row.get("ranking_components"),
+            "ranking_reason": row.get("ranking_reason"),
+            "rejected_by_ranking": row.get("rejected_by_ranking"),
+            "ranking_checked_at": row.get("ranking_checked_at"),
             "notes": (
                 f"AUTO TRADE FILLED | "
                 f"order_id={order_result.get('order_id')} "

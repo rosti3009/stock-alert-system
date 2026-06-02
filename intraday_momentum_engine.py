@@ -5,7 +5,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 REQUIRED_TIMEFRAMES = ("1m", "5m", "15m")
-BUY_THRESHOLD = 60
+BUY_THRESHOLD = 55
 
 
 def validate_required_intraday_bars(row: dict[str, Any]) -> tuple[bool, list[str]]:
@@ -141,7 +141,7 @@ def detect_intraday_entry_setup(row: dict[str, Any]) -> dict[str, Any]:
     duplicate_order = bool(row.get("duplicate_order", False))
     market_closed = bool(row.get("market_closed", False))
     spread_quality_missing = row.get("spread_quality_score") is None
-    if rv < 1.7:
+    if rv < 1.5:
         rejection_reasons.append("relative volume below minimum")
         allowed = False
     if dv < 3_000_000:

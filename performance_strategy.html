@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Strategy Performance — Trading System</title>
+  <link rel="stylesheet" href="/layout.css">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-title">TRADING SYSTEM</div><div class="brand-subtitle">Institutional Dashboard</div></div>
+    <nav class="side-nav">
+      <a href="/dashboard">📊 Dashboard</a><a href="/analytics">📈 Analytics</a><a href="/positions">💼 Positions</a>
+      <a href="/broker-audit">🧾 Broker Audit</a><a href="/orders">🧾 Orders</a><a href="/performance">📊 Performance</a>
+      <a href="/performance-strategy" class="active">📈 Strategy Performance</a><a href="/strategy-allocation">🧩 Strategy Allocation</a>
+      <a href="/portfolio">📁 Portfolio</a><a href="/history">📜 History</a><a href="/risk">⚠ Risk</a><a href="/strategies">🧠 Strategies</a>
+    </nav>
+  </aside>
+  <main class="main-area">
+    <div class="topbar"><div><h1 class="page-title">Strategy Performance</h1><div class="page-subtitle">SWING vs INTRADAY realized, unrealized, ranking grade, setup, and rejection analytics</div></div></div>
+    <div class="container">
+      <div class="cards" id="strategyCards"></div>
+      <div class="charts">
+        <div class="box"><h3>PnL by Ranking Grade</h3><table><tbody id="gradeRows"></tbody></table></div>
+        <div class="box"><h3>PnL by Setup / Action</h3><table><tbody id="setupRows"></tbody></table></div>
+      </div>
+      <div class="box"><h3>Rejection Reasons Frequency</h3><table><tbody id="rejectionRows"></tbody></table></div>
+    </div>
+  </main>
+</div>
+<script>
+const money = v => '$' + Number(v || 0).toFixed(2);
+const pct = v => Number(v || 0).toFixed(2) + '%';
+function metricRows(obj){
+  return Object.entries(obj || {}).map(([k,v]) => `<tr><td>${k}</td><td>${v.trades ?? v}</td><td>${v.pnl !== undefined ? money(v.pnl) : ''}</td></tr>`).join('') || '<tr><td colspan="3">No data</td></tr>';
+}
+async function load(){
+  const res = await fetch('/api/performance/by-strategy', {cache:'no-store'});
+  const data = await res.json();
+  const card = (name, m) => `<div class="card"><h3>${name}</h3><div class="value ${Number(m.total_pnl||0)>=0?'green':'red'}">${money(m.total_pnl)}</div><div class="muted">Realized ${money(m.realized_pnl)} · Unrealized ${money(m.unrealized_pnl)}</div><div>Win ${pct(m.win_rate)} · PF ${m.profit_factor}</div><div>Trades ${m.number_of_trades} · Open ${m.open_positions} · Closed ${m.closed_positions}</div><div>Avg hold ${m.average_hold_time}m</div></div>`;
+  document.getElementById('strategyCards').innerHTML = card('SWING', data.SWING || {}) + card('INTRADAY', data.INTRADAY || {}) + card('TOTAL', data.TOTAL || {}) + `<div class="card"><h3>Best / Worst</h3><div class="value blue">${data.best_strategy || '-'}</div><div class="muted">Worst: ${data.worst_strategy || '-'}</div></div>`;
+  document.getElementById('gradeRows').innerHTML = metricRows(data.ranking_grade_performance);
+  document.getElementById('setupRows').innerHTML = metricRows(data.setup_performance);
+  document.getElementById('rejectionRows').innerHTML = Object.entries(data.rejection_reasons_frequency || {}).map(([k,v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('') || '<tr><td>No rejected candidates</td></tr>';
+}
+load().catch(err => { document.querySelector('.container').innerHTML = '<div class="box red">Failed to load: '+err.message+'</div>'; });
+</script>
+</body>
+</html>

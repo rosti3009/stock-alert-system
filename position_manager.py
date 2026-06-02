@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 import config
 import strategy_mode
-from strategy_portfolio import STRATEGY_INTRADAY, normalize_strategy_type
+from strategy_portfolio import STRATEGY_INTRADAY, STRATEGY_SWING, normalize_strategy_type
 
 
 def evaluate_position(position: dict, market: dict, mode: str | None = None) -> dict:
@@ -47,17 +47,11 @@ def evaluate_position(position: dict, market: dict, mode: str | None = None) -> 
     partial_sell = False
     sell_quantity = 0
 
-    active_mode = mode or market.get("strategy_mode") or position.get("strategy_mode")
-    # Exit engines are selected from the persisted position strategy, not the global
-    # scanner/mode. This prevents SWING positions from receiving INTRADAY_* exits
-    # when the app is scanning intraday setups, and prevents swing max-hold rules
-    # from being applied to explicitly INTRADAY positions.
-    explicit_strategy = position.get("strategy_type") or market.get("strategy_type")
-    is_intraday_position = (
-        normalize_strategy_type(explicit_strategy) == STRATEGY_INTRADAY
-        if explicit_strategy
-        else strategy_mode.is_intraday_mode(active_mode)
-    )
+    # Exit engines are selected from the persisted position strategy, never from the
+    # current global scanner/mode. Existing/null strategy_type positions normalize to
+    # SWING, which keeps intraday TP/SL/breakeven/VWAP/EMA9/EOD rules away from them.
+    persisted_strategy = normalize_strategy_type(position.get("strategy_type"))
+    is_intraday_position = persisted_strategy == STRATEGY_INTRADAY
     if is_intraday_position:
         return evaluate_intraday_position(
             position=position,
@@ -86,7 +80,7 @@ def evaluate_position(position: dict, market: dict, mode: str | None = None) -> 
             "take_profit_1": take_profit_1,
             "take_profit_2": take_profit_2,
             "status": "CLOSED",
-            "action": "STOP_LOSS_HIT",
+            "action": "SWING_STOP_LOSS_HIT",
             "reason": "Stop loss triggered",
             "partial_sell": False,
             "sell_quantity": quantity,
@@ -100,14 +94,14 @@ def evaluate_position(position: dict, market: dict, mode: str | None = None) -> 
 
         if new_stop > stop_loss:
             stop_loss = new_stop
-            action = "MOVE_STOP_TO_BREAKEVEN"
+            action = "SWING_MOVE_STOP_TO_BREAKEVEN"
             reason = "Stop moved to break even"
 
     # =========================
     # TAKE PROFIT 1
     # =========================
     if take_profit_1 > 0 and current_price >= take_profit_1:
-        action = "TAKE_PROFIT_1"
+        action = "SWING_TAKE_PROFIT_1"
         reason = "First target reached"
         partial_sell = True
         sell_quantity = round(quantity * 0.5, 6)
@@ -126,7 +120,7 @@ def evaluate_position(position: dict, market: dict, mode: str | None = None) -> 
             "take_profit_1": take_profit_1,
             "take_profit_2": take_profit_2,
             "status": "CLOSED",
-            "action": "TAKE_PROFIT_2",
+            "action": "SWING_TAKE_PROFIT_2",
             "reason": "Final target reached",
             "partial_sell": False,
             "sell_quantity": quantity,
@@ -140,7 +134,7 @@ def evaluate_position(position: dict, market: dict, mode: str | None = None) -> 
 
         if trailing_stop > stop_loss:
             stop_loss = trailing_stop
-            action = "TRAILING_STOP_UPDATED"
+            action = "SWING_TRAILING_STOP_UPDATED"
             reason = "Trailing stop 3%"
 
     if profit_percent >= 10:
@@ -148,7 +142,7 @@ def evaluate_position(position: dict, market: dict, mode: str | None = None) -> 
 
         if trailing_stop > stop_loss:
             stop_loss = trailing_stop
-            action = "TRAILING_STOP_UPDATED"
+            action = "SWING_TRAILING_STOP_UPDATED"
             reason = "Trailing stop 6%"
 
     # =========================
@@ -164,7 +158,7 @@ def evaluate_position(position: dict, market: dict, mode: str | None = None) -> 
             "take_profit_1": take_profit_1,
             "take_profit_2": take_profit_2,
             "status": "CLOSE_REQUESTED",
-            "action": "SELL_SIGNAL",
+            "action": "SELL",
             "reason": "Sell signal detected",
             "partial_sell": False,
             "sell_quantity": quantity,
@@ -193,11 +187,11 @@ def evaluate_position(position: dict, market: dict, mode: str | None = None) -> 
     # WARNING ZONES
     # =========================
     if profit_percent < -5 and action == "HOLD":
-        action = "WARNING"
+        action = "SWING_WARNING"
         reason = "Position under pressure"
 
     if profit_percent > 15 and action == "HOLD":
-        action = "WATCH_PROFIT"
+        action = "SWING_WATCH_PROFIT"
         reason = "Strong profit zone"
 
     return {

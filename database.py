@@ -134,7 +134,13 @@ CREATE TABLE IF NOT EXISTS daily_candidates (
     trade_quality_score REAL,
     quality_grade TEXT,
     quality_components TEXT,
-    trade_quality_json TEXT
+    trade_quality_json TEXT,
+    ranking_score REAL,
+    ranking_grade TEXT,
+    ranking_components TEXT,
+    ranking_reason TEXT,
+    rejected_by_ranking INTEGER DEFAULT 0,
+    ranking_checked_at TEXT
 )
 """
 
@@ -166,7 +172,13 @@ CREATE TABLE IF NOT EXISTS positions (
     trade_quality_score REAL,
     quality_grade TEXT,
     quality_components TEXT,
-    trade_quality_json TEXT
+    trade_quality_json TEXT,
+    ranking_score REAL,
+    ranking_grade TEXT,
+    ranking_components TEXT,
+    ranking_reason TEXT,
+    rejected_by_ranking INTEGER DEFAULT 0,
+    ranking_checked_at TEXT
 )
 """
 
@@ -498,6 +510,12 @@ async def init_db() -> None:
             "quality_grade": "TEXT",
             "quality_components": "TEXT",
             "trade_quality_json": "TEXT",
+            "ranking_score": "REAL",
+            "ranking_grade": "TEXT",
+            "ranking_components": "TEXT",
+            "ranking_reason": "TEXT",
+            "rejected_by_ranking": "INTEGER DEFAULT 0",
+            "ranking_checked_at": "TEXT",
         })
 
         await _ensure_columns(db, "positions", {
@@ -515,6 +533,12 @@ async def init_db() -> None:
             "quality_grade": "TEXT",
             "quality_components": "TEXT",
             "trade_quality_json": "TEXT",
+            "ranking_score": "REAL",
+            "ranking_grade": "TEXT",
+            "ranking_components": "TEXT",
+            "ranking_reason": "TEXT",
+            "rejected_by_ranking": "INTEGER DEFAULT 0",
+            "ranking_checked_at": "TEXT",
         })
 
 
@@ -534,6 +558,12 @@ async def init_db() -> None:
             "quality_grade": "TEXT",
             "quality_components": "TEXT",
             "trade_quality_json": "TEXT",
+            "ranking_score": "REAL",
+            "ranking_grade": "TEXT",
+            "ranking_components": "TEXT",
+            "ranking_reason": "TEXT",
+            "rejected_by_ranking": "INTEGER DEFAULT 0",
+            "ranking_checked_at": "TEXT",
         })
 
         await _ensure_columns(db, "trade_decisions", {
@@ -946,7 +976,8 @@ async def save_daily_candidate(row: dict, scan_run_id: int) -> None:
         entry_price, stop_loss, take_profit_1, take_profit_2,
         risk_percent, rr_ratio, score, weekly_score, weekly_rank,
         reasons, weekly_reasons, error, skip_reason, created_at, strategy_type,
-        trade_quality_score, quality_grade, quality_components, trade_quality_json
+        trade_quality_score, quality_grade, quality_components, trade_quality_json,
+        ranking_score, ranking_grade, ranking_components, ranking_reason, rejected_by_ranking, ranking_checked_at
     )
     VALUES (
         :scan_run_id, :symbol, :price, :rsi, :ma20, :ma50, :ma200,
@@ -954,7 +985,8 @@ async def save_daily_candidate(row: dict, scan_run_id: int) -> None:
         :entry_price, :stop_loss, :take_profit_1, :take_profit_2,
         :risk_percent, :rr_ratio, :score, :weekly_score, :weekly_rank,
         :reasons, :weekly_reasons, :error, :skip_reason, :created_at, :strategy_type,
-        :trade_quality_score, :quality_grade, :quality_components, :trade_quality_json
+        :trade_quality_score, :quality_grade, :quality_components, :trade_quality_json,
+        :ranking_score, :ranking_grade, :ranking_components, :ranking_reason, :rejected_by_ranking, :ranking_checked_at
     )
     """
 
@@ -990,11 +1022,17 @@ async def save_daily_candidate(row: dict, scan_run_id: int) -> None:
         "quality_grade": row.get("quality_grade"),
         "quality_components": _json(row.get("quality_components")),
         "trade_quality_json": _json(row.get("trade_quality")),
+        "ranking_score": row.get("ranking_score"),
+        "ranking_grade": row.get("ranking_grade"),
+        "ranking_components": _json(row.get("ranking_components")),
+        "ranking_reason": row.get("ranking_reason"),
+        "rejected_by_ranking": 1 if row.get("rejected_by_ranking") else 0,
+        "ranking_checked_at": row.get("ranking_checked_at"),
     }
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(CREATE_DAILY_CANDIDATES)
-        await _ensure_columns(db, "daily_candidates", {"strategy_type": "TEXT DEFAULT 'SWING'", "trade_quality_score": "REAL", "quality_grade": "TEXT", "quality_components": "TEXT", "trade_quality_json": "TEXT"})
+        await _ensure_columns(db, "daily_candidates", {"strategy_type": "TEXT DEFAULT 'SWING'", "trade_quality_score": "REAL", "quality_grade": "TEXT", "quality_components": "TEXT", "trade_quality_json": "TEXT", "ranking_score": "REAL", "ranking_grade": "TEXT", "ranking_components": "TEXT", "ranking_reason": "TEXT", "rejected_by_ranking": "INTEGER DEFAULT 0", "ranking_checked_at": "TEXT"})
         await db.execute(sql, safe)
         await db.commit()
 
@@ -1070,6 +1108,12 @@ async def get_open_positions() -> list[dict]:
             "close_attempted_at": "TEXT",
             "close_order_id": "INTEGER",
             "close_status": "TEXT",
+            "ranking_score": "REAL",
+            "ranking_grade": "TEXT",
+            "ranking_components": "TEXT",
+            "ranking_reason": "TEXT",
+            "rejected_by_ranking": "INTEGER DEFAULT 0",
+            "ranking_checked_at": "TEXT",
         })
         async with db.execute(sql) as cursor:
             rows = await cursor.fetchall()
@@ -1153,9 +1197,10 @@ async def add_position(data: dict, max_open_positions: int = 10, enforce_max_ope
         symbol, buy_price, quantity, buy_date, current_price,
         profit_amount, profit_percent, stop_loss, take_profit_1, take_profit_2,
         status, action, reason, notes, created_at, updated_at, closed_at, strategy_type,
-        trade_quality_score, quality_grade, quality_components, trade_quality_json
+        trade_quality_score, quality_grade, quality_components, trade_quality_json,
+        ranking_score, ranking_grade, ranking_components, ranking_reason, rejected_by_ranking, ranking_checked_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 'HOLD', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 'HOLD', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(symbol) DO UPDATE SET
         buy_price = excluded.buy_price,
         quantity = excluded.quantity,
@@ -1179,7 +1224,13 @@ async def add_position(data: dict, max_open_positions: int = 10, enforce_max_ope
         trade_quality_score = excluded.trade_quality_score,
         quality_grade = excluded.quality_grade,
         quality_components = excluded.quality_components,
-        trade_quality_json = excluded.trade_quality_json
+        trade_quality_json = excluded.trade_quality_json,
+        ranking_score = excluded.ranking_score,
+        ranking_grade = excluded.ranking_grade,
+        ranking_components = excluded.ranking_components,
+        ranking_reason = excluded.ranking_reason,
+        rejected_by_ranking = excluded.rejected_by_ranking,
+        ranking_checked_at = excluded.ranking_checked_at
     """
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1203,6 +1254,12 @@ async def add_position(data: dict, max_open_positions: int = 10, enforce_max_ope
             data.get("quality_grade"),
             _json(data.get("quality_components")),
             _json(data.get("trade_quality")),
+            data.get("ranking_score"),
+            data.get("ranking_grade"),
+            _json(data.get("ranking_components")),
+            data.get("ranking_reason"),
+            1 if data.get("rejected_by_ranking") else 0,
+            data.get("ranking_checked_at"),
         ))
         await db.commit()
 
@@ -1382,6 +1439,113 @@ async def get_performance_summary() -> dict:
         "total_pnl": round(row["total_pnl"] or 0, 2),
         "profit_factor": round(profit_factor, 2),
     }
+
+
+async def get_ranking_candidates(strategy_type: str | None = None, *, rejected: bool | None = None, limit: int = 200) -> list[dict]:
+    where = ["ranking_score IS NOT NULL"]
+    params: list[object] = []
+    if strategy_type:
+        where.append("COALESCE(strategy_type, 'SWING') = ?")
+        params.append(_normalize_strategy_type(strategy_type))
+    if rejected is not None:
+        where.append("COALESCE(rejected_by_ranking, 0) = ?")
+        params.append(1 if rejected else 0)
+    params.append(limit)
+    sql = f"""
+    SELECT COALESCE(strategy_type, 'SWING') AS strategy_type, *
+    FROM daily_candidates
+    WHERE {' AND '.join(where)}
+    ORDER BY ranking_checked_at DESC, ranking_score DESC, id DESC
+    LIMIT ?
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute(CREATE_DAILY_CANDIDATES)
+        await _ensure_columns(db, "daily_candidates", {"ranking_score": "REAL", "ranking_grade": "TEXT", "ranking_components": "TEXT", "ranking_reason": "TEXT", "rejected_by_ranking": "INTEGER DEFAULT 0", "ranking_checked_at": "TEXT", "strategy_type": "TEXT DEFAULT 'SWING'"})
+        async with db.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
+    result = [dict(row) for row in rows]
+    for row in result:
+        for key in ("ranking_components", "quality_components", "reasons", "weekly_reasons"):
+            if isinstance(row.get(key), str):
+                try:
+                    row[key] = json.loads(row[key])
+                except Exception:
+                    pass
+        row["rejected_by_ranking"] = bool(row.get("rejected_by_ranking"))
+    return result
+
+
+async def get_performance_by_strategy() -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute(CREATE_POSITIONS)
+        await _ensure_columns(db, "positions", {"strategy_type": "TEXT DEFAULT 'SWING'", "ranking_grade": "TEXT", "profit_amount": "REAL", "profit_percent": "REAL", "closed_at": "TEXT", "buy_date": "TEXT", "created_at": "TEXT", "action": "TEXT"})
+        async with db.execute("SELECT COALESCE(strategy_type, 'SWING') AS strategy_type, * FROM positions") as cursor:
+            positions = [dict(row) for row in await cursor.fetchall()]
+        await db.execute(CREATE_DAILY_CANDIDATES)
+        await _ensure_columns(db, "daily_candidates", {"ranking_reason": "TEXT", "rejected_by_ranking": "INTEGER DEFAULT 0"})
+        async with db.execute("SELECT ranking_reason, COUNT(*) AS count FROM daily_candidates WHERE COALESCE(rejected_by_ranking,0)=1 GROUP BY COALESCE(ranking_reason,'UNKNOWN') ORDER BY count DESC LIMIT 25") as cursor:
+            rejection_rows = [dict(row) for row in await cursor.fetchall()]
+
+    def dt(value):
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed
+        except Exception:
+            return None
+
+    def build(rows: list[dict]) -> dict:
+        closed = [p for p in rows if str(p.get("status") or "").upper() == "CLOSED"]
+        open_rows = [p for p in rows if str(p.get("status") or "OPEN").upper() != "CLOSED"]
+        realized = sum(float(p.get("profit_amount") or 0) for p in closed)
+        unrealized = sum(float(p.get("profit_amount") or 0) for p in open_rows)
+        wins = [p for p in closed if float(p.get("profit_amount") or 0) > 0]
+        losses = [p for p in closed if float(p.get("profit_amount") or 0) < 0]
+        gross_profit = sum(float(p.get("profit_amount") or 0) for p in wins)
+        gross_loss = sum(float(p.get("profit_amount") or 0) for p in losses)
+        hold_minutes = []
+        for p in closed:
+            start = dt(p.get("buy_date") or p.get("created_at"))
+            end = dt(p.get("closed_at") or p.get("updated_at"))
+            if start and end:
+                hold_minutes.append(max(0, (end - start).total_seconds() / 60))
+        total_closed = len(closed)
+        return {
+            "realized_pnl": round(realized, 2),
+            "unrealized_pnl": round(unrealized, 2),
+            "total_pnl": round(realized + unrealized, 2),
+            "win_rate": round((len(wins) / total_closed) * 100, 2) if total_closed else 0,
+            "loss_rate": round((len(losses) / total_closed) * 100, 2) if total_closed else 0,
+            "profit_factor": round(gross_profit / abs(gross_loss), 2) if gross_loss < 0 else (round(gross_profit, 2) if gross_profit > 0 else 0),
+            "average_win": round(gross_profit / len(wins), 2) if wins else 0,
+            "average_loss": round(gross_loss / len(losses), 2) if losses else 0,
+            "average_hold_time": round(sum(hold_minutes) / len(hold_minutes), 2) if hold_minutes else 0,
+            "number_of_trades": len(rows),
+            "open_positions": len(open_rows),
+            "closed_positions": total_closed,
+        }
+
+    swing = [p for p in positions if _normalize_strategy_type(p.get("strategy_type")) == "SWING"]
+    intraday = [p for p in positions if _normalize_strategy_type(p.get("strategy_type")) == "INTRADAY"]
+    payload = {"SWING": build(swing), "INTRADAY": build(intraday), "TOTAL": build(positions)}
+    payload["best_strategy"] = max(("SWING", "INTRADAY"), key=lambda k: payload[k]["total_pnl"])
+    payload["worst_strategy"] = min(("SWING", "INTRADAY"), key=lambda k: payload[k]["total_pnl"])
+    grade_perf: dict[str, dict] = {}
+    setup_perf: dict[str, dict] = {}
+    for p in positions:
+        for bucket, key in ((grade_perf, p.get("ranking_grade") or p.get("quality_grade") or "UNKNOWN"), (setup_perf, p.get("action") or p.get("reason") or "UNKNOWN")):
+            item = bucket.setdefault(str(key), {"trades": 0, "pnl": 0.0})
+            item["trades"] += 1
+            item["pnl"] = round(item["pnl"] + float(p.get("profit_amount") or 0), 2)
+    payload["ranking_grade_performance"] = grade_perf
+    payload["setup_performance"] = setup_perf
+    payload["rejection_reasons_frequency"] = {r.get("ranking_reason") or "UNKNOWN": r.get("count", 0) for r in rejection_rows}
+    return payload
 
 
 async def get_total_realized_pnl() -> float:
@@ -2321,7 +2485,13 @@ CREATE TABLE IF NOT EXISTS orders (
     trade_quality_score REAL,
     quality_grade TEXT,
     quality_components TEXT,
-    trade_quality_json TEXT
+    trade_quality_json TEXT,
+    ranking_score REAL,
+    ranking_grade TEXT,
+    ranking_components TEXT,
+    ranking_reason TEXT,
+    rejected_by_ranking INTEGER DEFAULT 0,
+    ranking_checked_at TEXT
 )
 """
 CREATE_EXECUTIONS_V2 = """
