@@ -274,24 +274,46 @@ async def _read_market_data_timestamp(db: aiosqlite.Connection) -> tuple[str | N
     return latest_at, source_payload
 
 
+def _broker_snapshot_position_count(snapshot: dict | None) -> int:
+    snapshot = snapshot or {}
+    positions = snapshot.get("positions")
+    if positions is None:
+        try:
+            positions = json.loads(snapshot.get("positions_json") or "[]")
+        except Exception:
+            positions = []
+    count = 0
+    for position in positions or []:
+        qty = position.get("position", position.get("quantity", position.get("qty")))
+        try:
+            has_qty = abs(float(qty)) > 0
+        except Exception:
+            has_qty = bool(qty)
+        if has_qty:
+            count += 1
+    return count
+
+
 async def _read_live_position_tracking_state() -> dict:
     raw = await database.get_app_state(LIVE_POSITION_TRACKER_STATE_KEY)
     open_positions = await database.get_open_positions()
+    broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
+    open_position_count = max(len(open_positions), _broker_snapshot_position_count(broker_snapshot) if _fresh_local_gateway_snapshot(broker_snapshot) else 0)
     if not raw:
         return {
-            "open_position_count": len(open_positions),
+            "open_position_count": open_position_count,
             "tracked_count": 0,
             "tracked_symbols": [],
             "last_refresh_at": None,
             "last_refresh_age_seconds": None,
-            "healthy": len(open_positions) == 0,
+            "healthy": open_position_count == 0,
             "source": "live_position_tracker",
         }
     try:
         status = json.loads(raw)
     except Exception as exc:
         return {
-            "open_position_count": len(open_positions),
+            "open_position_count": open_position_count,
             "tracked_count": 0,
             "tracked_symbols": [],
             "last_refresh_at": None,
@@ -300,7 +322,7 @@ async def _read_live_position_tracking_state() -> dict:
             "source": "live_position_tracker",
             "error": f"status unreadable: {exc}",
         }
-    status["open_position_count"] = len(open_positions)
+    status["open_position_count"] = open_position_count
     status["last_refresh_age_seconds"] = _age_seconds(status.get("last_refresh_at"))
     status.setdefault("source", "live_position_tracker")
     return status
@@ -324,7 +346,19 @@ def _read_live_position_tracking_state_sync() -> dict:
             ).fetchall()
         else:
             open_rows = []
-        open_position_count = len(open_rows)
+        broker_row = None
+        if _sync_table_exists(db, "broker_sync_snapshots"):
+            broker_row = db.execute(
+                "SELECT connected, synced_at, source, received_at, positions_json FROM broker_sync_snapshots ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        broker_snapshot = {
+            "connected": bool(broker_row[0]),
+            "synced_at": broker_row[1],
+            "source": broker_row[2],
+            "received_at": broker_row[3],
+            "positions_json": broker_row[4],
+        } if broker_row else {}
+        open_position_count = max(len(open_rows), _broker_snapshot_position_count(broker_snapshot) if _fresh_local_gateway_snapshot(broker_snapshot) else 0)
         row = db.execute(
             "SELECT value FROM app_state WHERE key = ?",
             (LIVE_POSITION_TRACKER_STATE_KEY,),
@@ -395,6 +429,7 @@ def _apply_live_position_tracking_snapshot(status: dict, live_tracking: dict, th
         if _is_live_position_tracker_reason(reason)
     ]
     refreshed["blocking_reasons"] = non_live_reasons + current_live_reasons
+    refreshed["degraded_reasons"] = _degraded_reasons(refreshed, thresholds)
 
     stale_data = dict(refreshed.get("stale_data") or {})
     stale_data["live_position_tracking"] = bool(current_live_reasons)
@@ -566,26 +601,41 @@ def _blocking_reasons(status: dict, thresholds: dict) -> list[str]:
     open_count = int(live_tracking.get("open_position_count") or 0)
     tracked_count = int(live_tracking.get("tracked_count") or 0)
     tracking_age = live_tracking.get("last_refresh_age_seconds")
-    execution_healthy = (
-        status.get("last_execution_sync_at") is not None
-        and (
-            execution_age is None
-            or execution_age <= thresholds["execution_stale_seconds"]
-            or use_broker_fallback
-        )
-    )
     if open_count > 0:
-        allow_tracker_gap = bool(use_broker_fallback and execution_healthy)
+        allow_tracker_gap = bool(use_broker_fallback)
         if not live_tracking.get("last_refresh_at") and not allow_tracker_gap:
             reasons.append(LIVE_POSITION_TRACKING_NO_REFRESH_REASON)
         elif tracking_age is not None and tracking_age > thresholds["position_tracking_stale_seconds"] and not allow_tracker_gap:
             reasons.append(f"{LIVE_POSITION_TRACKING_STALE_REASON_PREFIX} ({tracking_age}s)")
         if tracked_count < open_count and not allow_tracker_gap:
             reasons.append(f"{LIVE_POSITION_TRACKER_MISSING_REASON_PREFIX} ({tracked_count}/{open_count})")
-        if live_tracking.get("healthy") is False:
+        if live_tracking.get("healthy") is False and not allow_tracker_gap:
             reasons.append(LIVE_POSITION_TRACKING_UNHEALTHY_REASON)
 
     return reasons
+
+
+def _degraded_reasons(status: dict, thresholds: dict) -> list[str]:
+    reasons: list[str] = []
+    freshness = evaluate_broker_freshness(status, status.get("broker_snapshot") or {})
+    use_broker_fallback = bool(freshness.get("broker_sync_connected") and freshness.get("broker_sync_fresh"))
+    if use_broker_fallback and not bool(status.get("shared_ib_connected") or (status.get("heartbeat") or {}).get("connected")):
+        reasons.append("Direct IBKR/TWS unavailable; using fresh broker source-of-truth snapshot")
+
+    live_tracking = status.get("live_position_tracking") or {}
+    open_count = int(live_tracking.get("open_position_count") or 0)
+    tracked_count = int(live_tracking.get("tracked_count") or 0)
+    tracking_age = live_tracking.get("last_refresh_age_seconds")
+    if use_broker_fallback and open_count > 0:
+        if not live_tracking.get("last_refresh_at"):
+            reasons.append(LIVE_POSITION_TRACKING_NO_REFRESH_REASON)
+        elif tracking_age is not None and tracking_age > thresholds["position_tracking_stale_seconds"]:
+            reasons.append(f"{LIVE_POSITION_TRACKING_STALE_REASON_PREFIX} ({tracking_age}s)")
+        if tracked_count < open_count:
+            reasons.append(f"{LIVE_POSITION_TRACKER_MISSING_REASON_PREFIX} ({tracked_count}/{open_count})")
+        if live_tracking.get("healthy") is False:
+            reasons.append(LIVE_POSITION_TRACKING_UNHEALTHY_REASON)
+    return list(dict.fromkeys(reasons))
 
 
 async def _apply_circuit_breaker(status: dict, thresholds: dict) -> None:
@@ -647,6 +697,7 @@ async def run_watchdog_once() -> dict:
         await _clear_alert("tws_disconnected")
 
     status["blocking_reasons"] = _blocking_reasons(status, thresholds)
+    status["degraded_reasons"] = _degraded_reasons(status, thresholds)
     live_position_tracker_recovered = (
         any(_is_live_position_tracker_reason(reason) for reason in previous.get("blocking_reasons") or [])
         and not any(_is_live_position_tracker_reason(reason) for reason in status["blocking_reasons"])

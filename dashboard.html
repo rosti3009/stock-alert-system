@@ -1148,25 +1148,27 @@ function updateOperationalHealth(){
   statusEl.textContent = status;
   statusEl.className = status === "HEALTHY" || status === "ACTIVE" ? "system-active" : status === "BLOCKED" || status === "ERROR" ? "system-blocked" : "system-degraded";
 
-  const tws = dashboardHealth.tws_connection || {};
   const watchdogHealth = dashboardHealth.watchdog_health || {};
-  const tracker = dashboardHealth.live_tracker_health || {};
   const scanner = dashboardHealth.scanner_health || dashboardHealth;
-  const market = dashboardHealth.market_data_freshness || {};
   const circuit = dashboardHealth.circuit_breaker_state || {};
   const startup = dashboardHealth.startup_recovery_state || {};
   const autoTrading = dashboardHealth.auto_trading_status || {};
 
-  const brokerConnected = dashboardHealth.broker_connected ?? tws.tws_connected;
-  document.getElementById("healthTws").textContent = statusText(brokerConnected, "CONNECTED", "OFFLINE");
-  document.getElementById("healthWatchdog").textContent = statusText(dashboardHealth.watchdog_connected ?? watchdogHealth.healthy, "HEALTHY", watchdogHealth.trading_blocked ? "BLOCKED" : "DEGRADED");
+  const brokerConnected = Boolean(dashboardHealth.broker_connected);
+  const localGatewayConnected = Boolean(dashboardHealth.local_gateway_connected);
+  document.getElementById("healthTws").textContent = localGatewayConnected
+    ? "LOCAL GATEWAY CONNECTED"
+    : statusText(brokerConnected, "CONNECTED", "OFFLINE");
+  document.getElementById("healthWatchdog").textContent = dashboardHealth.status === "BLOCKED"
+    ? "BLOCKED"
+    : statusText(dashboardHealth.watchdog_connected, "HEALTHY", "DEGRADED");
   document.getElementById("healthScanner").textContent = scanner.scan_running ? "RUNNING" : "READY";
-  document.getElementById("healthTracker").textContent = tracker.healthy === undefined ? "UNKNOWN" : statusText(tracker.healthy, "HEALTHY", "DEGRADED");
-  document.getElementById("healthMarketData").textContent = market.market_data_feed_active === false || dashboardHealth.broker_snapshot_stale ? "STALE" : "FRESH";
+  document.getElementById("healthTracker").textContent = dashboardHealth.live_tracker_healthy === undefined ? "UNKNOWN" : statusText(dashboardHealth.live_tracker_healthy, "HEALTHY", "DEGRADED");
+  document.getElementById("healthMarketData").textContent = dashboardHealth.market_data_feed_active === false || dashboardHealth.broker_snapshot_stale ? "STALE" : "FRESH";
   document.getElementById("healthCircuit").textContent = (dashboardHealth.circuit_breaker_tripped ?? circuit.tripped) ? "TRIPPED" : "CLEAR";
   document.getElementById("healthStartup").textContent = startup.ok === false ? "PENDING" : "PASSED";
 
-  const reasons = dashboardHealth.blocking_reasons || autoTrading.blocking_reasons || [];
+  const reasons = (dashboardHealth.blocking_reasons || []).concat(dashboardHealth.degraded_reasons || [], autoTrading.blocking_reasons || []);
   const operations = dashboardHealth.last_operations || {};
   const latest = Object.values(operations).sort((a,b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")))[0];
   document.getElementById("lastOperationSummary").textContent = latest

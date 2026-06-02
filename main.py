@@ -45,7 +45,7 @@ import strategy_mode
 import intraday_momentum_engine
 import strategy_portfolio
 import trade_quality_engine
-from broker_freshness import evaluate_broker_freshness
+from broker_freshness import broker_snapshot_freshness, evaluate_broker_freshness, is_fresh_local_gateway_snapshot
 from tws_connection_manager import is_ib_connected as shared_ib_connected
 from execution_quality import evaluate_execution_quality, summarize_execution_quality
 from auto_trader import process_auto_trading
@@ -157,37 +157,6 @@ async def _get_dashboard_operations() -> dict:
         return {}
 
 
-
-def _parse_iso_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-
-
-def broker_snapshot_freshness(snapshot: dict | None, *, max_age_seconds: int | None = None) -> dict:
-    snapshot = snapshot or {}
-    max_age = int(max_age_seconds or getattr(config, "BROKER_SNAPSHOT_MAX_AGE_SECONDS", 60))
-    synced_at = _parse_iso_datetime(snapshot.get("synced_at") or snapshot.get("received_at"))
-    age = None
-    if synced_at:
-        if synced_at.tzinfo is None:
-            synced_at = synced_at.replace(tzinfo=timezone.utc)
-        age = max(0.0, (utc_now() - synced_at.astimezone(timezone.utc)).total_seconds())
-    connected = bool(snapshot.get("connected"))
-    fresh = bool(snapshot) and connected and age is not None and age <= max_age
-    reasons = []
-    if not snapshot:
-        reasons.append("No broker snapshot has been pushed by the local gateway")
-    if snapshot and not connected:
-        reasons.append("TWS local gateway is disconnected")
-    if snapshot and age is None:
-        reasons.append("Broker snapshot is missing synced_at")
-    if age is not None and age > max_age:
-        reasons.append(f"Broker snapshot is stale ({age:.1f}s > {max_age}s)")
-    return {"fresh": fresh, "connected": connected, "age_seconds": age, "max_age_seconds": max_age, "reasons": reasons}
 
 def no_cache_headers() -> dict:
     return {
@@ -1012,6 +981,8 @@ async def refresh_open_positions_safe() -> None:
         log.info("Live position refresh skipped: previous refresh still running")
         return
 
+    started = time.monotonic()
+    timed_out = False
     async with _positions_lock:
         try:
             await asyncio.wait_for(
@@ -1020,13 +991,26 @@ async def refresh_open_positions_safe() -> None:
             )
 
         except asyncio.TimeoutError:
+            timed_out = True
+            broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
+            local_gateway_fresh = is_fresh_local_gateway_snapshot(broker_snapshot)
             log.warning(
-                "Live position refresh timed out after %s seconds",
+                "Live position refresh timed out after %s seconds | local_gateway_fresh=%s broker_snapshot_age_seconds=%s",
                 POSITION_REFRESH_TIMEOUT_SECONDS,
+                local_gateway_fresh,
+                broker_snapshot_freshness(broker_snapshot).get("age_seconds"),
             )
 
         except Exception:
             log.exception("Live position refresh failed")
+
+        finally:
+            duration = time.monotonic() - started
+            log.info(
+                "Live position refresh completed | duration_seconds=%.2f timed_out=%s",
+                duration,
+                timed_out,
+            )
 
 async def refresh_open_positions() -> list[dict]:
     return await live_position_tracker.refresh_live_tracked_positions(scan_symbol)
@@ -1323,6 +1307,7 @@ async def lifespan(app: FastAPI):
         replace_existing=True,
         max_instances=1,
         coalesce=True,
+        misfire_grace_time=60,
     )
 
     log.info(
@@ -2105,20 +2090,6 @@ async def get_scheduler_status() -> dict:
     }
 
 
-def _is_fresh_local_gateway_snapshot(snapshot: dict | None) -> bool:
-    snapshot = snapshot or {}
-    return bool(
-        str(snapshot.get("source") or "").upper() == "LOCAL_GATEWAY_PUSH"
-        and snapshot.get("connected")
-        and broker_snapshot_freshness(snapshot).get("fresh")
-    )
-
-
-def _broker_connected_from_snapshot(snapshot: dict | None) -> bool:
-    snapshot = snapshot or {}
-    return bool(broker_snapshot_freshness(snapshot).get("fresh") and snapshot.get("connected"))
-
-
 async def build_auto_trading_status() -> dict:
     app_state = await _get_auto_trading_state()
     settings = await database.get_strategy_settings()
@@ -2126,7 +2097,10 @@ async def build_auto_trading_status() -> dict:
     circuit = await get_circuit_breaker_state()
     watchdog_status = await watchdog.get_watchdog_status()
     broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
-    broker_fresh = bool(broker_snapshot_freshness(broker_snapshot).get("fresh"))
+    broker_freshness = broker_snapshot_freshness(broker_snapshot)
+    broker_decision = evaluate_broker_freshness(watchdog_status, broker_snapshot)
+    broker_fresh = bool(broker_decision.get("broker_sync_fresh"))
+    broker_connected = bool(broker_decision.get("effective_connected"))
 
     config_enabled = bool(getattr(config, "AUTO_SEND_ORDERS", True)) and str(getattr(config, "TRADING_MODE", "")).upper() != "OFF"
     app_enabled = bool(app_state.get("enabled"))
@@ -2141,6 +2115,7 @@ async def build_auto_trading_status() -> dict:
         source = "config"
 
     blocking_reasons: list[str] = []
+    degraded_reasons: list[str] = []
     if not settings_enabled:
         blocking_reasons.append("Auto trader disabled in strategy settings")
     if not app_enabled:
@@ -2153,8 +2128,13 @@ async def build_auto_trading_status() -> dict:
         blocking_reasons.append(f"Circuit breaker tripped: {circuit.get('reason') or 'unknown reason'}")
     if watchdog_status.get("trading_blocked"):
         blocking_reasons.extend(watchdog_status.get("blocking_reasons") or ["Watchdog blocked trading"])
-    if not broker_fresh:
+    if not broker_connected:
         blocking_reasons.append("Broker source-of-truth snapshot is stale or disconnected")
+    elif not broker_fresh:
+        degraded_reasons.append("Direct broker connection is available but broker source-of-truth snapshot is stale")
+    degraded_reasons.extend(watchdog_status.get("degraded_reasons") or [])
+    if broker_decision.get("local_gateway_connected") and not broker_decision.get("direct_connected"):
+        degraded_reasons.append("Direct IBKR/TWS unavailable; using fresh LOCAL_GATEWAY_PUSH snapshot")
 
     return {
         "enabled": bool(settings_enabled and app_enabled and config_enabled and paper_enabled),
@@ -2162,11 +2142,14 @@ async def build_auto_trading_status() -> dict:
         "paper_trading_enabled": paper_enabled,
         "blocked": bool(blocking_reasons),
         "blocking_reasons": list(dict.fromkeys(str(r) for r in blocking_reasons if r)),
+        "degraded_reasons": list(dict.fromkeys(str(r) for r in degraded_reasons if r)),
+        "broker_connected": broker_connected,
+        "local_gateway_connected": bool(broker_decision.get("local_gateway_connected")),
         "broker_snapshot_fresh": broker_fresh,
+        "broker_snapshot_age_seconds": broker_freshness.get("age_seconds"),
         "active_strategy_mode": active_mode.value if hasattr(active_mode, "value") else str(active_mode),
         "active_risk_profile": settings.get("risk_profile") or getattr(config, "PAPER_TRAINING_PROFILE", None),
     }
-
 
 async def build_system_health() -> dict:
     broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
@@ -2176,48 +2159,67 @@ async def build_system_health() -> dict:
     scheduler_status = await get_scheduler_status()
     auto_status = await build_auto_trading_status()
     circuit = await get_circuit_breaker_state()
+    broker_decision = evaluate_broker_freshness(watchdog_status, broker_snapshot)
 
-    local_gateway_connected = bool(_is_fresh_local_gateway_snapshot(broker_snapshot))
-    broker_connected = bool(local_gateway_connected or _broker_connected_from_snapshot(broker_snapshot) or watchdog_status.get("tws_connected"))
-    broker_snapshot_stale = bool(broker_snapshot) and not bool(freshness.get("fresh"))
+    local_gateway_connected = bool(broker_decision.get("local_gateway_connected"))
+    broker_snapshot_fresh = bool(broker_decision.get("broker_sync_fresh"))
+    broker_connected = bool(broker_decision.get("effective_connected"))
+    broker_snapshot_stale = bool(broker_snapshot) and not broker_snapshot_fresh
+    live_tracking = watchdog_status.get("live_position_tracking") or await live_position_tracker.get_tracker_status()
+    live_tracker_healthy = bool(live_tracking.get("healthy") is not False and not (watchdog_status.get("stale_data") or {}).get("live_position_tracking"))
 
     blocking_reasons: list[str] = []
+    degraded_reasons: list[str] = []
     if not broker_connected:
         blocking_reasons.append("Broker source-of-truth is disconnected")
-    if broker_snapshot_stale:
+    if broker_snapshot_stale and not broker_connected:
         blocking_reasons.extend(freshness.get("reasons") or ["Broker snapshot is stale"])
-    if watchdog_status.get("trading_blocked") and not local_gateway_connected:
+    elif broker_snapshot_stale:
+        degraded_reasons.extend(freshness.get("reasons") or ["Broker snapshot is stale"])
+    if watchdog_status.get("trading_blocked"):
         blocking_reasons.extend(watchdog_status.get("blocking_reasons") or [])
+    degraded_reasons.extend(watchdog_status.get("degraded_reasons") or [])
+    if local_gateway_connected and not broker_decision.get("direct_connected"):
+        degraded_reasons.append("Direct IBKR/TWS unavailable; using fresh LOCAL_GATEWAY_PUSH snapshot")
     if circuit.get("tripped"):
         blocking_reasons.append(f"Circuit breaker tripped: {circuit.get('reason') or 'unknown reason'}")
     if auto_status.get("blocked"):
-        blocking_reasons.extend(auto_status.get("blocking_reasons") or [])
+        degraded_reasons.extend(auto_status.get("blocking_reasons") or [])
+    degraded_reasons.extend(auto_status.get("degraded_reasons") or [])
 
-    unique_reasons = list(dict.fromkeys(str(r) for r in blocking_reasons if r))
-    if circuit.get("tripped") or not auto_status.get("enabled"):
+    unique_blocking = list(dict.fromkeys(str(r) for r in blocking_reasons if r))
+    unique_degraded = [
+        r for r in list(dict.fromkeys(str(r) for r in degraded_reasons if r))
+        if r not in unique_blocking
+    ]
+    if unique_blocking:
         status = "BLOCKED"
-    elif unique_reasons or not broker_connected:
+    elif unique_degraded or not auto_status.get("enabled"):
         status = "DEGRADED"
     else:
-        status = "HEALTHY"
+        status = "ACTIVE"
 
     return {
-        "ok": status == "HEALTHY",
+        "ok": status != "BLOCKED",
         "status": status,
         "broker_connected": broker_connected,
         "local_gateway_connected": local_gateway_connected,
+        "broker_snapshot_fresh": broker_snapshot_fresh,
         "broker_snapshot_stale": broker_snapshot_stale,
         "broker_snapshot_age_seconds": freshness.get("age_seconds"),
         "watchdog_connected": bool(watchdog_status.get("tws_connected")),
+        "live_tracker_healthy": live_tracker_healthy,
         "scanner_running": SCANNER_JOB_ID in scheduler_status.get("active_jobs", []),
         "scan_running": bool(scanner.get("scan_running")),
+        "market_data_feed_active": bool(watchdog_status.get("market_data_feed_active")),
         "auto_trader_enabled": bool(auto_status.get("enabled")),
         "circuit_breaker_tripped": bool(circuit.get("tripped")),
         "last_scan_time": scanner.get("last_scan_at"),
         "last_broker_sync": broker_snapshot.get("synced_at") or broker_snapshot.get("received_at"),
-        "blocking_reasons": unique_reasons,
+        "connection_source": broker_decision.get("freshness_source"),
+        "blocking_reasons": unique_blocking,
+        "degraded_reasons": unique_degraded,
     }
-
 
 
 @app.get("/api/system-health")

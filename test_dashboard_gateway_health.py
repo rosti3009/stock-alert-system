@@ -35,7 +35,7 @@ def teardown_db(original_db):
     database.DB_PATH = original_db
 
 
-def fresh_gateway_snapshot():
+def fresh_gateway_snapshot(positions=None):
     now = datetime.now(timezone.utc).isoformat()
     return {
         "ok": True,
@@ -43,7 +43,8 @@ def fresh_gateway_snapshot():
         "source": "LOCAL_GATEWAY_PUSH",
         "synced_at": now,
         "received_at": now,
-        "positions_json": "[]",
+        "positions": positions or [],
+        "positions_json": json.dumps(positions or []),
         "open_orders_json": "[]",
         "executions_json": "[]",
         "errors_json": "[]",
@@ -149,3 +150,140 @@ def test_dashboard_fetch_failure_uses_safe_rendering_fallbacks():
     assert "/api/system-health" in script
     assert "/api/auto-trading/status" in script
     assert "Dashboard render error" in script
+
+
+def stale_gateway_snapshot():
+    old = datetime(2020, 1, 1, tzinfo=timezone.utc).isoformat()
+    payload = fresh_gateway_snapshot()
+    payload["synced_at"] = old
+    payload["received_at"] = old
+    return payload
+
+
+def test_fresh_gateway_and_direct_ibkr_refused_is_not_blocked(tmp_path, monkeypatch):
+    original_db = setup_db(tmp_path)
+    try:
+        run_async(database.save_broker_sync_snapshot(fresh_gateway_snapshot()))
+        monkeypatch.setattr(watchdog, "is_ib_connected", lambda: False)
+        status = run_async(watchdog.run_watchdog_once())
+        health = run_async(main.build_system_health())
+
+        assert status["trading_blocked"] is False
+        assert "TWS/API disconnected" not in status["blocking_reasons"]
+        assert status["local_gateway_connected"] is True
+        assert health["status"] in {"ACTIVE", "DEGRADED"}
+        assert health["status"] != "BLOCKED"
+        assert health["broker_connected"] is True
+        assert health["local_gateway_connected"] is True
+    finally:
+        teardown_db(original_db)
+
+
+def test_stale_gateway_and_direct_ibkr_disconnected_blocks(tmp_path, monkeypatch):
+    original_db = setup_db(tmp_path)
+    try:
+        run_async(database.save_broker_sync_snapshot(stale_gateway_snapshot()))
+        monkeypatch.setattr(watchdog, "is_ib_connected", lambda: False)
+        monkeypatch.setattr(watchdog, "_attempt_reconnect_sync", lambda: {"ok": False, "result": "failed", "error": "Connection refused"})
+        status = run_async(watchdog.run_watchdog_once())
+        health = run_async(main.build_system_health())
+
+        assert status["trading_blocked"] is True
+        assert "TWS/API disconnected" in status["blocking_reasons"]
+        assert health["status"] == "BLOCKED"
+        assert health["broker_connected"] is False
+        assert health["local_gateway_connected"] is False
+    finally:
+        teardown_db(original_db)
+
+
+def test_live_tracker_stale_with_fresh_gateway_is_degraded_not_blocked(tmp_path, monkeypatch):
+    original_db = setup_db(tmp_path)
+    try:
+        run_async(database.save_broker_sync_snapshot(fresh_gateway_snapshot([{"symbol": "AAPL", "position": 1}])))
+        stale_tracker = {
+            "source": "live_position_tracker",
+            "last_refresh_at": datetime(2020, 1, 1, tzinfo=timezone.utc).isoformat(),
+            "open_position_count": 1,
+            "tracked_count": 1,
+            "healthy": False,
+            "positions": [{"symbol": "AAPL", "last_refresh_at": datetime(2020, 1, 1, tzinfo=timezone.utc).isoformat()}],
+        }
+        run_async(database.set_app_state(watchdog.LIVE_POSITION_TRACKER_STATE_KEY, json.dumps(stale_tracker)))
+        monkeypatch.setattr(watchdog, "is_ib_connected", lambda: False)
+
+        status = run_async(watchdog.run_watchdog_once())
+        health = run_async(main.build_system_health())
+
+        assert status["trading_blocked"] is False
+        assert not any("Live position tracking" in reason for reason in status["blocking_reasons"])
+        assert any("Live position tracking" in reason or "Live position tracker" in reason for reason in status["degraded_reasons"])
+        assert health["status"] == "DEGRADED"
+        assert health["live_tracker_healthy"] is False
+    finally:
+        teardown_db(original_db)
+
+
+def test_refresh_timeout_does_not_block_while_gateway_snapshot_is_fresh(tmp_path, monkeypatch):
+    original_db = setup_db(tmp_path)
+    try:
+        run_async(database.save_broker_sync_snapshot(fresh_gateway_snapshot()))
+
+        async def slow_refresh():
+            await asyncio.sleep(0.02)
+            return []
+
+        monkeypatch.setattr(main, "POSITION_REFRESH_TIMEOUT_SECONDS", 0.001)
+        monkeypatch.setattr(main, "refresh_open_positions", slow_refresh)
+        monkeypatch.setattr(watchdog, "is_ib_connected", lambda: False)
+
+        run_async(main.refresh_open_positions_safe())
+        status = run_async(watchdog.run_watchdog_once())
+        health = run_async(main.build_system_health())
+
+        assert status["trading_blocked"] is False
+        assert health["status"] != "BLOCKED"
+        assert health["broker_snapshot_fresh"] is True
+    finally:
+        teardown_db(original_db)
+
+
+def test_system_health_fields_are_consistent(tmp_path, monkeypatch):
+    original_db = setup_db(tmp_path)
+
+    async def fake_watchdog_status():
+        return {
+            "healthy": True,
+            "tws_connected": True,
+            "trading_blocked": False,
+            "blocking_reasons": [],
+            "degraded_reasons": [],
+            "live_position_tracking": {"healthy": True},
+            "market_data_feed_active": True,
+        }
+
+    try:
+        run_async(database.save_broker_sync_snapshot(fresh_gateway_snapshot()))
+        monkeypatch.setattr(main.watchdog, "get_watchdog_status", fake_watchdog_status)
+        data = payload(run_async(main.api_system_health()))
+
+        for field in [
+            "ok",
+            "status",
+            "broker_connected",
+            "local_gateway_connected",
+            "broker_snapshot_fresh",
+            "broker_snapshot_age_seconds",
+            "watchdog_connected",
+            "live_tracker_healthy",
+            "auto_trader_enabled",
+            "circuit_breaker_tripped",
+            "blocking_reasons",
+            "degraded_reasons",
+        ]:
+            assert field in data
+        assert data["broker_connected"] is True
+        assert data["local_gateway_connected"] is True
+        assert data["status"] in {"ACTIVE", "DEGRADED", "BLOCKED"}
+    finally:
+        teardown_db(original_db)
