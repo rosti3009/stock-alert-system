@@ -18,6 +18,7 @@ from trading_safety import (
 
 import config
 import database
+import broker_sync
 import order_lifecycle
 import portfolio_risk_engine
 import strategy_mode
@@ -465,8 +466,9 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
         return
 
     persisted_auto_trading = await database.get_app_state("auto_trading_enabled", "true")
-    if str(persisted_auto_trading).lower() != "true":
-        log.info("AUTO TRADER disabled by persisted app state")
+    active_settings = await database.get_strategy_settings()
+    if str(persisted_auto_trading).lower() != "true" or not active_settings.get("auto_trader_enabled", True):
+        log.info("AUTO TRADER disabled by persisted app state or strategy settings")
         return
 
     from circuit_breaker import get_circuit_breaker_state
@@ -515,10 +517,10 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
 
     regime = market.get("regime")
     allow_new_buys = market.get("allow_new_buys", True)
-    min_score_override = int(market.get("min_score_override", MIN_SCORE_TO_BUY))
+    min_score_override = int(market.get("min_score_override", active_settings.get("swing_min_score", MIN_SCORE_TO_BUY)))
     size_factor = float(market.get("position_size_factor", 1.0))
     if strategy_mode.is_intraday_mode(active_strategy_mode):
-        min_score_override = int(active_rules["min_score_to_buy"])
+        min_score_override = int(active_settings.get("intraday_min_score") or active_rules["min_score_to_buy"])
         size_factor *= float(active_rules["position_size_factor"])
 
     open_positions = await database.get_open_positions()
@@ -1016,9 +1018,16 @@ async def auto_open_position(
         }
 
         try:
+            latest_broker_sync = await broker_sync.run_broker_sync_once()
+            await database.save_broker_sync_snapshot(latest_broker_sync)
+            await database.reconcile_broker_source_of_truth(latest_broker_sync)
+            broker_symbols = {str(p.get("symbol") or "").upper() for p in latest_broker_sync.get("positions", [])}
+            if symbol in broker_symbols:
+                await _journal_buy_decision(row, "BUY_BLOCKED_ALREADY_IN_BROKER", "BLOCKED", "Broker source of truth already has this position", market)
+                return False
             await database.add_position(
                 payload,
-                max_open_positions=int(strategy_mode.active_rules((market or {}).get("strategy_mode")).get("max_open_positions", getattr(config, "MAX_OPEN_POSITIONS", 10))),
+                max_open_positions=int(active_settings.get("max_open_positions") or 0),
                 enforce_max_open_positions=config.is_fixed_count_position_limit_mode(),
             )
 

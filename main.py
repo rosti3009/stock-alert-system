@@ -7,6 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, Body, Request
@@ -309,6 +310,7 @@ async def _set_auto_trading_state(enabled: bool, *, source: str, reason: str) ->
     await database.set_app_state(AUTO_TRADING_ENABLED_KEY, "true" if enabled else "false")
     await database.set_app_state(AUTO_TRADING_STATE_SOURCE_KEY, source)
     await database.set_app_state(AUTO_TRADING_STATE_REASON_KEY, reason)
+    await database.set_auto_trader_enabled(enabled)
 
 
 async def _get_auto_trading_state() -> dict:
@@ -1402,6 +1404,12 @@ async def lifespan(app: FastAPI):
     )
 
     if broker_jobs_enabled:
+        scheduler.add_job(run_unified_broker_sync, "interval", seconds=30, id="broker_source_of_truth_sync", replace_existing=True, max_instances=1, coalesce=True)
+        log.info("IBKR/TWS source-of-truth sync started — every 30 seconds")
+    else:
+        log.info("IBKR/TWS source-of-truth sync disabled | reason=%s", broker_jobs_reason)
+
+    if broker_jobs_enabled:
         scheduler.add_job(account_sync.run_reconciliation_status_check, "interval", seconds=60, id="account_sync_reconciliation_status", replace_existing=True, max_instances=1, coalesce=True)
 
     log.info(
@@ -1851,6 +1859,40 @@ async def api_paper_reset_session():
             headers=no_cache_headers(),
         )
 
+
+
+@app.get("/api/strategy-settings")
+async def api_get_strategy_settings():
+    return JSONResponse({"ok": True, "settings": await database.get_strategy_settings()}, headers=no_cache_headers())
+
+
+@app.post("/api/strategy-settings")
+async def api_save_strategy_settings(payload: dict = Body(...)):
+    settings_payload = payload.get("settings") if isinstance(payload.get("settings"), dict) else payload
+    settings = await database.save_strategy_settings(settings_payload)
+    await database.set_app_state("strategy_settings_last_reload", utc_now().isoformat())
+    return JSONResponse({"ok": True, "settings": settings, "message": "Strategy settings saved and active"}, headers=no_cache_headers())
+
+
+@app.post("/api/strategy-settings/preset/{preset_name}")
+async def api_strategy_settings_preset(preset_name: str):
+    try:
+        settings = await database.apply_strategy_preset(preset_name)
+        mode = str(settings.get("active_strategy_mode") or "").lower()
+        if mode == "intraday":
+            await strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.INTRADAY_MOMENTUM)
+        elif mode == "swing":
+            await strategy_mode.set_strategy_mode(strategy_mode.StrategyMode.SWING_DEFAULT)
+        scanner = await configure_scanner_job()
+        return JSONResponse({"ok": True, "preset": preset_name, "settings": settings, "scanner": scanner}, headers=no_cache_headers())
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400, headers=no_cache_headers())
+
+
+@app.post("/api/strategy-settings/reload-engine")
+async def api_strategy_settings_reload_engine():
+    scanner = await configure_scanner_job()
+    return JSONResponse({"ok": True, "settings": await database.get_strategy_settings(), "scanner": scanner, "reloaded_at": utc_now().isoformat()}, headers=no_cache_headers())
 
 @app.get("/api/strategy-mode")
 async def api_strategy_mode():
@@ -2482,6 +2524,7 @@ async def api_ranking_rejected(limit: int = 100):
     return JSONResponse({"ok": True, "candidates": await database.get_ranking_candidates(rejected=True, limit=limit)}, headers=no_cache_headers())
 
 
+@app.get("/api/ranking/combined")
 @app.get("/api/ranking/summary")
 async def api_ranking_summary(limit: int = 200):
     latest = await database.get_latest_candidates(limit)
@@ -2648,7 +2691,8 @@ async def _get_broker_snapshot_for_audit() -> tuple[dict, list[dict], list[str]]
     except Exception as exc:
         log.warning("Broker audit live snapshot failed; falling back to latest DB snapshot: %s", exc)
         errors.append(str(exc))
-        latest = await database.get_latest_broker_sync_snapshot() or {}
+        latest = await database.get_latest_broker_sync_snapshot() if hasattr(database, "get_latest_broker_sync_snapshot") else {}
+        latest = latest or {}
         raw_positions = latest.get("positions_json") or "[]"
         try:
             positions = json.loads(raw_positions) if isinstance(raw_positions, str) else raw_positions
@@ -2861,6 +2905,7 @@ async def api_intraday_force_close():
         )
 
 
+@app.get("/api/performance/summary")
 @app.get("/api/performance")
 async def api_performance():
     return JSONResponse(await database.get_performance_summary(), headers=no_cache_headers())
@@ -2875,6 +2920,7 @@ async def api_performance_advanced():
     return JSONResponse(await database.get_advanced_performance(), headers=no_cache_headers())
 
 
+@app.get("/api/performance/equity-curve")
 @app.get("/api/equity-curve")
 async def api_equity_curve(limit: int = 500):
     return JSONResponse(await account_sync.get_equity_curve(limit=limit), headers=no_cache_headers())
@@ -2946,7 +2992,14 @@ def _merge_positions_with_truth(
             "reason": "Present in broker snapshot",
         }
         position = dict(db_row)
-        position["position_truth_source"] = "BROKER_SNAPSHOT"
+        position["position_truth_source"] = "IBKR"
+        position["broker_quantity"] = _safe_float(broker.get("quantity", broker.get("position")))
+        position["broker_avg_cost"] = _safe_float(broker.get("avg_cost", broker.get("avgCost")))
+        position["broker_market_price"] = _safe_float(broker.get("market_price", broker.get("marketPrice")))
+        position["broker_market_value"] = _safe_float(broker.get("market_value"))
+        position["broker_unrealized_pnl"] = _safe_float(broker.get("unrealized_pnl", broker.get("unrealizedPNL")))
+        position["broker_last_sync_at"] = broker_snapshot.get("synced_at")
+        position["sync_status"] = "MATCHED"
 
         live = tracker_by_symbol.get(symbol)
         position["live_tracking"] = bool(live)
@@ -2971,7 +3024,8 @@ def _merge_positions_with_truth(
             continue
         position = dict(row)
         live = tracker_by_symbol.get(symbol)
-        position["position_truth_source"] = "DATABASE"
+        position["position_truth_source"] = "IBKR"
+        position["sync_status"] = "MISSING_FROM_BROKER"
         position["live_tracking"] = bool(live and str(position.get("status") or "").upper() == "OPEN")
         position["live_tracking_source"] = (live or {}).get("source")
         position["live_tracking_last_refresh_at"] = (live or {}).get("last_refresh_at")
@@ -3656,6 +3710,53 @@ async def api_order_cancel(order_id: int):
         return JSONResponse({"ok": False, "mode": "PAPER_ONLY", "errors": [str(exc)]}, status_code=500, headers=no_cache_headers())
 
 
+async def run_unified_broker_sync(*, timeout_seconds: float | None = None) -> dict:
+    """Fetch IBKR/TWS truth, persist a snapshot, reconcile DB positions, orders, and executions."""
+    timeout = float(timeout_seconds or BROKER_SYNC_RUN_TIMEOUT_SECONDS)
+    try:
+        snapshot = await asyncio.wait_for(broker_sync.run_broker_sync_once(), timeout=timeout) or {}
+    except asyncio.TimeoutError:
+        latest = await database.get_latest_broker_sync_snapshot() if hasattr(database, "get_latest_broker_sync_snapshot") else {}
+        latest = latest or {}
+        snapshot = {
+            "ok": False, "connected": False, "error_type": "timeout",
+            "errors": [f"broker sync timed out after {timeout}s"],
+            "timeout_seconds": timeout, "synced_at": utc_now().isoformat(),
+            "last_successful_snapshot_at": latest.get("synced_at") if latest.get("ok") else None,
+            "equity": {}, "positions": [], "open_orders": [], "executions": [],
+        }
+    if not isinstance(snapshot, dict):
+        snapshot = {"ok": False, "connected": False, "errors": ["malformed broker response"], "positions": [], "open_orders": [], "executions": [], "equity": {}}
+    if hasattr(database, "save_broker_sync_snapshot"):
+        await database.save_broker_sync_snapshot(snapshot)
+    reconciliation = await database.reconcile_broker_source_of_truth(snapshot) if hasattr(database, "reconcile_broker_source_of_truth") else {"ok": bool(snapshot.get("ok")), "skipped": True}
+    orders = await database.reconcile_orders_and_executions(snapshot) if hasattr(database, "reconcile_orders_and_executions") else {"events": []}
+    try:
+        legacy_reconciliation = await reconciliation_engine.run_reconciliation(snapshot)
+    except Exception as exc:
+        legacy_reconciliation = {"ok": False, "errors": [str(exc)]}
+    return {
+        "ok": bool(snapshot.get("ok")),
+        "connected": bool(snapshot.get("connected")),
+        "synced_at": snapshot.get("synced_at"),
+        "account": snapshot.get("account"),
+        "equity": snapshot.get("equity") or {},
+        "positions": snapshot.get("positions") or [],
+        "open_orders": snapshot.get("open_orders") or [],
+        "executions": snapshot.get("executions") or [],
+        "errors": snapshot.get("errors") or [],
+        "timeout_seconds": snapshot.get("timeout_seconds"),
+        "active_ib_connected": bool(snapshot.get("connected")),
+        "shared_ib_connected": bool(shared_ib_connected()),
+        "client_id": int(getattr(config, "IBKR_CLIENT_ID", 0)),
+        "reconciliation": reconciliation,
+        "orders_and_executions": orders,
+        "legacy_reconciliation": legacy_reconciliation,
+        "position_truth_source": "IBKR",
+        "source": "IBKR_TWS_SOURCE_OF_TRUTH",
+    }
+
+
 @app.get("/api/broker-sync/status")
 async def api_broker_sync_status():
     def _safe_json_array(value) -> list:
@@ -3709,58 +3810,8 @@ async def api_broker_sync_status():
 
 @app.post("/api/broker-sync/run")
 async def api_broker_sync_run():
-    def _safe_array(payload: dict[str, Any], key: str) -> list:
-        value = payload.get(key)
-        if isinstance(value, list):
-            return value
-        return []
-
     try:
-        try:
-            result = await asyncio.wait_for(
-                broker_sync.run_broker_sync_once(),
-                timeout=BROKER_SYNC_RUN_TIMEOUT_SECONDS,
-            ) or {}
-        except asyncio.TimeoutError:
-            last_snapshot = await (database.get_latest_broker_sync_snapshot() if hasattr(database, "get_latest_broker_sync_snapshot") else asyncio.sleep(0, result={})) or {}
-            result = {
-                "ok": False,
-                "connected": False,
-                "error_type": "timeout",
-                "error": f"broker sync timed out after {BROKER_SYNC_RUN_TIMEOUT_SECONDS}s",
-                "errors": [f"broker sync timed out after {BROKER_SYNC_RUN_TIMEOUT_SECONDS}s"],
-                "timeout_seconds": BROKER_SYNC_RUN_TIMEOUT_SECONDS,
-                "active_ib_connected": False,
-                "shared_ib_connected": bool(shared_ib_connected()),
-                "client_id": int(getattr(config, "IBKR_CLIENT_ID", 0)),
-                "last_successful_snapshot_at": last_snapshot.get("synced_at") if last_snapshot.get("ok") else None,
-                "source": "broker_sync",
-            }
-        if not isinstance(result, dict):
-            result = {"ok": False, "connected": False, "errors": ["malformed broker response"], "source": "broker_sync"}
-        await database.save_broker_sync_snapshot(result)
-        errors = _safe_array(result, "errors")
-        open_orders = _safe_array(result, "open_orders")
-        executions = _safe_array(result, "executions")
-        positions = _safe_array(result, "positions")
-        latest_snapshot = await (database.get_latest_broker_sync_snapshot() if hasattr(database, "get_latest_broker_sync_snapshot") else asyncio.sleep(0, result={})) or {}
-        return {
-            "ok": bool(result.get("ok", False)),
-            "connected": bool(result.get("connected", False)),
-            "result": result,
-            "errors": errors,
-            "timeout_seconds": result.get("timeout_seconds", BROKER_SYNC_RUN_TIMEOUT_SECONDS),
-            "active_ib_connected": bool(result.get("connected", False)),
-            "shared_ib_connected": bool(shared_ib_connected()),
-            "client_id": int(getattr(config, "IBKR_CLIENT_ID", 0)),
-            "last_successful_snapshot_at": latest_snapshot.get("synced_at") if latest_snapshot.get("ok") else None,
-            "last_synced_at": result.get("synced_at"),
-            "heartbeat_age_seconds": result.get("heartbeat_age_seconds"),
-            "open_orders_count": len(open_orders),
-            "executions_count": len(executions),
-            "positions_count": len(positions),
-            "source": result.get("source") or "broker_sync",
-        }
+        return await run_unified_broker_sync(timeout_seconds=BROKER_SYNC_RUN_TIMEOUT_SECONDS)
     except Exception as exc:
         log.exception("api_broker_sync_run failed")
         return {
@@ -3775,6 +3826,35 @@ async def api_broker_sync_run():
             "positions_count": 0,
             "source": "broker_sync",
         }
+
+
+@app.get("/api/broker/source-of-truth")
+async def api_broker_source_of_truth():
+    latest = await database.get_latest_broker_sync_snapshot() or {}
+    positions = _safe_json_array(latest.get("positions_json"))
+    open_orders = _safe_json_array(latest.get("open_orders_json"))
+    executions = _safe_json_array(latest.get("executions_json"))
+    errors = _safe_json_array(latest.get("errors_json"))
+    equity = {
+        "net_liquidation": latest.get("net_liquidation"),
+        "cash": latest.get("total_cash"),
+        "available_funds": latest.get("available_funds"),
+        "buying_power": latest.get("buying_power"),
+        "unrealized_pnl": sum(_safe_float(p.get("unrealized_pnl")) for p in positions if isinstance(p, dict)),
+        "exposure": sum(abs(_safe_float(p.get("market_value"))) for p in positions if isinstance(p, dict)),
+    }
+    return JSONResponse({
+        "ok": bool(latest), "connected": bool(latest.get("connected")), "account": latest.get("account"),
+        "synced_at": latest.get("synced_at"), "position_truth_source": "IBKR", "source": "IBKR_TWS_SOURCE_OF_TRUTH",
+        "equity": equity, "positions": positions, "open_orders": open_orders, "executions": executions, "errors": errors,
+        "metrics": {"broker_positions": len(positions), "broker_open_orders": len(open_orders), "broker_executions": len(executions)},
+    }, headers=no_cache_headers())
+
+
+@app.post("/api/broker/sync")
+async def api_broker_sync_unified():
+    result = await run_unified_broker_sync(timeout_seconds=BROKER_SYNC_RUN_TIMEOUT_SECONDS)
+    return JSONResponse(result, status_code=200 if result.get("ok") else 502, headers=no_cache_headers())
 
 
 def _manual_sync_skipped_response(source: str, reason: str) -> dict:
