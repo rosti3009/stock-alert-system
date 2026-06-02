@@ -68,6 +68,7 @@ log = logging.getLogger(__name__)
 BROKER_SYNC_RUN_TIMEOUT_SECONDS = float(getattr(config, "BROKER_SYNC_MANUAL_TIMEOUT_SECONDS", 20))
 STARTUP_RECOVERY_RUN_TIMEOUT_SECONDS = 30
 MANUAL_SYNC_RUN_TIMEOUT_SECONDS = 10
+POSITION_REFRESH_TIMEOUT_SECONDS = float(getattr(config, "POSITION_REFRESH_TIMEOUT_SECONDS", 20))
 
 _latest: dict[str, dict] = {}
 _top_weekly: list[dict] = []
@@ -80,6 +81,8 @@ _scanner_state: dict[str, object] = {
     "current_universe_size": 0,
     "priority_count": 0,
     "rotation_offset": 0,
+    "skipped_jobs_counter": 0,
+    "last_scan_duration_ms": None,
 }
 scheduler = AsyncIOScheduler()
 
@@ -1006,11 +1009,21 @@ async def scan_symbol(symbol: str) -> dict:
 
 async def refresh_open_positions_safe() -> None:
     if _positions_lock.locked():
+        log.info("Live position refresh skipped: previous refresh still running")
         return
 
     async with _positions_lock:
         try:
-            await refresh_open_positions()
+            await asyncio.wait_for(
+                refresh_open_positions(),
+                timeout=POSITION_REFRESH_TIMEOUT_SECONDS,
+            )
+
+        except asyncio.TimeoutError:
+            log.warning(
+                "Live position refresh timed out after %s seconds",
+                POSITION_REFRESH_TIMEOUT_SECONDS,
+            )
 
         except Exception:
             log.exception("Live position refresh failed")
@@ -1024,10 +1037,12 @@ async def run_full_scan() -> dict:
     global _top_weekly
 
     if _scan_lock.locked():
+        _scanner_state["skipped_jobs_counter"] = int(_scanner_state.get("skipped_jobs_counter") or 0) + 1
         log.info("Scan skipped: previous scan still running")
         return {"status": "already running"}
 
     async with _scan_lock:
+        scan_timer_start = time.perf_counter()
         session_status = session_manager.get_cached_session_status()
         if not session_status.get("scan_allowed"):
             log.info("Scan skipped — session=%s scan_allowed=False", session_status.get("current_session"))
@@ -1132,6 +1147,7 @@ async def run_full_scan() -> dict:
                 )
 
             total_scan_ms = round((time.perf_counter() - symbol_load_start) * 1000, 2)
+            _scanner_state["last_scan_duration_ms"] = total_scan_ms
             candidates_updated_count = len(all_results)
             log.info(
                 "scan_metrics symbol_load_ms=%s total_scan_ms=%s symbols_scanned_count=%s candidates_updated_count=%s",
@@ -1155,10 +1171,12 @@ async def run_full_scan() -> dict:
                 "status": "completed",
                 "scan_run_id": scan_run_id,
                 "top_weekly_count": len(_top_weekly),
+                "duration_ms": total_scan_ms,
                 **stats,
             }
 
         except Exception:
+            _scanner_state["last_scan_duration_ms"] = round((time.perf_counter() - scan_timer_start) * 1000, 2)
             log.exception("Scan failed")
             await database.finish_scan_run(scan_run_id, stats, status="failed")
             raise
@@ -1276,6 +1294,8 @@ async def get_scanner_status() -> dict:
         "intraday_fast_scan_active": bool(cadence["intraday_fast_scan_active"]),
         "batch_size": cadence["batch_size"],
         "scan_running": _scan_lock.locked(),
+        "skipped_jobs_counter": int(_scanner_state.get("skipped_jobs_counter") or 0),
+        "last_scan_duration_ms": _scanner_state.get("last_scan_duration_ms"),
     }
 
 
@@ -1302,6 +1322,7 @@ async def lifespan(app: FastAPI):
         id="live_position_tracker",
         replace_existing=True,
         max_instances=1,
+        coalesce=True,
     )
 
     log.info(
@@ -1459,6 +1480,7 @@ async def lifespan(app: FastAPI):
         id="portfolio_risk_engine",
         replace_existing=True,
         max_instances=1,
+        coalesce=True,
     )
 
     log.info(
@@ -1477,6 +1499,7 @@ async def lifespan(app: FastAPI):
         id="market_regime_engine",
         replace_existing=True,
         max_instances=1,
+        coalesce=True,
     )
 
     log.info(
@@ -1499,6 +1522,7 @@ async def lifespan(app: FastAPI):
         id="market_data_guard",
         replace_existing=True,
         max_instances=1,
+        coalesce=True,
     )
 
     log.info(
@@ -1512,6 +1536,7 @@ async def lifespan(app: FastAPI):
         id="session_manager_refresh",
         replace_existing=True,
         max_instances=1,
+        coalesce=True,
     )
 
     log.info("Session manager heartbeat started — every 30 seconds")
@@ -1523,6 +1548,7 @@ async def lifespan(app: FastAPI):
         id="recovery_manager",
         replace_existing=True,
         max_instances=1,
+        coalesce=True,
     )
 
     log.info(
@@ -1537,6 +1563,7 @@ async def lifespan(app: FastAPI):
         id=WATCHDOG_JOB_ID,
         replace_existing=True,
         max_instances=1,
+        coalesce=True,
     )
 
     log.info(
@@ -2059,6 +2086,153 @@ async def api_dashboard_health():
         headers=no_cache_headers(),
     )
 
+
+
+def _job_next_run_iso(job) -> str | None:
+    next_run = getattr(job, "next_run_time", None)
+    return next_run.isoformat() if next_run else None
+
+
+async def get_scheduler_status() -> dict:
+    _sync_scanner_next_run_state()
+    jobs = scheduler.get_jobs()
+    return {
+        "scan_running": _scan_lock.locked(),
+        "active_jobs": [job.id for job in jobs],
+        "next_run_times": {job.id: _job_next_run_iso(job) for job in jobs},
+        "skipped_jobs_counter": int(_scanner_state.get("skipped_jobs_counter") or 0),
+        "last_scan_duration_ms": _scanner_state.get("last_scan_duration_ms"),
+    }
+
+
+def _is_fresh_local_gateway_snapshot(snapshot: dict | None) -> bool:
+    snapshot = snapshot or {}
+    return bool(
+        str(snapshot.get("source") or "").upper() == "LOCAL_GATEWAY_PUSH"
+        and snapshot.get("connected")
+        and broker_snapshot_freshness(snapshot).get("fresh")
+    )
+
+
+def _broker_connected_from_snapshot(snapshot: dict | None) -> bool:
+    snapshot = snapshot or {}
+    return bool(broker_snapshot_freshness(snapshot).get("fresh") and snapshot.get("connected"))
+
+
+async def build_auto_trading_status() -> dict:
+    app_state = await _get_auto_trading_state()
+    settings = await database.get_strategy_settings()
+    active_mode = await strategy_mode.get_strategy_mode()
+    circuit = await get_circuit_breaker_state()
+    watchdog_status = await watchdog.get_watchdog_status()
+    broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
+    broker_fresh = bool(broker_snapshot_freshness(broker_snapshot).get("fresh"))
+
+    config_enabled = bool(getattr(config, "AUTO_SEND_ORDERS", True)) and str(getattr(config, "TRADING_MODE", "")).upper() != "OFF"
+    app_enabled = bool(app_state.get("enabled"))
+    settings_enabled = bool(settings.get("auto_trader_enabled", True))
+    paper_enabled = bool(getattr(config, "IBKR_PAPER_TRADING", False)) and not bool(getattr(config, "IBKR_ENABLE_REAL_TRADING", False))
+
+    if not settings_enabled:
+        source = "strategy_settings"
+    elif not app_enabled:
+        source = "app_state"
+    else:
+        source = "config"
+
+    blocking_reasons: list[str] = []
+    if not settings_enabled:
+        blocking_reasons.append("Auto trader disabled in strategy settings")
+    if not app_enabled:
+        blocking_reasons.append(app_state.get("reason") or "Auto trader disabled in app state")
+    if not config_enabled:
+        blocking_reasons.append("Auto trading disabled by config")
+    if not paper_enabled:
+        blocking_reasons.append("Paper trading safety is not enabled")
+    if circuit.get("tripped"):
+        blocking_reasons.append(f"Circuit breaker tripped: {circuit.get('reason') or 'unknown reason'}")
+    if watchdog_status.get("trading_blocked"):
+        blocking_reasons.extend(watchdog_status.get("blocking_reasons") or ["Watchdog blocked trading"])
+    if not broker_fresh:
+        blocking_reasons.append("Broker source-of-truth snapshot is stale or disconnected")
+
+    return {
+        "enabled": bool(settings_enabled and app_enabled and config_enabled and paper_enabled),
+        "source": source,
+        "paper_trading_enabled": paper_enabled,
+        "blocked": bool(blocking_reasons),
+        "blocking_reasons": list(dict.fromkeys(str(r) for r in blocking_reasons if r)),
+        "broker_snapshot_fresh": broker_fresh,
+        "active_strategy_mode": active_mode.value if hasattr(active_mode, "value") else str(active_mode),
+        "active_risk_profile": settings.get("risk_profile") or getattr(config, "PAPER_TRAINING_PROFILE", None),
+    }
+
+
+async def build_system_health() -> dict:
+    broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
+    freshness = broker_snapshot_freshness(broker_snapshot)
+    watchdog_status = await watchdog.get_watchdog_status()
+    scanner = await get_scanner_status()
+    scheduler_status = await get_scheduler_status()
+    auto_status = await build_auto_trading_status()
+    circuit = await get_circuit_breaker_state()
+
+    local_gateway_connected = bool(_is_fresh_local_gateway_snapshot(broker_snapshot))
+    broker_connected = bool(local_gateway_connected or _broker_connected_from_snapshot(broker_snapshot) or watchdog_status.get("tws_connected"))
+    broker_snapshot_stale = bool(broker_snapshot) and not bool(freshness.get("fresh"))
+
+    blocking_reasons: list[str] = []
+    if not broker_connected:
+        blocking_reasons.append("Broker source-of-truth is disconnected")
+    if broker_snapshot_stale:
+        blocking_reasons.extend(freshness.get("reasons") or ["Broker snapshot is stale"])
+    if watchdog_status.get("trading_blocked") and not local_gateway_connected:
+        blocking_reasons.extend(watchdog_status.get("blocking_reasons") or [])
+    if circuit.get("tripped"):
+        blocking_reasons.append(f"Circuit breaker tripped: {circuit.get('reason') or 'unknown reason'}")
+    if auto_status.get("blocked"):
+        blocking_reasons.extend(auto_status.get("blocking_reasons") or [])
+
+    unique_reasons = list(dict.fromkeys(str(r) for r in blocking_reasons if r))
+    if circuit.get("tripped") or not auto_status.get("enabled"):
+        status = "BLOCKED"
+    elif unique_reasons or not broker_connected:
+        status = "DEGRADED"
+    else:
+        status = "HEALTHY"
+
+    return {
+        "ok": status == "HEALTHY",
+        "status": status,
+        "broker_connected": broker_connected,
+        "local_gateway_connected": local_gateway_connected,
+        "broker_snapshot_stale": broker_snapshot_stale,
+        "broker_snapshot_age_seconds": freshness.get("age_seconds"),
+        "watchdog_connected": bool(watchdog_status.get("tws_connected")),
+        "scanner_running": SCANNER_JOB_ID in scheduler_status.get("active_jobs", []),
+        "scan_running": bool(scanner.get("scan_running")),
+        "auto_trader_enabled": bool(auto_status.get("enabled")),
+        "circuit_breaker_tripped": bool(circuit.get("tripped")),
+        "last_scan_time": scanner.get("last_scan_at"),
+        "last_broker_sync": broker_snapshot.get("synced_at") or broker_snapshot.get("received_at"),
+        "blocking_reasons": unique_reasons,
+    }
+
+
+
+@app.get("/api/system-health")
+async def api_system_health():
+    return JSONResponse(await build_system_health(), headers=no_cache_headers())
+
+
+@app.get("/api/auto-trading/status")
+async def api_auto_trading_status():
+    return JSONResponse(await build_auto_trading_status(), headers=no_cache_headers())
+
+
+@app.get("/api/scheduler/status")
+async def api_scheduler_status():
+    return JSONResponse(await get_scheduler_status(), headers=no_cache_headers())
 
 @app.post("/api/auto-trading/enable")
 async def api_auto_trading_enable():

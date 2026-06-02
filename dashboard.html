@@ -824,22 +824,57 @@ async function fetchNoCache(
       ? "&"
       : "?";
 
-  const res = await fetch(
-    url + separator + "ts=" + Date.now(),
-    {
-      cache:"no-store",
-      ...options
-    }
-  );
+  const timeoutMs = options.timeoutMs || 8000;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-  if(!res.ok){
-
-    throw new Error(
-      url + " HTTP " + res.status
+  try{
+    const {timeoutMs: _timeoutMs, ...fetchOptions} = options;
+    const res = await fetch(
+      url + separator + "ts=" + Date.now(),
+      {
+        cache:"no-store",
+        signal: controller.signal,
+        ...fetchOptions
+      }
     );
-  }
 
-  return await res.json();
+    if(!res.ok){
+      throw new Error(url + " HTTP " + res.status);
+    }
+
+    return await res.json();
+  }finally{
+    clearTimeout(timeoutId);
+  }
+}
+
+async function safeFetchNoCache(url, fallback, options = {}){
+  try{
+    return {
+      ok: true,
+      data: await fetchNoCache(url, options),
+      error: null
+    };
+  }catch(err){
+    console.error("Dashboard fetch failed", url, err);
+    return {
+      ok: false,
+      data: fallback,
+      error: err && err.message ? err.message : String(err)
+    };
+  }
+}
+
+function renderFetchWarnings(results){
+  const failed = results.filter(item => !item.ok);
+  if(!failed.length){
+    return;
+  }
+  showError(
+    "Dashboard DEGRADED: "
+    + failed.map(item => item.url + " (" + item.error + ")").join("; ")
+  );
 }
 
 function money(v){
@@ -935,91 +970,76 @@ async function loadDashboard(){
   clearError();
 
   try{
+    const requests = [
+      ["stocks", "/api/stocks", []],
+      ["topWeekly", "/api/top-weekly", []],
+      ["positions", "/api/positions", []],
+      ["performance", "/api/performance", {}],
+      ["equityCurve", "/api/equity-curve", []],
+      ["portfolioRisk", "/api/portfolio-risk", {}],
+      ["strategyMode", "/api/strategy-mode", {strategy_mode:"UNKNOWN", rules:{}}],
+      ["scannerStatus", "/api/scanner/status", {scan_running:false}],
+      ["learningSummary", "/api/analytics/learning-summary", {}],
+      ["rejectedSetups", "/api/analytics/rejections?limit=25", []],
+      ["setupPerformance", "/api/analytics/setup-performance", []],
+      ["tradeOutcomes", "/api/analytics/outcomes?limit=25", []],
+      ["tradeReviews", "/api/trade-reviews?limit=10", []],
+      ["dashboardHealth", "/api/system-health", {status:"DEGRADED", blocking_reasons:["System health endpoint unavailable"]}],
+      ["autoTradingStatus", "/api/auto-trading/status", {enabled:false, blocked:true, blocking_reasons:["Auto-trading endpoint unavailable"]}],
+      ["brokerSourceTruth", "/api/broker/source-of-truth", {connected:false, stale:true, equity:{}, metrics:{}}]
+    ];
 
-    [
-      stocks,
-      topWeekly,
-      positions,
-      performance,
-      equityCurve,
-      portfolioRisk,
-      strategyMode,
-      scannerStatus,
-      learningSummary,
-      rejectedSetups,
-      setupPerformance,
-      tradeOutcomes,
-      tradeReviews,
-      dashboardHealth,
-      brokerSourceTruth
-    ] = await Promise.all([
+    const results = await Promise.all(
+      requests.map(([key, url, fallback]) =>
+        safeFetchNoCache(url, fallback).then(result => ({...result, key, url}))
+      )
+    );
 
-      fetchNoCache("/api/stocks"),
+    const byKey = Object.fromEntries(results.map(item => [item.key, item.data]));
+    stocks = Array.isArray(byKey.stocks) ? byKey.stocks : [];
+    topWeekly = Array.isArray(byKey.topWeekly) ? byKey.topWeekly : [];
+    positions = Array.isArray(byKey.positions) ? byKey.positions : (byKey.positions.positions || []);
+    performance = byKey.performance || {};
+    equityCurve = Array.isArray(byKey.equityCurve) ? byKey.equityCurve : [];
+    portfolioRisk = byKey.portfolioRisk || {};
+    strategyMode = byKey.strategyMode || {};
+    scannerStatus = byKey.scannerStatus || {};
+    learningSummary = byKey.learningSummary || {};
+    rejectedSetups = Array.isArray(byKey.rejectedSetups) ? byKey.rejectedSetups : [];
+    setupPerformance = Array.isArray(byKey.setupPerformance) ? byKey.setupPerformance : [];
+    tradeOutcomes = Array.isArray(byKey.tradeOutcomes) ? byKey.tradeOutcomes : [];
+    tradeReviews = Array.isArray(byKey.tradeReviews) ? byKey.tradeReviews : [];
+    dashboardHealth = byKey.dashboardHealth || {};
+    dashboardHealth.auto_trading_status = byKey.autoTradingStatus || {};
+    brokerSourceTruth = byKey.brokerSourceTruth || {};
 
-      fetchNoCache("/api/top-weekly"),
-
-      fetchNoCache("/api/positions").then(data => data.positions || data),
-
-      fetchNoCache("/api/performance"),
-
-      fetchNoCache("/api/equity-curve"),
-
-      fetchNoCache("/api/portfolio-risk"),
-
-      fetchNoCache("/api/strategy-mode"),
-
-      fetchNoCache("/api/scanner/status"),
-
-      fetchNoCache("/api/analytics/learning-summary"),
-
-      fetchNoCache("/api/analytics/rejections?limit=25"),
-
-      fetchNoCache("/api/analytics/setup-performance"),
-
-      fetchNoCache("/api/analytics/outcomes?limit=25"),
-
-      fetchNoCache("/api/trade-reviews?limit=10"),
-
-      fetchNoCache("/api/dashboard/health"),
-
-      fetchNoCache("/api/broker/source-of-truth")
-
-    ]);
+    renderFetchWarnings(results);
 
     updateCards();
-
     updateStrategyMode();
-
     updateScannerStatus();
-
     updateOperationalHealth();
-
     drawEquityChart();
-
     drawPositionsPreview();
-
     drawSignalsPreview();
-
     drawSectorIntelligence();
-
     drawTradingIntelligence();
-
     drawTradeReviews();
 
-    document.getElementById(
-      "updated"
-    ).textContent =
-      "Updated "
-      + new Date().toLocaleTimeString();
+    document.getElementById("updated").textContent =
+      "Updated " + new Date().toLocaleTimeString();
 
   }catch(err){
 
     console.error(err);
 
     showError(
-      "Dashboard API error: "
+      "Dashboard render error: "
       + err.message
     );
+
+    document.getElementById("systemStatus").textContent = "ERROR";
+    document.getElementById("systemStatus").className = "system-blocked";
 
   }finally{
 
@@ -1123,37 +1143,45 @@ function statusText(ok, healthyText, badText){
 }
 
 function updateOperationalHealth(){
-  const status = dashboardHealth.system_status || "DEGRADED";
+  const status = dashboardHealth.status || dashboardHealth.system_status || "DEGRADED";
   const statusEl = document.getElementById("systemStatus");
   statusEl.textContent = status;
-  statusEl.className = status === "ACTIVE" ? "system-active" : status === "BLOCKED" ? "system-blocked" : "system-degraded";
+  statusEl.className = status === "HEALTHY" || status === "ACTIVE" ? "system-active" : status === "BLOCKED" || status === "ERROR" ? "system-blocked" : "system-degraded";
 
   const tws = dashboardHealth.tws_connection || {};
   const watchdogHealth = dashboardHealth.watchdog_health || {};
   const tracker = dashboardHealth.live_tracker_health || {};
-  const scanner = dashboardHealth.scanner_health || {};
+  const scanner = dashboardHealth.scanner_health || dashboardHealth;
   const market = dashboardHealth.market_data_freshness || {};
   const circuit = dashboardHealth.circuit_breaker_state || {};
   const startup = dashboardHealth.startup_recovery_state || {};
+  const autoTrading = dashboardHealth.auto_trading_status || {};
 
-  document.getElementById("healthTws").textContent = statusText(tws.tws_connected, "CONNECTED", "OFFLINE");
-  document.getElementById("healthWatchdog").textContent = statusText(watchdogHealth.healthy, "HEALTHY", watchdogHealth.trading_blocked ? "BLOCKED" : "DEGRADED");
+  const brokerConnected = dashboardHealth.broker_connected ?? tws.tws_connected;
+  document.getElementById("healthTws").textContent = statusText(brokerConnected, "CONNECTED", "OFFLINE");
+  document.getElementById("healthWatchdog").textContent = statusText(dashboardHealth.watchdog_connected ?? watchdogHealth.healthy, "HEALTHY", watchdogHealth.trading_blocked ? "BLOCKED" : "DEGRADED");
   document.getElementById("healthScanner").textContent = scanner.scan_running ? "RUNNING" : "READY";
-  document.getElementById("healthTracker").textContent = statusText(tracker.healthy, "HEALTHY", "DEGRADED");
-  document.getElementById("healthMarketData").textContent = market.market_data_feed_active ? "FRESH" : "STALE";
-  document.getElementById("healthCircuit").textContent = circuit.tripped ? "TRIPPED" : "CLEAR";
-  document.getElementById("healthStartup").textContent = startup.ok ? "PASSED" : "PENDING";
+  document.getElementById("healthTracker").textContent = tracker.healthy === undefined ? "UNKNOWN" : statusText(tracker.healthy, "HEALTHY", "DEGRADED");
+  document.getElementById("healthMarketData").textContent = market.market_data_feed_active === false || dashboardHealth.broker_snapshot_stale ? "STALE" : "FRESH";
+  document.getElementById("healthCircuit").textContent = (dashboardHealth.circuit_breaker_tripped ?? circuit.tripped) ? "TRIPPED" : "CLEAR";
+  document.getElementById("healthStartup").textContent = startup.ok === false ? "PENDING" : "PASSED";
 
+  const reasons = dashboardHealth.blocking_reasons || autoTrading.blocking_reasons || [];
   const operations = dashboardHealth.last_operations || {};
   const latest = Object.values(operations).sort((a,b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")))[0];
   document.getElementById("lastOperationSummary").textContent = latest
     ? "Last operation: " + latest.action + " · " + latest.status + " · " + shortDateTime(latest.timestamp)
-    : "Last operation: -";
+    : reasons.length
+      ? "Blocking: " + reasons.slice(0,3).join(" · ")
+      : "Last operation: -";
   document.getElementById("lastOpSystem").textContent = lastOperationText(operations, ["reconnect_tws","restart_scanner","restart_watchdog","refresh_live_tracker"]);
-  document.getElementById("lastOpTrading").textContent = lastOperationText(operations, ["enable_auto_trading","disable_auto_trading","switch_strategy_mode","switch_training_profile","toggle_intraday_swing"]);
+  document.getElementById("lastOpTrading").textContent = autoTrading.blocked
+    ? "Auto trader blocked: " + (autoTrading.blocking_reasons || []).slice(0,2).join(" · ")
+    : lastOperationText(operations, ["enable_auto_trading","disable_auto_trading","switch_strategy_mode","switch_training_profile","toggle_intraday_swing"]);
   document.getElementById("lastOpRecovery").textContent = lastOperationText(operations, ["reset_circuit_breaker","run_startup_recovery","reconcile_positions","rebuild_trade_reviews"]);
   document.getElementById("lastOpEmergency").textContent = lastOperationText(operations, ["close_all_positions","emergency_stop"]) || "Paper-only protections remain enforced by API.";
 }
+
 
 function lastOperationText(operations, keys){
   const rows = keys.map(key => operations[key]).filter(Boolean)

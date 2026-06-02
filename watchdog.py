@@ -68,6 +68,22 @@ def _json(data: dict) -> str:
     return json.dumps(data, ensure_ascii=False, default=str)
 
 
+def _broker_snapshot_is_fresh(snapshot: dict | None, *, max_age_seconds: int | None = None) -> bool:
+    snapshot = snapshot or {}
+    if not snapshot or not snapshot.get("connected"):
+        return False
+    max_age = int(max_age_seconds or getattr(config, "BROKER_SNAPSHOT_MAX_AGE_SECONDS", 60))
+    synced_at = parse_dt(snapshot.get("synced_at") or snapshot.get("received_at"))
+    if not synced_at:
+        return False
+    return (now_utc() - synced_at.astimezone(timezone.utc)).total_seconds() <= max_age
+
+
+def _fresh_local_gateway_snapshot(snapshot: dict | None) -> bool:
+    snapshot = snapshot or {}
+    return bool(str(snapshot.get("source") or "").upper() == "LOCAL_GATEWAY_PUSH" and _broker_snapshot_is_fresh(snapshot))
+
+
 def _config_int(name: str, default: int) -> int:
     try:
         return int(getattr(config, name, default))
@@ -412,10 +428,16 @@ async def _read_observed_state() -> dict:
     last_execution_success_at = await database.get_app_state("execution_sync_last_success_at")
     broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
     live_position_tracking = await _read_live_position_tracking_state()
+    shared_connected = bool(is_ib_connected())
+    heartbeat_connected = bool(heartbeat.get("connected"))
+    local_gateway_fresh = _fresh_local_gateway_snapshot(broker_snapshot)
 
     return {
-        "tws_connected": bool(is_ib_connected() or heartbeat.get("connected")),
-        "shared_ib_connected": bool(is_ib_connected()),
+        "tws_connected": bool(shared_connected or heartbeat_connected or local_gateway_fresh),
+        "shared_ib_connected": shared_connected,
+        "local_gateway_connected": local_gateway_fresh,
+        "connection_source": "LOCAL_GATEWAY_PUSH" if local_gateway_fresh else "DIRECT_IBKR" if shared_connected or heartbeat_connected else "DISCONNECTED",
+        "direct_ibkr_warning": None if shared_connected or heartbeat_connected else ("Direct IBKR unavailable; using fresh local gateway snapshot" if local_gateway_fresh else None),
         "heartbeat": heartbeat,
         "last_tws_mirror_sync_at": last_mirror_success_at,
         "last_tws_mirror_sync_age_seconds": _age_seconds(last_mirror_success_at),
