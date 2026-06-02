@@ -656,3 +656,97 @@ def test_startup_recovery_true_broker_disconnected_still_fails(monkeypatch):
         assert status["state"] == "FAILED"
         await reset_circuit_breaker()
     asyncio.run(_run())
+
+
+def test_startup_recovery_account_sync_failure_passes_with_warnings(monkeypatch):
+    async def _run():
+        await reset_circuit_breaker()
+
+        async def _broker_sync():
+            return {
+                "ok": True,
+                "connected": True,
+                "account": "DU1",
+                "synced_at": "2026-05-13T00:00:00+00:00",
+                "equity": {"buying_power": 10000, "net_liquidation": 5000},
+                "positions": [],
+                "open_orders": [],
+                "executions": [],
+                "errors": [],
+            }
+
+        async def _account_sync(*, record_errors=True):
+            return {
+                "connected": False,
+                "account": None,
+                "account_summary": [],
+                "open_orders": [],
+                "execution_history": [],
+                "equity": {},
+                "error": "reqExecutions timeout from IBKR",
+                "synced_at": "2026-05-13T00:00:01+00:00",
+            }
+
+        monkeypatch.setattr(startup_recovery.broker_sync, "run_broker_sync_once", _broker_sync)
+        monkeypatch.setattr(startup_recovery.account_sync, "run_account_sync_once", _account_sync)
+        monkeypatch.setattr(startup_recovery.execution_sync, "sync_executions", _async_return({"ok": True}))
+        monkeypatch.setattr(startup_recovery, "adopt_tws_positions_as_baseline", _async_return({"ok": True}))
+        monkeypatch.setattr(startup_recovery, "close_db_positions_flat_in_tws", _async_return({"ok": True}))
+        monkeypatch.setattr(startup_recovery.reconciliation_engine, "run_reconciliation", _async_return({"ok": True, "issues": [], "issues_count": 0}))
+        monkeypatch.setattr(startup_recovery.database, "get_latest_candidates", _async_return([]))
+
+        status = await startup_recovery.run_startup_recovery()
+        assert status["ok"] is True
+        assert status["state"] == "PASSED_WITH_WARNINGS"
+        assert status["warnings"] == [{
+            "step": "sync_account_open_orders_executions",
+            "message": "reqExecutions timeout from IBKR",
+            "level": "WARNING",
+        }]
+        sync_step = next(step for step in status["steps"] if step["name"] == "sync_account_open_orders_executions")
+        assert sync_step["ok"] is False
+        assert sync_step["error"] == "reqExecutions timeout from IBKR"
+        assert sync_step["warning"] is True
+        circuit = await get_circuit_breaker_state()
+        assert circuit["tripped"] is False
+
+    asyncio.run(_run())
+
+
+def test_startup_recovery_warning_step_exception_uses_exception_type_when_message_empty(monkeypatch):
+    async def _run():
+        await reset_circuit_breaker()
+
+        async def _broker_sync():
+            return {
+                "ok": True,
+                "connected": True,
+                "account": "DU1",
+                "synced_at": "2026-05-13T00:00:00+00:00",
+                "equity": {"buying_power": 10000, "net_liquidation": 5000},
+                "positions": [],
+                "open_orders": [],
+                "executions": [],
+                "errors": [],
+            }
+
+        async def _raise_timeout(*, record_errors=True):
+            raise TimeoutError()
+
+        monkeypatch.setattr(startup_recovery.broker_sync, "run_broker_sync_once", _broker_sync)
+        monkeypatch.setattr(startup_recovery.account_sync, "run_account_sync_once", _raise_timeout)
+        monkeypatch.setattr(startup_recovery.execution_sync, "sync_executions", _async_return({"ok": True}))
+        monkeypatch.setattr(startup_recovery, "adopt_tws_positions_as_baseline", _async_return({"ok": True}))
+        monkeypatch.setattr(startup_recovery, "close_db_positions_flat_in_tws", _async_return({"ok": True}))
+        monkeypatch.setattr(startup_recovery.reconciliation_engine, "run_reconciliation", _async_return({"ok": True, "issues": [], "issues_count": 0}))
+        monkeypatch.setattr(startup_recovery.database, "get_latest_candidates", _async_return([]))
+
+        status = await startup_recovery.run_startup_recovery()
+        assert status["ok"] is True
+        assert status["state"] == "PASSED_WITH_WARNINGS"
+        sync_step = next(step for step in status["steps"] if step["name"] == "sync_account_open_orders_executions")
+        assert sync_step["error"] == "builtins.TimeoutError"
+        assert status["warnings"][0]["message"] == "builtins.TimeoutError"
+        assert (await get_circuit_breaker_state())["tripped"] is False
+
+    asyncio.run(_run())

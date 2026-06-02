@@ -54,6 +54,13 @@ def safe_str(value) -> str:
         return ""
 
 
+def exception_text(exc: BaseException) -> str:
+    text = str(exc)
+    if text:
+        return text
+    return f"{exc.__class__.__module__}.{exc.__class__.__name__}"
+
+
 CREATE_ACCOUNT_SUMMARY = """
 CREATE TABLE IF NOT EXISTS account_summary (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -324,17 +331,19 @@ async def save_account_snapshot(snapshot: dict) -> None:
         await db.commit()
 
 
-async def run_account_sync_once() -> dict:
+async def run_account_sync_once(*, record_errors: bool = True) -> dict:
     await init_account_sync_db()
 
     try:
         snapshot = await asyncio.to_thread(fetch_account_snapshot_sync)
     except Exception as exc:
-        log.warning("Account sync failed: %s", exc)
-        try:
-            await record_ibkr_error(str(exc), source="account_sync.run_account_sync_once")
-        except Exception:
-            pass
+        error_text = exception_text(exc)
+        log.exception("Account sync failed: %s", error_text)
+        if record_errors:
+            try:
+                await record_ibkr_error(error_text, source="account_sync.run_account_sync_once")
+            except Exception:
+                pass
         snapshot = {
             "connected": False,
             "account": None,
@@ -342,7 +351,7 @@ async def run_account_sync_once() -> dict:
             "open_orders": [],
             "execution_history": [],
             "equity": {"timestamp": now_iso()},
-            "error": str(exc),
+            "error": error_text,
             "synced_at": now_iso(),
         }
 
