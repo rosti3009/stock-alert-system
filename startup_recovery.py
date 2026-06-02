@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from datetime import datetime, timezone
@@ -59,6 +60,32 @@ def _critical_issues(reconciliation: dict) -> list[dict]:
     ]
 
 
+def _exception_text(exc: BaseException) -> str:
+    text = str(exc)
+    if text:
+        return text
+    return f"{exc.__class__.__module__}.{exc.__class__.__name__}"
+
+
+def _warning_item(step_name: str, message: str) -> dict:
+    return {"step": step_name, "message": message, "level": "WARNING"}
+
+
+def _supports_record_errors(fn) -> bool:
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return True
+    return (
+        "record_errors" in signature.parameters
+        or any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values())
+    )
+
+
+def _call_with_optional_record_errors(fn):
+    if _supports_record_errors(fn):
+        return fn(record_errors=False)
+    return fn()
 
 
 def _is_timeout_broker_sync_step(step_item: dict) -> bool:
@@ -93,6 +120,7 @@ async def get_startup_recovery_status() -> dict:
         "state": "NOT_RUN",
         "reason": "Startup recovery has not run",
         "steps": [],
+        "warnings": [],
         "checked_at": None,
         "circuit_breaker": await get_circuit_breaker_state(),
     }
@@ -114,6 +142,7 @@ async def build_timeout_status(timeout_seconds: int) -> dict:
         "state": "FAILED",
         "reason": f"startup recovery timed out after {timeout_seconds}s",
         "steps": [],
+        "warnings": [],
         "checked_at": now_iso(),
         "timeout": True,
         "circuit_breaker": circuit,
@@ -128,8 +157,9 @@ async def run_startup_recovery() -> dict:
     """Run the blocking startup recovery sequence required before auto trading."""
     await database.init_db()
     steps: list[dict] = []
+    warnings: list[dict] = []
 
-    async def step(name: str, fn):
+    async def step(name: str, fn, *, warn_only: bool = False):
         started = now_iso()
         try:
             result = await asyncio.wait_for(fn(), timeout=STEP_TIMEOUT_SECONDS)
@@ -137,11 +167,24 @@ async def run_startup_recovery() -> dict:
             steps.append(item)
             return result
         except Exception as exc:
-            item = {"name": name, "ok": False, "started_at": started, "finished_at": now_iso(), "error": str(exc)}
+            error_text = _exception_text(exc)
+            item = {
+                "name": name,
+                "ok": False,
+                "started_at": started,
+                "finished_at": now_iso(),
+                "error": error_text,
+                "warning": warn_only,
+            }
             steps.append(item)
+            if warn_only:
+                log.warning("Startup recovery step %s warning: %s", name, error_text, exc_info=True)
+                warnings.append(_warning_item(name, error_text))
+                return None
+            log.exception("Startup recovery step %s failed: %s", name, error_text)
             raise
 
-    status = {"ok": False, "state": "RUNNING", "reason": None, "steps": steps, "checked_at": now_iso()}
+    status = {"ok": False, "state": "RUNNING", "reason": None, "steps": steps, "warnings": warnings, "checked_at": now_iso()}
     await save_startup_recovery_status(status)
 
     try:
@@ -150,11 +193,32 @@ async def run_startup_recovery() -> dict:
         if not broker_snapshot.get("connected"):
             raise RuntimeError(f"TWS connection failed: {(broker_snapshot.get('errors') or [None])[0]}")
 
-        account_snapshot = await step("sync_account_open_orders_executions", account_sync.run_account_sync_once)
-        if not account_snapshot.get("connected"):
-            raise RuntimeError(f"Account sync failed: {account_snapshot.get('error')}")
+        account_snapshot = await step("sync_account_open_orders_executions", lambda: _call_with_optional_record_errors(account_sync.run_account_sync_once), warn_only=True)
+        if not account_snapshot:
+            account_snapshot = {"connected": False, "equity": {}, "account_summary": []}
+        elif not account_snapshot.get("connected"):
+            error_text = account_snapshot.get("error") or "Account sync returned connected=false without error details"
+            sync_step = next((x for x in reversed(steps) if x.get("name") == "sync_account_open_orders_executions"), None)
+            if sync_step is not None:
+                sync_step["ok"] = False
+                sync_step["error"] = error_text
+                sync_step["warning"] = True
+                sync_step.pop("result", None)
+            warnings.append(_warning_item("sync_account_open_orders_executions", error_text))
+            log.warning("Startup recovery open-order/execution sync warning: %s", error_text)
 
-        execution_result = await step("sync_executions_and_commissions", execution_sync.sync_executions)
+        execution_result = await step("sync_executions_and_commissions", lambda: _call_with_optional_record_errors(execution_sync.sync_executions), warn_only=True)
+        if isinstance(execution_result, dict) and not execution_result.get("ok", True):
+            error_text = execution_result.get("error") or "Execution sync returned ok=false without error details"
+            execution_step = next((x for x in reversed(steps) if x.get("name") == "sync_executions_and_commissions"), None)
+            if execution_step is not None:
+                execution_step["ok"] = False
+                execution_step["error"] = error_text
+                execution_step["warning"] = True
+                execution_step.pop("result", None)
+            warnings.append(_warning_item("sync_executions_and_commissions", error_text))
+            log.warning("Startup recovery execution sync warning: %s", error_text)
+
         await step("adopt_missing_tws_positions", adopt_tws_positions_as_baseline)
         await step("close_stale_db_positions", lambda: close_db_positions_flat_in_tws(dry_run=False))
         reconciliation = await step("reconcile_db", lambda: reconciliation_engine.run_reconciliation(broker_snapshot))
@@ -162,9 +226,13 @@ async def run_startup_recovery() -> dict:
         buying_power = (account_snapshot.get("equity") or {}).get("buying_power")
         if buying_power is None:
             buying_power = _account_value(account_snapshot.get("account_summary", []), "BuyingPower")
+        if buying_power is None:
+            buying_power = (broker_snapshot.get("equity") or {}).get("buying_power")
         equity = (account_snapshot.get("equity") or {}).get("net_liquidation")
         if equity is None:
             equity = _account_value(account_snapshot.get("account_summary", []), "NetLiquidation")
+        if equity is None:
+            equity = (broker_snapshot.get("equity") or {}).get("net_liquidation")
 
         await step("validate_buying_power", lambda: validate_buying_power(buying_power, source="startup_recovery"))
         await step("validate_equity", lambda: validate_equity(equity, source="startup_recovery"))
@@ -196,9 +264,10 @@ async def run_startup_recovery() -> dict:
         await reset_ibkr_error_count()
         status = {
             "ok": True,
-            "state": "PASSED",
-            "reason": None,
+            "state": "PASSED_WITH_WARNINGS" if warnings else "PASSED",
+            "reason": "Startup recovery passed with warnings" if warnings else None,
             "steps": steps,
+            "warnings": warnings,
             "execution_sync": execution_result,
             "reconciliation": reconciliation,
             "startup_candidate_validation": candidates,
@@ -208,7 +277,10 @@ async def run_startup_recovery() -> dict:
             "circuit_breaker": circuit,
         }
         await save_startup_recovery_status(status)
-        log.info("Startup recovery passed; auto trading may run")
+        if warnings:
+            log.warning("Startup recovery passed with warnings: %s", warnings)
+        else:
+            log.info("Startup recovery passed; auto trading may run")
         return status
 
     except Exception as exc:
@@ -227,23 +299,24 @@ async def run_startup_recovery() -> dict:
             circuit = await get_circuit_breaker_state()
         else:
             circuit = await trip_circuit_breaker(
-                str(exc),
+                _exception_text(exc),
                 source="startup_recovery",
-                details={"steps": steps},
+                details={"steps": steps, "warnings": warnings},
             )
         status = {
             "ok": False,
             "state": "FAILED",
-            "reason": str(exc),
+            "reason": _exception_text(exc),
             "broker_source_of_truth_sync_error": _structured_timeout_error(broker_step, STEP_TIMEOUT_SECONDS) if _is_timeout_broker_sync_step(broker_step or {}) else None,
             "steps": steps,
+            "warnings": warnings,
             "checked_at": now_iso(),
             "circuit_breaker": circuit,
         }
         if use_cached_fallback and int(reconciliation.get("issues_count") or 0) == 0:
             status.update({"ok": True, "state": "PASSED_WITH_FALLBACK", "reason": "broker sync timed out; used cached broker snapshot"})
         await save_startup_recovery_status(status)
-        log.warning("Startup recovery failed: %s", exc)
+        log.exception("Startup recovery failed: %s", _exception_text(exc))
         return status
 
 

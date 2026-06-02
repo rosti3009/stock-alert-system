@@ -40,6 +40,13 @@ def safe_int(v, default=0):
         return default
 
 
+def exception_text(exc: BaseException) -> str:
+    text = str(exc)
+    if text:
+        return text
+    return f"{exc.__class__.__module__}.{exc.__class__.__name__}"
+
+
 def safe_str(v):
     try:
         return str(v or "")
@@ -179,7 +186,7 @@ def fetch_executions_sync():
     return with_shared_ib_sync(_fetch)
 
 
-async def sync_executions():
+async def sync_executions(*, record_errors: bool = True):
 
     try:
 
@@ -275,17 +282,19 @@ async def sync_executions():
 
     except Exception as e:
 
-        log.warning(
+        error_text = exception_text(e)
+        log.exception(
             "Execution sync failed: %s",
-            e,
+            error_text,
         )
-        try:
-            await record_ibkr_error(str(e), source="execution_sync.sync_executions")
-        except Exception:
-            pass
+        if record_errors:
+            try:
+                await record_ibkr_error(error_text, source="execution_sync.sync_executions")
+            except Exception:
+                pass
         return {
             "ok": False,
-            "error": str(e),
+            "error": error_text,
             "fetched_count": 0,
             "inserted_count": 0,
             "duplicate_count": 0,
