@@ -27,7 +27,7 @@ def test_swing_uses_minute_interval():
 def test_intraday_uses_seconds_interval():
     cadence = main.scanner_cadence_for_mode(strategy_mode.StrategyMode.INTRADAY_TECHNICAL)
 
-    assert cadence["scan_interval_seconds"] == config.INTRADAY_SCAN_INTERVAL_SECONDS == 30
+    assert cadence["scan_interval_seconds"] == config.INTRADAY_SCAN_INTERVAL_SECONDS == 120
     assert cadence["symbols_per_scan"] == config.INTRADAY_SYMBOLS_PER_SCAN == 100
     assert cadence["batch_size"] == config.INTRADAY_BATCH_SIZE == 20
     assert cadence["intraday_fast_scan_active"] is True
