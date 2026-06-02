@@ -178,7 +178,46 @@ CREATE TABLE IF NOT EXISTS positions (
     ranking_components TEXT,
     ranking_reason TEXT,
     rejected_by_ranking INTEGER DEFAULT 0,
-    ranking_checked_at TEXT
+    ranking_checked_at TEXT,
+    position_truth_source TEXT,
+    broker_quantity REAL,
+    broker_avg_cost REAL,
+    broker_market_price REAL,
+    broker_market_value REAL,
+    broker_unrealized_pnl REAL,
+    broker_last_sync_at TEXT,
+    sync_status TEXT
+)
+"""
+
+CREATE_STRATEGY_SETTINGS = """
+CREATE TABLE IF NOT EXISTS strategy_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    scanner_mode TEXT,
+    risk_profile TEXT,
+    active_strategy_mode TEXT,
+    max_open_positions INTEGER,
+    max_portfolio_exposure REAL,
+    max_position_size_percent REAL,
+    max_daily_loss_percent REAL,
+    minimum_weekly_score REAL,
+    intraday_min_score REAL,
+    swing_min_score REAL,
+    intraday_relative_volume REAL,
+    swing_relative_volume REAL,
+    rsi_weight REAL,
+    volume_weight REAL,
+    trend_weight REAL,
+    volatility_weight REAL,
+    relative_strength_weight REAL,
+    enable_momentum_strategy INTEGER DEFAULT 1,
+    enable_breakout_strategy INTEGER DEFAULT 1,
+    enable_mean_reversion INTEGER DEFAULT 0,
+    enable_rsi_filter INTEGER DEFAULT 1,
+    enable_trend_filter INTEGER DEFAULT 1,
+    enable_volume_confirmation INTEGER DEFAULT 1,
+    auto_trader_enabled INTEGER DEFAULT 1,
+    updated_at TEXT
 )
 """
 
@@ -467,6 +506,7 @@ async def init_db() -> None:
         await db.execute(CREATE_SCAN_RUNS)
         await db.execute(CREATE_DAILY_CANDIDATES)
         await db.execute(CREATE_POSITIONS)
+        await db.execute(CREATE_STRATEGY_SETTINGS)
         await db.execute(CREATE_APP_STATE)
         await db.execute(CREATE_EXECUTIONS)
         await db.execute(CREATE_TRADE_JOURNAL)
@@ -539,6 +579,14 @@ async def init_db() -> None:
             "ranking_reason": "TEXT",
             "rejected_by_ranking": "INTEGER DEFAULT 0",
             "ranking_checked_at": "TEXT",
+            "position_truth_source": "TEXT",
+            "broker_quantity": "REAL",
+            "broker_avg_cost": "REAL",
+            "broker_market_price": "REAL",
+            "broker_market_value": "REAL",
+            "broker_unrealized_pnl": "REAL",
+            "broker_last_sync_at": "TEXT",
+            "sync_status": "TEXT",
         })
 
 
@@ -1171,10 +1219,10 @@ async def add_position(data: dict, max_open_positions: int = 10, enforce_max_ope
         if enforce_max_open_positions is not None
         else bool(getattr(config, "is_fixed_count_position_limit_mode", lambda: True)())
     )
-    if enforce_count_limit:
+    if enforce_count_limit and int(max_open_positions or 0) > 0:
         open_count = await count_open_positions()
 
-        if open_count >= max_open_positions:
+        if open_count >= int(max_open_positions):
             raise ValueError(f"Maximum open positions reached: {max_open_positions}")
 
     stop_loss = data.get("stop_loss")
@@ -1315,6 +1363,15 @@ async def update_position(symbol: str, updates: dict) -> dict | None:
         "quality_grade",
         "quality_components",
         "trade_quality_json",
+        "source",
+        "position_truth_source",
+        "broker_quantity",
+        "broker_avg_cost",
+        "broker_market_price",
+        "broker_market_value",
+        "broker_unrealized_pnl",
+        "broker_last_sync_at",
+        "sync_status",
     }
 
     fields = []
@@ -2805,3 +2862,186 @@ async def get_advanced_performance() -> dict:
         "realized_pnl_by_strategy": realized_pnl_by_strategy,
         "unrealized_pnl_by_strategy": unrealized_pnl_by_strategy,
     }
+
+STRATEGY_SETTING_FIELDS = {
+    "scanner_mode", "risk_profile", "active_strategy_mode", "max_open_positions",
+    "max_portfolio_exposure", "max_position_size_percent", "max_daily_loss_percent",
+    "minimum_weekly_score", "intraday_min_score", "swing_min_score",
+    "intraday_relative_volume", "swing_relative_volume", "rsi_weight", "volume_weight",
+    "trend_weight", "volatility_weight", "relative_strength_weight",
+    "enable_momentum_strategy", "enable_breakout_strategy", "enable_mean_reversion",
+    "enable_rsi_filter", "enable_trend_filter", "enable_volume_confirmation",
+    "auto_trader_enabled",
+}
+
+BOOLEAN_STRATEGY_FIELDS = {
+    "enable_momentum_strategy", "enable_breakout_strategy", "enable_mean_reversion",
+    "enable_rsi_filter", "enable_trend_filter", "enable_volume_confirmation",
+    "auto_trader_enabled",
+}
+
+
+def default_strategy_settings() -> dict:
+    return {
+        "scanner_mode": "balanced",
+        "risk_profile": "balanced",
+        "active_strategy_mode": "balanced",
+        "max_open_positions": int(getattr(config, "MAX_OPEN_POSITIONS", 10)),
+        "max_portfolio_exposure": float(getattr(config, "MAX_PORTFOLIO_EXPOSURE_PERCENT", 80.0)),
+        "max_position_size_percent": float(getattr(config, "MAX_POSITION_SIZE_PERCENT", 15.0)),
+        "max_daily_loss_percent": float(getattr(config, "MAX_DAILY_LOSS_PERCENT", 5.0)),
+        "minimum_weekly_score": float(getattr(config, "MINIMUM_WEEKLY_SCORE", 70.0)),
+        "intraday_min_score": float(getattr(config, "INTRADAY_MIN_SCORE_TO_BUY", 55.0)),
+        "swing_min_score": float(getattr(config, "MIN_SCORE_TO_BUY", 70.0)),
+        "intraday_relative_volume": float(getattr(config, "INTRADAY_MIN_RELATIVE_VOLUME", 1.5)),
+        "swing_relative_volume": float(getattr(config, "MIN_RELATIVE_VOLUME", 1.2)),
+        "rsi_weight": 20.0,
+        "volume_weight": 25.0,
+        "trend_weight": 25.0,
+        "volatility_weight": 15.0,
+        "relative_strength_weight": 15.0,
+        "enable_momentum_strategy": True,
+        "enable_breakout_strategy": True,
+        "enable_mean_reversion": False,
+        "enable_rsi_filter": True,
+        "enable_trend_filter": True,
+        "enable_volume_confirmation": True,
+        "auto_trader_enabled": True,
+        "updated_at": now_iso(),
+    }
+
+STRATEGY_PRESETS = {
+    "balanced": {},
+    "intraday": {"scanner_mode": "intraday", "active_strategy_mode": "intraday", "risk_profile": "aggressive", "intraday_min_score": 55, "intraday_relative_volume": 1.5, "max_open_positions": 0},
+    "swing": {"scanner_mode": "swing", "active_strategy_mode": "swing", "risk_profile": "balanced", "swing_min_score": 70, "swing_relative_volume": 1.2},
+    "conservative": {"scanner_mode": "balanced", "active_strategy_mode": "balanced", "risk_profile": "conservative", "max_portfolio_exposure": 50, "max_position_size_percent": 8, "max_daily_loss_percent": 2, "intraday_min_score": 70, "swing_min_score": 80},
+    "aggressive": {"scanner_mode": "balanced", "active_strategy_mode": "balanced", "risk_profile": "aggressive", "max_portfolio_exposure": 95, "max_position_size_percent": 20, "max_daily_loss_percent": 7, "intraday_min_score": 50, "swing_min_score": 60, "max_open_positions": 0},
+}
+
+
+def _coerce_strategy_settings(row: dict) -> dict:
+    data = default_strategy_settings()
+    data.update({k: row.get(k) for k in STRATEGY_SETTING_FIELDS | {"updated_at"} if k in row})
+    for key in BOOLEAN_STRATEGY_FIELDS:
+        data[key] = bool(data.get(key))
+    return data
+
+
+async def get_strategy_settings() -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await apply_sqlite_pragmas(db)
+        await db.execute(CREATE_STRATEGY_SETTINGS)
+        async with db.execute("SELECT * FROM strategy_settings WHERE id = 1") as cursor:
+            row = await cursor.fetchone()
+    if not row:
+        return await save_strategy_settings(default_strategy_settings())
+    return _coerce_strategy_settings(dict(row))
+
+
+async def save_strategy_settings(payload: dict) -> dict:
+    current = default_strategy_settings()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await apply_sqlite_pragmas(db)
+        await db.execute(CREATE_STRATEGY_SETTINGS)
+        async with db.execute("SELECT * FROM strategy_settings WHERE id = 1") as cursor:
+            row = await cursor.fetchone()
+    existing = dict(row) if row else None
+    if existing:
+        current.update(_coerce_strategy_settings(existing))
+    for key, value in (payload or {}).items():
+        if key in STRATEGY_SETTING_FIELDS:
+            current[key] = bool(value) if key in BOOLEAN_STRATEGY_FIELDS else value
+    current["updated_at"] = now_iso()
+    columns = [k for k in current.keys() if k in STRATEGY_SETTING_FIELDS or k == "updated_at"]
+    values = [1] + [int(current[k]) if k in BOOLEAN_STRATEGY_FIELDS else current[k] for k in columns]
+    assignments = ", ".join(f"{k}=excluded.{k}" for k in columns)
+    sql = f"INSERT INTO strategy_settings (id, {', '.join(columns)}) VALUES ({', '.join('?' for _ in values)}) ON CONFLICT(id) DO UPDATE SET {assignments}"
+    async with aiosqlite.connect(DB_PATH) as db:
+        await apply_sqlite_pragmas(db)
+        await db.execute(CREATE_STRATEGY_SETTINGS)
+        await db.execute(sql, values)
+        await db.commit()
+    return _coerce_strategy_settings(current)
+
+
+async def apply_strategy_preset(preset_name: str) -> dict:
+    name = str(preset_name or "").strip().lower()
+    if name not in STRATEGY_PRESETS:
+        raise ValueError(f"Unknown strategy preset: {preset_name}")
+    base = await get_strategy_settings()
+    base.update(STRATEGY_PRESETS[name])
+    if name == "balanced":
+        defaults = default_strategy_settings()
+        for key in ("scanner_mode", "risk_profile", "active_strategy_mode", "max_portfolio_exposure", "max_position_size_percent", "max_daily_loss_percent", "intraday_min_score", "swing_min_score"):
+            base[key] = defaults[key]
+    return await save_strategy_settings(base)
+
+
+async def set_auto_trader_enabled(enabled: bool) -> dict:
+    return await save_strategy_settings({"auto_trader_enabled": bool(enabled)})
+
+
+async def is_auto_trader_enabled() -> bool:
+    return bool((await get_strategy_settings()).get("auto_trader_enabled"))
+
+
+async def reconcile_broker_source_of_truth(snapshot: dict) -> dict:
+    synced_at = snapshot.get("synced_at") or now_iso()
+    broker_positions = []
+    for raw in snapshot.get("positions") or []:
+        symbol = str(raw.get("symbol") or "").strip().upper()
+        quantity = float(raw.get("quantity", raw.get("position", 0)) or 0)
+        if symbol and abs(quantity) > 0:
+            avg_cost = float(raw.get("avg_cost", raw.get("avgCost", 0)) or 0)
+            market_price = float(raw.get("market_price", raw.get("marketPrice", avg_cost)) or avg_cost)
+            market_value = float(raw.get("market_value", quantity * market_price) or quantity * market_price)
+            unrealized = float(raw.get("unrealized_pnl", raw.get("unrealizedPNL", (market_price - avg_cost) * quantity)) or 0)
+            broker_positions.append({**raw, "symbol": symbol, "quantity": quantity, "avg_cost": avg_cost, "market_price": market_price, "market_value": market_value, "unrealized_pnl": unrealized})
+    broker_symbols = {p["symbol"] for p in broker_positions}
+    recovered, updated, missing = [], [], []
+    broker_cols = {
+        "position_truth_source": "TEXT", "broker_quantity": "REAL", "broker_avg_cost": "REAL",
+        "broker_market_price": "REAL", "broker_market_value": "REAL", "broker_unrealized_pnl": "REAL",
+        "broker_last_sync_at": "TEXT", "sync_status": "TEXT", "source": "TEXT", "strategy_type": "TEXT DEFAULT 'SWING'",
+    }
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await apply_sqlite_pragmas(db)
+        await db.execute(CREATE_POSITIONS)
+        await _ensure_columns(db, "positions", broker_cols)
+        for p in broker_positions:
+            cur = await db.execute("SELECT * FROM positions WHERE symbol = ?", (p["symbol"],))
+            existing = await cur.fetchone()
+            source = "BROKER_SYNC" if not existing else (dict(existing).get("source") or "BROKER_SYNC")
+            await db.execute(
+                """
+                INSERT INTO positions (symbol, buy_price, quantity, buy_date, current_price, profit_amount, profit_percent,
+                    status, action, reason, notes, source, created_at, updated_at, strategy_type,
+                    position_truth_source, broker_quantity, broker_avg_cost, broker_market_price, broker_market_value,
+                    broker_unrealized_pnl, broker_last_sync_at, sync_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', 'HOLD', 'Recovered from broker source of truth', 'IBKR/TWS is source of truth', ?, ?, ?, 'SWING',
+                    'IBKR', ?, ?, ?, ?, ?, ?, 'MATCHED')
+                ON CONFLICT(symbol) DO UPDATE SET
+                    buy_price=excluded.buy_price, quantity=excluded.quantity, current_price=excluded.current_price,
+                    profit_amount=excluded.profit_amount, profit_percent=excluded.profit_percent, status='OPEN',
+                    action='HOLD', source=COALESCE(positions.source, excluded.source), updated_at=excluded.updated_at,
+                    closed_at=NULL, position_truth_source='IBKR', broker_quantity=excluded.broker_quantity,
+                    broker_avg_cost=excluded.broker_avg_cost, broker_market_price=excluded.broker_market_price,
+                    broker_market_value=excluded.broker_market_value, broker_unrealized_pnl=excluded.broker_unrealized_pnl,
+                    broker_last_sync_at=excluded.broker_last_sync_at, sync_status='MATCHED',
+                    strategy_type=COALESCE(positions.strategy_type, 'SWING')
+                """,
+                (p["symbol"], p["avg_cost"] or p["market_price"] or 0.01, p["quantity"], synced_at, p["market_price"], p["unrealized_pnl"], ((p["market_price"] - p["avg_cost"]) / p["avg_cost"] * 100) if p["avg_cost"] else 0, source, synced_at, synced_at, p["quantity"], p["avg_cost"], p["market_price"], p["market_value"], p["unrealized_pnl"], synced_at)
+            )
+            (updated if existing else recovered).append(p["symbol"])
+        async with db.execute("SELECT symbol FROM positions WHERE UPPER(COALESCE(status,'')) IN ('OPEN','CLOSE_PENDING','CLOSE_REQUESTED','PENDING_BROKER_CONFIRMATION')") as cursor:
+            rows = await cursor.fetchall()
+        for row in rows:
+            symbol = str(row["symbol"] or "").upper()
+            if symbol and symbol not in broker_symbols:
+                await db.execute("UPDATE positions SET status='MISSING_FROM_BROKER', action='MISSING_FROM_BROKER', reason='Open in DB but absent from IBKR/TWS source of truth', position_truth_source='IBKR', broker_quantity=0, broker_market_value=0, broker_unrealized_pnl=0, broker_last_sync_at=?, sync_status='MISSING_FROM_BROKER', updated_at=? WHERE symbol=?", (synced_at, synced_at, symbol))
+                missing.append(symbol)
+        await db.commit()
+    return {"ok": True, "synced_at": synced_at, "broker_symbols": sorted(broker_symbols), "recovered": recovered, "updated": updated, "missing_from_broker": missing, "positions_count": len(broker_positions)}

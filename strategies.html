@@ -89,12 +89,12 @@
 
           <div class="toolbar">
 
-            <label><input type="checkbox" checked> Momentum Strategy</label>
-            <label><input type="checkbox" checked> Breakout Strategy</label>
-            <label><input type="checkbox" checked> RSI Filter</label>
-            <label><input type="checkbox" checked> Volume Confirmation</label>
-            <label><input type="checkbox"> Mean Reversion</label>
-            <label><input type="checkbox" checked> Trend Filter</label>
+            <label><input id="enable_momentum_strategy" type="checkbox"> Momentum Strategy</label>
+            <label><input id="enable_breakout_strategy" type="checkbox"> Breakout Strategy</label>
+            <label><input id="enable_rsi_filter" type="checkbox"> RSI Filter</label>
+            <label><input id="enable_volume_confirmation" type="checkbox"> Volume Confirmation</label>
+            <label><input id="enable_mean_reversion" type="checkbox"> Mean Reversion</label>
+            <label><input id="enable_trend_filter" type="checkbox"> Trend Filter</label>
 
           </div>
 
@@ -106,11 +106,11 @@
 
           <div class="toolbar">
 
-            <button class="primary">Balanced</button>
-            <button>Aggressive</button>
-            <button>Conservative</button>
-            <button>Swing</button>
-            <button>Intraday</button>
+            <button class="primary" onclick="applyPreset('balanced')">Balanced</button>
+            <button onclick="applyPreset('aggressive')">Aggressive</button>
+            <button onclick="applyPreset('conservative')">Conservative</button>
+            <button onclick="applyPreset('swing')">Swing</button>
+            <button onclick="applyPreset('intraday')">Intraday</button>
 
           </div>
 
@@ -130,27 +130,27 @@
 
               <tr>
                 <td>Max Portfolio Exposure</td>
-                <td><input type="number" value="80"></td>
+                <td><input id="max_portfolio_exposure" type="number" value="80"></td>
               </tr>
 
               <tr>
                 <td>Max Position Size %</td>
-                <td><input type="number" value="15"></td>
+                <td><input id="max_position_size_percent" type="number" value="15"></td>
               </tr>
 
               <tr>
                 <td>Max Daily Loss %</td>
-                <td><input type="number" value="5"></td>
+                <td><input id="max_daily_loss_percent" type="number" value="5"></td>
               </tr>
 
               <tr>
                 <td>Max Open Positions</td>
-                <td><input type="number" value="10"></td>
+                <td><input id="max_open_positions" type="number" value="10"></td>
               </tr>
 
               <tr>
                 <td>Minimum Weekly Score</td>
-                <td><input type="number" value="70"></td>
+                <td><input id="minimum_weekly_score" type="number" value="70"></td>
               </tr>
 
             </tbody>
@@ -169,27 +169,27 @@
 
               <tr>
                 <td>RSI Weight</td>
-                <td><input type="number" value="20"></td>
+                <td><input id="rsi_weight" type="number" value="20"></td>
               </tr>
 
               <tr>
                 <td>Volume Weight</td>
-                <td><input type="number" value="25"></td>
+                <td><input id="volume_weight" type="number" value="25"></td>
               </tr>
 
               <tr>
                 <td>Trend Weight</td>
-                <td><input type="number" value="25"></td>
+                <td><input id="trend_weight" type="number" value="25"></td>
               </tr>
 
               <tr>
                 <td>Volatility Weight</td>
-                <td><input type="number" value="15"></td>
+                <td><input id="volatility_weight" type="number" value="15"></td>
               </tr>
 
               <tr>
                 <td>Relative Strength Weight</td>
-                <td><input type="number" value="15"></td>
+                <td><input id="relative_strength_weight" type="number" value="15"></td>
               </tr>
 
             </tbody>
@@ -206,11 +206,11 @@
 
         <div class="toolbar">
 
-          <button class="primary">Save Configuration</button>
+          <button class="primary" onclick="saveConfiguration()">Save Configuration</button>
 
-          <button>Reload Engine</button>
+          <button onclick="reloadEngine()">Reload Engine</button>
 
-          <button class="danger">Disable Auto Trader</button>
+          <button class="danger" onclick="disableAutoTrader()">Disable Auto Trader</button><button class="primary" onclick="enableAutoTrader()">Enable Auto Trader</button>
 
         </div>
 
@@ -229,17 +229,28 @@
 </div>
 
 <script>
-async function loadStrategyRules(){
-  const [modeRes, statusRes] = await Promise.all([fetch('/api/strategy-mode',{cache:'no-store'}), fetch('/api/strategies/status',{cache:'no-store'})]);
-  const mode = await modeRes.json();
-  const status = await statusRes.json();
-  const rules = mode.rules || {};
-  document.getElementById('scannerMode').textContent = mode.strategy_mode || '-';
-  document.getElementById('riskProfile').textContent = mode.active_risk_profile || '-';
-  document.getElementById('maxPositions').textContent = mode.effective_max_positions ?? '-';
-  document.getElementById('activeRules').textContent = `Score ≥ ${rules.min_score_to_buy ?? '-'} · RVOL ≥ ${rules.min_relative_volume ?? '-'} · Spread ≤ ${rules.max_spread_percent ?? '-'}% · Slippage ≤ ${rules.max_slippage_estimate ?? '-'}% · Force close ${rules.force_exit_before_close === false ? 'off' : 'on'} · Paper only ${status.paper_trading_only ? 'on' : 'off'}`;
+const numericFields = ["max_portfolio_exposure","max_position_size_percent","max_daily_loss_percent","max_open_positions","minimum_weekly_score","rsi_weight","volume_weight","trend_weight","volatility_weight","relative_strength_weight"];
+const toggleFields = ["enable_momentum_strategy","enable_breakout_strategy","enable_mean_reversion","enable_rsi_filter","enable_trend_filter","enable_volume_confirmation"];
+async function api(path, opts={}){ const res = await fetch(path,{cache:'no-store',headers:{'Content-Type':'application/json'},...opts}); const data = await res.json(); if(!res.ok) throw new Error(data.error||data.reason||'Request failed'); return data; }
+function setStatus(msg){ document.getElementById('activeRules').textContent = msg; }
+function collectSettings(){ const out={}; numericFields.forEach(id=>{ const el=document.getElementById(id); if(el) out[id]=Number(el.value); }); toggleFields.forEach(id=>{ const el=document.getElementById(id); if(el) out[id]=!!el.checked; }); return out; }
+function applySettings(settings){
+  document.getElementById('scannerMode').textContent = settings.scanner_mode || '-';
+  document.getElementById('riskProfile').textContent = settings.risk_profile || '-';
+  document.getElementById('maxPositions').textContent = settings.max_open_positions === 0 ? 'Unlimited' : (settings.max_open_positions ?? '-');
+  numericFields.forEach(id=>{ const el=document.getElementById(id); if(el && settings[id] !== undefined && settings[id] !== null) el.value=settings[id]; });
+  toggleFields.forEach(id=>{ const el=document.getElementById(id); if(el) el.checked=!!settings[id]; });
+  document.getElementById('activeStrategies').textContent = toggleFields.filter(id=>settings[id]).length;
+  setStatus(`Score ≥ ${settings.swing_min_score ?? settings.minimum_weekly_score ?? '-'} · Intraday ≥ ${settings.intraday_min_score ?? '-'} · RVOL ${settings.swing_relative_volume ?? '-'} / ${settings.intraday_relative_volume ?? '-'} · Auto trader ${settings.auto_trader_enabled ? 'on' : 'off'}`);
 }
-loadStrategyRules().catch(() => {});
+async function loadStrategyRules(){ const data = await api('/api/strategy-settings'); applySettings(data.settings || {}); }
+async function saveConfiguration(){ const data = await api('/api/strategy-settings',{method:'POST',body:JSON.stringify(collectSettings())}); applySettings(data.settings); setStatus('Configuration saved and active.'); }
+async function applyPreset(name){ const data = await api(`/api/strategy-settings/preset/${name}`,{method:'POST'}); applySettings(data.settings); setStatus(`${name} preset applied.`); }
+async function reloadEngine(){ const data = await api('/api/strategy-settings/reload-engine',{method:'POST'}); applySettings(data.settings); setStatus('Strategy engine reloaded.'); }
+async function disableAutoTrader(){ await api('/api/auto-trading/disable',{method:'POST',body:'{}'}); await loadStrategyRules(); }
+async function enableAutoTrader(){ await api('/api/auto-trading/enable',{method:'POST',body:'{}'}); await loadStrategyRules(); }
+toggleFields.forEach(id=>setTimeout(()=>{ const el=document.getElementById(id); if(el) el.addEventListener('change', saveConfiguration); },0));
+loadStrategyRules().catch(err => setStatus(err.message));
 </script>
 </body>
 </html>
