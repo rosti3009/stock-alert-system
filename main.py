@@ -43,6 +43,7 @@ import sector_intelligence
 import strategy_mode
 import intraday_momentum_engine
 import strategy_portfolio
+import trade_quality_engine
 from broker_freshness import evaluate_broker_freshness
 from tws_connection_manager import is_ib_connected as shared_ib_connected
 from execution_quality import evaluate_execution_quality, summarize_execution_quality
@@ -2395,6 +2396,11 @@ async def serve_strategy_allocation_route():
     return serve_html_file("strategy_allocation.html", fallback_to_index=True)
 
 
+
+@app.get("/trade-quality", response_class=HTMLResponse)
+async def serve_trade_quality_route():
+    return serve_html_file("trade_quality.html", fallback_to_index=True)
+
 @app.get("/api/stocks")
 async def api_stocks():
     rows = []
@@ -2447,6 +2453,34 @@ async def api_rebuild_top_weekly():
     top = rebuild_top_weekly(limit=10)
     return JSONResponse({"status": "rebuilt", "count": len(top), "top": top}, headers=no_cache_headers())
 
+
+
+@app.get("/api/trade-quality/candidates")
+async def api_trade_quality_candidates(limit: int = 200):
+    candidates = await trade_quality_engine.classify_latest_candidates(limit=limit)
+    top_swing = sorted([c for c in candidates if c.get("strategy_type") == strategy_portfolio.STRATEGY_SWING], key=lambda c: c.get("trade_quality_score") or 0, reverse=True)
+    top_intraday = sorted([c for c in candidates if c.get("strategy_type") == strategy_portfolio.STRATEGY_INTRADAY], key=lambda c: c.get("trade_quality_score") or 0, reverse=True)
+    rejected = [c for c in candidates if c.get("quality_grade") == "REJECT"]
+    return JSONResponse({"ok": True, "candidates": candidates, "top_swing": top_swing, "top_intraday": top_intraday, "rejected": rejected}, headers=no_cache_headers())
+
+
+@app.get("/api/trade-quality/summary")
+async def api_trade_quality_summary(limit: int = 200):
+    candidates = await trade_quality_engine.classify_latest_candidates(limit=limit)
+    return JSONResponse(await trade_quality_engine.build_trade_quality_summary(candidates), headers=no_cache_headers())
+
+
+@app.get("/api/trade-quality/rejections")
+async def api_trade_quality_rejections(limit: int = 200):
+    candidates = await trade_quality_engine.classify_latest_candidates(limit=limit)
+    rejected = [c for c in candidates if c.get("quality_grade") == "REJECT"]
+    return JSONResponse({"ok": True, "count": len(rejected), "rejections": rejected}, headers=no_cache_headers())
+
+
+@app.get("/api/strategy-classifier/debug")
+async def api_strategy_classifier_debug(limit: int = 50):
+    candidates = await trade_quality_engine.classify_latest_candidates(limit=limit)
+    return JSONResponse({"ok": True, "thresholds": {"INTRADAY": trade_quality_engine.thresholds_for(strategy_portfolio.STRATEGY_INTRADAY).__dict__, "SWING": trade_quality_engine.thresholds_for(strategy_portfolio.STRATEGY_SWING).__dict__}, "candidates": candidates}, headers=no_cache_headers())
 
 @app.get("/api/history")
 async def api_history():

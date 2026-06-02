@@ -256,6 +256,7 @@ def _empty_status(error: str | None = None) -> dict[str, Any]:
         "positions": [],
         "open_position_count": 0,
         "tracked_count": 0,
+        "missing_tracker_enrichment_symbols": [],
         "last_refresh_at": None,
         "last_refresh_age_seconds": None,
         "interval_seconds": configured_interval_seconds(),
@@ -527,7 +528,7 @@ async def refresh_live_tracked_positions(scan_symbol: ScanCallable) -> list[dict
                 }
                 updated = None
 
-            if metadata and metadata.get("status") == "OPEN":
+            if metadata and str(metadata.get("status") or "OPEN").upper() != "CLOSED":
                 metadata_by_symbol[symbol] = metadata
             else:
                 metadata_by_symbol.pop(symbol, None)
@@ -545,6 +546,43 @@ async def refresh_live_tracked_positions(scan_symbol: ScanCallable) -> list[dict
             if str(item.get("symbol") or "").strip() and float(item.get("position", item.get("quantity")) or 0) > 0
         }
         latest_open_symbols.update(broker_symbols)
+
+        # Self-heal tracker coverage: every open DB/broker symbol should have
+        # enrichment metadata in the status payload unless it is explicitly closed.
+        missing_tracker_enrichment_symbols = sorted(latest_open_symbols - set(metadata_by_symbol))
+        latest_by_symbol = {str(p.get("symbol") or "").strip().upper(): p for p in latest_open_positions if p.get("symbol")}
+        for missing_symbol in list(missing_tracker_enrichment_symbols):
+            position = latest_by_symbol.get(missing_symbol)
+            if not position:
+                continue
+            try:
+                updated, metadata = await _refresh_one_position(position, scan_symbol, active_mode, started_at)
+                if metadata:
+                    metadata["self_healed_tracker_enrichment"] = True
+                    metadata_by_symbol[missing_symbol] = metadata
+                    missing_tracker_enrichment_symbols.remove(missing_symbol)
+                if updated:
+                    refreshed_positions.append(updated)
+            except Exception as exc:
+                log.exception("Live position tracker self-heal failed for %s", missing_symbol)
+                errors.append(f"{missing_symbol}: self-heal {exc}")
+        for missing_symbol in list(missing_tracker_enrichment_symbols):
+            if missing_symbol in broker_symbols:
+                metadata_by_symbol[missing_symbol] = {
+                    "symbol": missing_symbol,
+                    "status": "OPEN",
+                    "source": LIVE_POSITION_TRACKER_SOURCE,
+                    "position_source": "BROKER_SNAPSHOT",
+                    "last_refresh_at": started_at,
+                    "refresh_source": "broker_snapshot_tracker_placeholder",
+                    "live_tracking": True,
+                    "live_tracking_source": LIVE_POSITION_TRACKER_SOURCE,
+                    "live_tracking_last_refresh_at": started_at,
+                    "missing_active_scanner_enrichment": True,
+                    "reconciled": True,
+                }
+
+        missing_tracker_enrichment_symbols = sorted(latest_open_symbols - set(metadata_by_symbol))
         if latest_open_symbols and not metadata_by_symbol:
             for symbol in latest_open_symbols:
                 metadata_by_symbol[symbol] = {
@@ -572,6 +610,7 @@ async def refresh_live_tracked_positions(scan_symbol: ScanCallable) -> list[dict
             "open_position_count": len(latest_open_symbols),
             "tracked_count": len(positions_payload),
             "tracked_symbols": [item["symbol"] for item in positions_payload],
+            "missing_tracker_enrichment_symbols": missing_tracker_enrichment_symbols,
             "positions": positions_payload,
             "healthy": healthy,
             "running": False,

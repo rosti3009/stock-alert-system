@@ -130,7 +130,11 @@ CREATE TABLE IF NOT EXISTS daily_candidates (
     error TEXT,
     skip_reason TEXT,
     created_at TEXT,
-    strategy_type TEXT DEFAULT 'SWING' CHECK(strategy_type IN ('SWING', 'INTRADAY'))
+    strategy_type TEXT DEFAULT 'SWING' CHECK(strategy_type IN ('SWING', 'INTRADAY')),
+    trade_quality_score REAL,
+    quality_grade TEXT,
+    quality_components TEXT,
+    trade_quality_json TEXT
 )
 """
 
@@ -158,7 +162,11 @@ CREATE TABLE IF NOT EXISTS positions (
     close_attempted_at TEXT,
     close_order_id INTEGER,
     close_status TEXT,
-    strategy_type TEXT DEFAULT 'SWING' CHECK(strategy_type IN ('SWING', 'INTRADAY'))
+    strategy_type TEXT DEFAULT 'SWING' CHECK(strategy_type IN ('SWING', 'INTRADAY')),
+    trade_quality_score REAL,
+    quality_grade TEXT,
+    quality_components TEXT,
+    trade_quality_json TEXT
 )
 """
 
@@ -201,7 +209,11 @@ CREATE TABLE IF NOT EXISTS trade_journal (
     risk_percent REAL,
     realized_pnl REAL,
     unrealized_pnl REAL,
-    raw_json TEXT
+    raw_json TEXT,
+    strategy_type TEXT,
+    trade_quality_score REAL,
+    quality_grade TEXT,
+    quality_components TEXT
 )
 """
 
@@ -302,6 +314,10 @@ CREATE TABLE IF NOT EXISTS trade_decisions (
     strategy_mode TEXT,
     entry_time TEXT,
     entry_price REAL,
+    strategy_type TEXT,
+    trade_quality_score REAL,
+    quality_grade TEXT,
+    quality_components TEXT,
     created_at TEXT
 )
 """
@@ -323,7 +339,11 @@ CREATE TABLE IF NOT EXISTS rejected_setups (
     market_regime TEXT,
     sector TEXT,
     time_of_day TEXT,
-    raw_json TEXT
+    raw_json TEXT,
+    strategy_type TEXT,
+    trade_quality_score REAL,
+    quality_grade TEXT,
+    quality_components TEXT
 )
 """
 
@@ -474,6 +494,10 @@ async def init_db() -> None:
             "error": "TEXT",
             "skip_reason": "TEXT",
             "strategy_type": "TEXT DEFAULT 'SWING'",
+            "trade_quality_score": "REAL",
+            "quality_grade": "TEXT",
+            "quality_components": "TEXT",
+            "trade_quality_json": "TEXT",
         })
 
         await _ensure_columns(db, "positions", {
@@ -487,6 +511,10 @@ async def init_db() -> None:
             "source": "TEXT",
             "recovery_source_position_id": "INTEGER",
             "strategy_type": "TEXT DEFAULT 'SWING'",
+            "trade_quality_score": "REAL",
+            "quality_grade": "TEXT",
+            "quality_components": "TEXT",
+            "trade_quality_json": "TEXT",
         })
 
 
@@ -502,6 +530,23 @@ async def init_db() -> None:
             "cancelled_at": "TEXT",
             "rejected_at": "TEXT",
             "strategy_type": "TEXT DEFAULT 'SWING'",
+            "trade_quality_score": "REAL",
+            "quality_grade": "TEXT",
+            "quality_components": "TEXT",
+            "trade_quality_json": "TEXT",
+        })
+
+        await _ensure_columns(db, "trade_decisions", {
+            "strategy_type": "TEXT",
+            "trade_quality_score": "REAL",
+            "quality_grade": "TEXT",
+            "quality_components": "TEXT",
+        })
+        await _ensure_columns(db, "rejected_setups", {
+            "strategy_type": "TEXT",
+            "trade_quality_score": "REAL",
+            "quality_grade": "TEXT",
+            "quality_components": "TEXT",
         })
 
         await db.execute("CREATE INDEX IF NOT EXISTS idx_signals_created_at ON signals(created_at)")
@@ -900,14 +945,16 @@ async def save_daily_candidate(row: dict, scan_run_id: int) -> None:
         volume, avg_volume, atr, trend, signal,
         entry_price, stop_loss, take_profit_1, take_profit_2,
         risk_percent, rr_ratio, score, weekly_score, weekly_rank,
-        reasons, weekly_reasons, error, skip_reason, created_at, strategy_type
+        reasons, weekly_reasons, error, skip_reason, created_at, strategy_type,
+        trade_quality_score, quality_grade, quality_components, trade_quality_json
     )
     VALUES (
         :scan_run_id, :symbol, :price, :rsi, :ma20, :ma50, :ma200,
         :volume, :avg_volume, :atr, :trend, :signal,
         :entry_price, :stop_loss, :take_profit_1, :take_profit_2,
         :risk_percent, :rr_ratio, :score, :weekly_score, :weekly_rank,
-        :reasons, :weekly_reasons, :error, :skip_reason, :created_at, :strategy_type
+        :reasons, :weekly_reasons, :error, :skip_reason, :created_at, :strategy_type,
+        :trade_quality_score, :quality_grade, :quality_components, :trade_quality_json
     )
     """
 
@@ -939,11 +986,15 @@ async def save_daily_candidate(row: dict, scan_run_id: int) -> None:
         "skip_reason": row.get("skip_reason"),
         "created_at": row.get("created_at") or now_iso(),
         "strategy_type": _normalize_strategy_type(row.get("strategy_type")),
+        "trade_quality_score": row.get("trade_quality_score"),
+        "quality_grade": row.get("quality_grade"),
+        "quality_components": _json(row.get("quality_components")),
+        "trade_quality_json": _json(row.get("trade_quality")),
     }
 
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(CREATE_DAILY_CANDIDATES)
-        await _ensure_columns(db, "daily_candidates", {"strategy_type": "TEXT DEFAULT 'SWING'"})
+        await _ensure_columns(db, "daily_candidates", {"strategy_type": "TEXT DEFAULT 'SWING'", "trade_quality_score": "REAL", "quality_grade": "TEXT", "quality_components": "TEXT", "trade_quality_json": "TEXT"})
         await db.execute(sql, safe)
         await db.commit()
 
@@ -1012,6 +1063,10 @@ async def get_open_positions() -> list[dict]:
         await db.execute(CREATE_POSITIONS)
         await _ensure_columns(db, "positions", {
             "strategy_type": "TEXT DEFAULT 'SWING'",
+            "trade_quality_score": "REAL",
+            "quality_grade": "TEXT",
+            "quality_components": "TEXT",
+            "trade_quality_json": "TEXT",
             "close_attempted_at": "TEXT",
             "close_order_id": "INTEGER",
             "close_status": "TEXT",
@@ -1097,9 +1152,10 @@ async def add_position(data: dict, max_open_positions: int = 10, enforce_max_ope
     INSERT INTO positions (
         symbol, buy_price, quantity, buy_date, current_price,
         profit_amount, profit_percent, stop_loss, take_profit_1, take_profit_2,
-        status, action, reason, notes, created_at, updated_at, closed_at, strategy_type
+        status, action, reason, notes, created_at, updated_at, closed_at, strategy_type,
+        trade_quality_score, quality_grade, quality_components, trade_quality_json
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 'HOLD', ?, ?, ?, ?, NULL, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', 'HOLD', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
     ON CONFLICT(symbol) DO UPDATE SET
         buy_price = excluded.buy_price,
         quantity = excluded.quantity,
@@ -1119,7 +1175,11 @@ async def add_position(data: dict, max_open_positions: int = 10, enforce_max_ope
         close_attempted_at = NULL,
         close_order_id = NULL,
         close_status = NULL,
-        strategy_type = excluded.strategy_type
+        strategy_type = excluded.strategy_type,
+        trade_quality_score = excluded.trade_quality_score,
+        quality_grade = excluded.quality_grade,
+        quality_components = excluded.quality_components,
+        trade_quality_json = excluded.trade_quality_json
     """
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1139,6 +1199,10 @@ async def add_position(data: dict, max_open_positions: int = 10, enforce_max_ope
             now,
             now,
             _normalize_strategy_type(data.get("strategy_type")),
+            data.get("trade_quality_score"),
+            data.get("quality_grade"),
+            _json(data.get("quality_components")),
+            _json(data.get("trade_quality")),
         ))
         await db.commit()
 
@@ -1158,6 +1222,10 @@ async def get_position(symbol: str) -> dict | None:
         await db.execute(CREATE_POSITIONS)
         await _ensure_columns(db, "positions", {
             "strategy_type": "TEXT DEFAULT 'SWING'",
+            "trade_quality_score": "REAL",
+            "quality_grade": "TEXT",
+            "quality_components": "TEXT",
+            "trade_quality_json": "TEXT",
             "close_attempted_at": "TEXT",
             "close_order_id": "INTEGER",
             "close_status": "TEXT",
@@ -1186,6 +1254,10 @@ async def update_position(symbol: str, updates: dict) -> dict | None:
         "close_order_id",
         "close_status",
         "strategy_type",
+        "trade_quality_score",
+        "quality_grade",
+        "quality_components",
+        "trade_quality_json",
     }
 
     fields = []
@@ -1624,18 +1696,23 @@ async def record_rejected_setup(data: dict) -> None:
         "sector": data.get("sector"),
         "time_of_day": data.get("time_of_day") or learning_analytics.time_of_day(timestamp),
         "raw_json": _analytics_json(data),
+        "strategy_type": _normalize_strategy_type(data.get("strategy_type")) if data.get("strategy_type") else None,
+        "trade_quality_score": data.get("trade_quality_score"),
+        "quality_grade": data.get("quality_grade"),
+        "quality_components": _analytics_json(data.get("quality_components")) if data.get("quality_components") is not None else None,
     }
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(CREATE_REJECTED_SETUPS)
+        await _ensure_columns(db, "rejected_setups", {"strategy_type": "TEXT", "trade_quality_score": "REAL", "quality_grade": "TEXT", "quality_components": "TEXT"})
         await db.execute("""
             INSERT INTO rejected_setups (
                 symbol, timestamp, strategy_mode, rejection_reason, failed_filter, score, rvol,
                 vwap_status, momentum_score, spread_percent, slippage_estimate, market_regime,
-                sector, time_of_day, raw_json
+                sector, time_of_day, raw_json, strategy_type, trade_quality_score, quality_grade, quality_components
             ) VALUES (
                 :symbol, :timestamp, :strategy_mode, :rejection_reason, :failed_filter, :score, :rvol,
                 :vwap_status, :momentum_score, :spread_percent, :slippage_estimate, :market_regime,
-                :sector, :time_of_day, :raw_json
+                :sector, :time_of_day, :raw_json, :strategy_type, :trade_quality_score, :quality_grade, :quality_components
             )
         """, row)
         await db.commit()
@@ -1660,17 +1737,24 @@ async def record_trade_decision(data: dict) -> None:
         "strategy_mode": data.get("strategy_mode"),
         "entry_time": entry_time,
         "entry_price": data.get("entry_price") or data.get("price") or data.get("buy_price"),
+        "strategy_type": _normalize_strategy_type(data.get("strategy_type")) if data.get("strategy_type") else None,
+        "trade_quality_score": data.get("trade_quality_score"),
+        "quality_grade": data.get("quality_grade"),
+        "quality_components": _analytics_json(data.get("quality_components")) if data.get("quality_components") is not None else None,
         "created_at": now_iso(),
     }
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(CREATE_TRADE_DECISIONS)
+        await _ensure_columns(db, "trade_decisions", {"strategy_type": "TEXT", "trade_quality_score": "REAL", "quality_grade": "TEXT", "quality_components": "TEXT"})
         await db.execute("""
             INSERT INTO trade_decisions (
                 symbol, setup_type, entry_reason, score_breakdown, rvol, vwap_status, breakout_status,
-                momentum_score, market_regime, sector, strategy_mode, entry_time, entry_price, created_at
+                momentum_score, market_regime, sector, strategy_mode, entry_time, entry_price, strategy_type,
+                trade_quality_score, quality_grade, quality_components, created_at
             ) VALUES (
                 :symbol, :setup_type, :entry_reason, :score_breakdown, :rvol, :vwap_status, :breakout_status,
-                :momentum_score, :market_regime, :sector, :strategy_mode, :entry_time, :entry_price, :created_at
+                :momentum_score, :market_regime, :sector, :strategy_mode, :entry_time, :entry_price, :strategy_type,
+                :trade_quality_score, :quality_grade, :quality_components, :created_at
             )
         """, row)
         await db.commit()
@@ -2233,7 +2317,11 @@ CREATE TABLE IF NOT EXISTS orders (
     filled_at TEXT,
     cancelled_at TEXT,
     rejected_at TEXT,
-    strategy_type TEXT DEFAULT 'SWING' CHECK(strategy_type IN ('SWING', 'INTRADAY'))
+    strategy_type TEXT DEFAULT 'SWING' CHECK(strategy_type IN ('SWING', 'INTRADAY')),
+    trade_quality_score REAL,
+    quality_grade TEXT,
+    quality_components TEXT,
+    trade_quality_json TEXT
 )
 """
 CREATE_EXECUTIONS_V2 = """

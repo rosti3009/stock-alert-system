@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Trade Quality</title>
+  <link rel="stylesheet" href="/layout.css" />
+  <style>
+    body{background:#0f172a;color:#e5e7eb;font-family:Inter,system-ui,Arial;margin:0;padding:24px}.nav{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:18px}.nav a{color:#dbeafe;background:#1e293b;border:1px solid #334155;padding:10px 12px;border-radius:10px;text-decoration:none}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}.card{background:#111827;border:1px solid #334155;border-radius:16px;padding:16px;box-shadow:0 10px 24px rgba(0,0,0,.25)}h1,h2{margin-top:0}.pill{display:inline-block;border-radius:999px;padding:3px 8px;font-size:12px;background:#334155;margin-right:6px}.A{background:#15803d}.B{background:#2563eb}.C{background:#a16207}.REJECT{background:#991b1b}.score{font-size:28px;font-weight:800}.row{border-top:1px solid #263244;padding-top:12px;margin-top:12px}.components{display:grid;grid-template-columns:1fr auto;gap:6px;font-size:13px}.muted{color:#94a3b8}.reason{color:#fecaca}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #263244;padding:8px;text-align:left}th{color:#93c5fd}
+  </style>
+</head>
+<body>
+  <div class="nav"><a href="/dashboard">Dashboard</a><a href="/scanner">Scanner</a><a href="/positions">Positions</a><a href="/analytics">Analytics</a><a href="/strategy-allocation">Strategy Allocation</a></div>
+  <h1>⚖️ Trade Quality</h1>
+  <p class="muted">Classifier output for SWING, INTRADAY, and rejected candidates. Paper-only diagnostics; does not enable real trading.</p>
+  <div id="summary" class="grid"></div>
+  <div class="grid">
+    <section class="card"><h2>Top SWING Candidates</h2><div id="swing"></div></section>
+    <section class="card"><h2>Top INTRADAY Candidates</h2><div id="intraday"></div></section>
+    <section class="card"><h2>Rejected Candidates</h2><div id="rejected"></div></section>
+  </div>
+<script>
+const money = v => v == null ? '—' : '$' + Number(v).toLocaleString(undefined,{maximumFractionDigits:0});
+function comp(c){ return Object.entries(c||{}).map(([k,v])=>`<div>${k.replaceAll('_',' ')}</div><div>${Number(v).toFixed(1)}</div>`).join(''); }
+function card(x){
+  const grade = x.quality_grade || 'REJECT';
+  const er = x.execution_risk || {};
+  return `<div class="row"><div><span class="pill ${grade}">${grade}</span><span class="pill">${x.strategy_type}</span><b>${x.symbol||''}</b></div>
+    <div class="score">${Number(x.trade_quality_score||0).toFixed(1)}</div>
+    <div class="muted">${x.primary_reason||''}</div>
+    <div class="components">${comp(x.quality_components)}</div>
+    <p><b>Stop:</b> ${x.suggested_stop_loss ?? '—'} <b>Take profit:</b> ${x.suggested_take_profit ?? '—'} <b>Trailing:</b> ${x.suggested_trailing_stop ?? '—'}</p>
+    <p class="muted"><b>Execution risk:</b> spread ${er.spread_percent ?? '—'}%, slippage ${er.slippage_estimate ?? '—'}%, dollar volume ${money(er.dollar_volume)}, rVol ${er.relative_volume ?? '—'}</p>
+    ${(x.rejection_reasons||[]).map(r=>`<div class="reason">• ${r}</div>`).join('')}</div>`;
+}
+async function load(){
+  const [c,s] = await Promise.all([fetch('/api/trade-quality/candidates').then(r=>r.json()), fetch('/api/trade-quality/summary').then(r=>r.json())]);
+  document.getElementById('summary').innerHTML = `<div class="card"><h2>Summary</h2><p>Candidates: <b>${s.candidate_count}</b></p><p>By grade: ${JSON.stringify(s.by_grade||{})}</p><p>By strategy: ${JSON.stringify(s.by_strategy||{})}</p></div><div class="card"><h2>Analytics</h2><pre>${JSON.stringify(s.analytics||{},null,2)}</pre></div>`;
+  document.getElementById('swing').innerHTML = (c.top_swing||[]).slice(0,10).map(card).join('') || '<p class="muted">No SWING candidates.</p>';
+  document.getElementById('intraday').innerHTML = (c.top_intraday||[]).slice(0,10).map(card).join('') || '<p class="muted">No INTRADAY candidates.</p>';
+  document.getElementById('rejected').innerHTML = (c.rejected||[]).slice(0,25).map(card).join('') || '<p class="muted">No rejected candidates.</p>';
+}
+load().catch(e=>document.body.insertAdjacentHTML('beforeend',`<pre>${e}</pre>`));
+</script>
+</body>
+</html>

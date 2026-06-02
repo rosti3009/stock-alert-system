@@ -48,7 +48,17 @@ def evaluate_position(position: dict, market: dict, mode: str | None = None) -> 
     sell_quantity = 0
 
     active_mode = mode or market.get("strategy_mode") or position.get("strategy_mode")
-    if normalize_strategy_type(position.get("strategy_type") or market.get("strategy_type")) == STRATEGY_INTRADAY or strategy_mode.is_intraday_mode(active_mode):
+    # Exit engines are selected from the persisted position strategy, not the global
+    # scanner/mode. This prevents SWING positions from receiving INTRADAY_* exits
+    # when the app is scanning intraday setups, and prevents swing max-hold rules
+    # from being applied to explicitly INTRADAY positions.
+    explicit_strategy = position.get("strategy_type") or market.get("strategy_type")
+    is_intraday_position = (
+        normalize_strategy_type(explicit_strategy) == STRATEGY_INTRADAY
+        if explicit_strategy
+        else strategy_mode.is_intraday_mode(active_mode)
+    )
+    if is_intraday_position:
         return evaluate_intraday_position(
             position=position,
             market=market,
