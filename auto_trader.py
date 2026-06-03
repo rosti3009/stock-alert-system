@@ -517,9 +517,12 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
 
     persisted_auto_trading = await database.get_app_state("auto_trading_enabled", "true")
     active_settings = await database.get_strategy_settings()
-    if str(persisted_auto_trading).lower() != "true" or not active_settings.get("auto_trader_enabled", True):
-        log.info("AUTO TRADER disabled by persisted app state or strategy settings")
+    if str(persisted_auto_trading).lower() != "true":
+        log.info("AUTO TRADER disabled by persisted runtime app state")
         return
+
+    if not bool(active_settings.get("auto_trader_enabled", True)):
+        log.info("AUTO TRADER strategy settings flag disagrees with runtime app state; runtime app state wins")
 
     from circuit_breaker import get_circuit_breaker_state
     from startup_recovery import startup_recovery_passed

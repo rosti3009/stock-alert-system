@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 
 import database
 import main
+import startup_recovery
 import watchdog
+from circuit_breaker import reset_circuit_breaker
 from ibkr_asyncio_compat import ensure_event_loop
 
 
@@ -94,6 +96,63 @@ def test_auto_trading_status_returns_200_and_exposes_disabled_source(tmp_path, m
     finally:
         teardown_db(original_db)
 
+
+
+def test_auto_trading_enable_status_runtime_state_wins_over_stale_config(tmp_path, monkeypatch):
+    original_db = setup_db(tmp_path)
+
+    async def fake_watchdog_status():
+        return {
+            "healthy": True,
+            "tws_connected": False,
+            "trading_blocked": False,
+            "blocking_reasons": [],
+            "degraded_reasons": [],
+        }
+
+    async def no_reconciliation_issues():
+        return {
+            "ok": True,
+            "issues_count": 0,
+            "open_count": 0,
+            "issues": [],
+            "counters": {},
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    try:
+        run_async(reset_circuit_breaker())
+        run_async(database.save_broker_sync_snapshot(fresh_gateway_snapshot()))
+        run_async(database.set_app_state(main.AUTO_TRADING_ENABLED_KEY, "false"))
+        run_async(startup_recovery.save_startup_recovery_status({
+            "ok": False,
+            "state": "FAILED",
+            "reason": "direct TWS unavailable in gateway mode",
+            "steps": [],
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }))
+        monkeypatch.setattr(main.config, "AUTO_SEND_ORDERS", False)
+        monkeypatch.setattr(main.config, "TRADING_MODE", "OFF")
+        monkeypatch.setattr(main.config, "IBKR_PAPER_TRADING", True)
+        monkeypatch.setattr(main.config, "IBKR_ENABLE_REAL_TRADING", False)
+        monkeypatch.setattr(main.watchdog, "get_watchdog_status", fake_watchdog_status)
+        monkeypatch.setattr(main.reconciliation_lifecycle, "get_reconciliation_status", no_reconciliation_issues)
+
+        enable_response = run_async(main.api_auto_trading_enable())
+        enable_data = payload(enable_response)
+        status_response = run_async(main.api_auto_trading_status())
+        status_data = payload(status_response)
+
+        assert enable_response.status_code == 200
+        assert enable_data["ok"] is True
+        assert enable_data["auto_trading_enabled"] is True
+        assert enable_data["gateway_mode"] is True
+        assert status_response.status_code == 200
+        assert status_data["enabled"] is True
+        assert status_data["blocked"] is False
+        assert "Auto trading disabled by config" not in status_data["blocking_reasons"]
+    finally:
+        teardown_db(original_db)
 
 def test_watchdog_treats_fresh_local_gateway_as_connected(tmp_path, monkeypatch):
     original_db = setup_db(tmp_path)
