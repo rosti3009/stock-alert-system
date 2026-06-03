@@ -329,14 +329,41 @@ async def _get_auto_trading_state() -> dict:
     }
 
 
+def _reconciliation_open_issue_count(reconciliation: dict) -> int:
+    for key in ("issues_count", "open_count", "open_issues_count"):
+        if key in (reconciliation or {}):
+            try:
+                return int((reconciliation or {}).get(key) or 0)
+            except (TypeError, ValueError):
+                return 0
+    return len((reconciliation or {}).get("issues") or [])
+
+
+def _reconciliation_high_issue_count(reconciliation: dict) -> int:
+    open_count = _reconciliation_open_issue_count(reconciliation)
+    if open_count == 0:
+        return 0
+    if "high_severity_issues_count" in (reconciliation or {}):
+        try:
+            return int((reconciliation or {}).get("high_severity_issues_count") or 0)
+        except (TypeError, ValueError):
+            return 0
+    return len([
+        issue for issue in (reconciliation or {}).get("issues") or []
+        if str(issue.get("severity") or "").upper() in startup_recovery.CRITICAL_RECONCILIATION_SEVERITIES
+    ])
+
+
 async def _evaluate_auto_trading_enable_safety() -> dict:
     startup_status = await startup_recovery.get_startup_recovery_status()
-    startup_passed = bool(startup_status.get("ok")) and await startup_recovery.startup_recovery_passed()
+    persisted_startup_passed = bool(startup_status.get("ok")) and await startup_recovery.startup_recovery_passed()
     circuit = await get_circuit_breaker_state()
     reconciliation = await reconciliation_lifecycle.get_reconciliation_status()
     watchdog_status = await watchdog.get_watchdog_status()
     market_hours = get_market_hours_status()
     broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
+    local_gateway_ready = is_fresh_local_gateway_snapshot(broker_snapshot) and _reconciliation_open_issue_count(reconciliation) == 0
+    startup_passed = bool(persisted_startup_passed or local_gateway_ready)
     recon_issues = await database.get_open_reconciliation_issues()
 
     def _safe_json_array(value) -> list:
@@ -356,10 +383,10 @@ async def _evaluate_auto_trading_enable_safety() -> dict:
 
     health_can_clear_ibkr_errors = (
         startup_passed
-        and bool(watchdog_status.get("tws_connected"))
+        and (bool(watchdog_status.get("tws_connected")) or local_gateway_ready)
         and not (watchdog_status.get("stale_data") or {}).get("tws_mirror")
         and not (watchdog_status.get("stale_data") or {}).get("execution_sync")
-        and int(reconciliation.get("issues_count") or 0) == 0
+        and _reconciliation_open_issue_count(reconciliation) == 0
     )
     if (
         health_can_clear_ibkr_errors
@@ -380,9 +407,10 @@ async def _evaluate_auto_trading_enable_safety() -> dict:
             f"Circuit breaker tripped: {circuit.get('reason') or 'unknown reason'}"
         )
 
-    if int(reconciliation.get("issues_count") or 0) != 0:
+    reconciliation_open_count = _reconciliation_open_issue_count(reconciliation)
+    if reconciliation_open_count != 0:
         blocked_reasons.append(
-            f"Reconciliation issues_count={reconciliation.get('issues_count')}"
+            f"Reconciliation issues_count={reconciliation_open_count}"
         )
 
     if not bool(getattr(config, "IBKR_PAPER_TRADING", False)):
@@ -397,6 +425,7 @@ async def _evaluate_auto_trading_enable_safety() -> dict:
     return {
         "ok": len(blocked_reasons) == 0,
         "blocked_reasons": blocked_reasons,
+        "local_gateway_ready": local_gateway_ready,
         "broker_sync": {"connected": bool(broker_snapshot.get("connected")), "last_synced_at": broker_snapshot.get("synced_at"), "account": broker_snapshot.get("account"), "equity": {"net_liquidation": broker_snapshot.get("net_liquidation"), "total_cash": broker_snapshot.get("total_cash"), "available_funds": broker_snapshot.get("available_funds"), "buying_power": broker_snapshot.get("buying_power")}, "broker_positions_count": len(_safe_json_array(broker_snapshot.get("positions_json"))), "broker_open_orders_count": len(_safe_json_array(broker_snapshot.get("open_orders_json"))), "broker_executions_count": len(_safe_json_array(broker_snapshot.get("executions_json"))), "errors": _safe_json_array(broker_snapshot.get("errors_json"))},
         "reconciliation": {"ok": len([i for i in recon_issues if i.get("severity")=="HIGH"])==0, "open_issues_count": len(recon_issues), "high_severity_issues_count": len([i for i in recon_issues if i.get("severity")=="HIGH"]), "last_checked_at": (recon_issues[0].get("created_at") if recon_issues else None), "issues": recon_issues[:20]},
         "source_of_truth": {"broker_is_source_of_truth": True, "db_positions_match_broker": True, "orders_match_broker": True, "executions_synced": True},
@@ -2238,11 +2267,19 @@ async def api_scheduler_status():
 
 @app.post("/api/auto-trading/enable")
 async def api_auto_trading_enable():
-    snapshot = await broker_sync.run_broker_sync_once()
-    await database.save_broker_sync_snapshot(snapshot)
-    recon = await reconciliation_engine.run_reconciliation(snapshot)
+    latest_snapshot = await database.get_latest_broker_sync_snapshot() or {}
+    gateway_mode = is_fresh_local_gateway_snapshot(latest_snapshot)
+
+    if gateway_mode:
+        snapshot = latest_snapshot
+        recon = await reconciliation_lifecycle.get_reconciliation_status()
+    else:
+        snapshot = await broker_sync.run_broker_sync_once()
+        await database.save_broker_sync_snapshot(snapshot)
+        recon = await reconciliation_engine.run_reconciliation(snapshot)
+
     safety = await _evaluate_auto_trading_enable_safety()
-    if int(recon.get("high_severity_issues_count") or 0) > 0:
+    if _reconciliation_high_issue_count(recon) > 0:
         safety["ok"] = False
         safety.setdefault("blocked_reasons", []).append("Unresolved HIGH reconciliation issues")
     if snapshot.get("ok") and snapshot.get("connected"):
@@ -2258,8 +2295,10 @@ async def api_auto_trading_enable():
             "enable_auto_trading",
             "failed",
             {
+                "ok": False,
                 "status": "blocked",
                 "auto_trading_enabled": False,
+                "gateway_mode": gateway_mode,
                 "reason": reason,
                 **safety,
             },
@@ -2273,8 +2312,10 @@ async def api_auto_trading_enable():
         "enable_auto_trading",
         "success",
         {
+            "ok": True,
             "status": "enabled",
             "auto_trading_enabled": True,
+            "gateway_mode": gateway_mode,
             "reason": reason,
             **safety,
         },

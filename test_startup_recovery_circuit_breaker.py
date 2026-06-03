@@ -528,6 +528,59 @@ class StartupRecoveryCircuitBreakerTests(unittest.TestCase):
             "api_auto_trading_enable",
         )
 
+    def test_auto_trading_enable_uses_fresh_local_gateway_without_direct_tws(self):
+        from main import app
+
+        async def no_issues():
+            return {
+                **self._no_reconciliation_issues(),
+                "db_positions_match_broker": True,
+                "orders_match_broker": True,
+                "executions_synced": True,
+            }
+
+        async def seed_fresh_local_gateway():
+            await reset_circuit_breaker()
+            await startup_recovery.save_startup_recovery_status({
+                "ok": False,
+                "state": "FAILED",
+                "reason": "TWS connection failed: [Errno 111] Connection refused",
+                "steps": [],
+                "checked_at": database.now_iso(),
+            })
+            await database.save_broker_sync_snapshot({
+                "ok": True,
+                "connected": True,
+                "source": "LOCAL_GATEWAY_PUSH",
+                "account": "DU1",
+                "synced_at": database.now_iso(),
+                "equity": {"buying_power": 10000, "net_liquidation": 10000},
+                "positions": [],
+                "open_orders": [],
+                "executions": [],
+                "errors": [],
+            })
+            await database.set_app_state("auto_trading_enabled", "false")
+
+        async def fail_broker_sync():
+            raise AssertionError("enable_auto_trading must not run direct broker_sync in LOCAL_GATEWAY_PUSH mode")
+
+        asyncio.run(seed_fresh_local_gateway())
+
+        with patch("main.reconciliation_lifecycle.get_reconciliation_status", no_issues), \
+             patch("main.broker_sync.run_broker_sync_once", side_effect=fail_broker_sync), \
+             patch("main.reconciliation_engine.run_reconciliation", side_effect=AssertionError("blocking reconciliation must not run in LOCAL_GATEWAY_PUSH mode")):
+            response = TestClient(app).post("/api/auto-trading/enable")
+
+        payload = response.json()
+        self.assertEqual(response.status_code, 200, payload)
+        self.assertTrue(payload["ok"], payload)
+        self.assertTrue(payload["auto_trading_enabled"], payload)
+        self.assertTrue(payload["gateway_mode"], payload)
+        self.assertTrue(payload["local_gateway_ready"], payload)
+        self.assertNotIn("TWS connection failed", payload.get("reason", ""))
+        self.assertNotIn("Unresolved HIGH reconciliation issues", ";".join(payload.get("blocked_reasons", [])))
+
     def test_auto_trading_disable_succeeds(self):
         from main import app
 
