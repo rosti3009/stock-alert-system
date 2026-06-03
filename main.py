@@ -2131,26 +2131,19 @@ async def build_auto_trading_status() -> dict:
     broker_fresh = bool(broker_decision.get("broker_sync_fresh"))
     broker_connected = bool(broker_decision.get("effective_connected"))
 
-    config_enabled = bool(getattr(config, "AUTO_SEND_ORDERS", True)) and str(getattr(config, "TRADING_MODE", "")).upper() != "OFF"
     app_enabled = bool(app_state.get("enabled"))
     settings_enabled = bool(settings.get("auto_trader_enabled", True))
     paper_enabled = bool(getattr(config, "IBKR_PAPER_TRADING", False)) and not bool(getattr(config, "IBKR_ENABLE_REAL_TRADING", False))
-
-    if not settings_enabled:
-        source = "strategy_settings"
-    elif not app_enabled:
+    source = app_state.get("source") or ("app_state" if not app_enabled else "default")
+    if source == "unknown" and not app_enabled:
         source = "app_state"
-    else:
-        source = "config"
 
     blocking_reasons: list[str] = []
     degraded_reasons: list[str] = []
-    if not settings_enabled:
-        blocking_reasons.append("Auto trader disabled in strategy settings")
+    if settings_enabled != app_enabled:
+        degraded_reasons.append("Strategy settings auto-trader flag disagrees with runtime state; runtime state wins")
     if not app_enabled:
         blocking_reasons.append(app_state.get("reason") or "Auto trader disabled in app state")
-    if not config_enabled:
-        blocking_reasons.append("Auto trading disabled by config")
     if not paper_enabled:
         blocking_reasons.append("Paper trading safety is not enabled")
     if circuit.get("tripped"):
@@ -2166,7 +2159,7 @@ async def build_auto_trading_status() -> dict:
         degraded_reasons.append("Direct IBKR/TWS unavailable; using fresh LOCAL_GATEWAY_PUSH snapshot")
 
     return {
-        "enabled": bool(settings_enabled and app_enabled and config_enabled and paper_enabled),
+        "enabled": app_enabled,
         "source": source,
         "paper_trading_enabled": paper_enabled,
         "blocked": bool(blocking_reasons),
