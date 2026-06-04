@@ -54,7 +54,7 @@ from market_regime_engine import get_cached_market_regime, get_market_regime_his
 from market_regime import get_market_regime
 from data_fetcher import fetch_intraday_bars, fetch_stock_data
 from indicators import compute_indicators
-from ranking_engine import STRATEGY_INTRADAY, STRATEGY_SWING, build_intraday_ranking_debug, calculate_ranking, calculate_weekly_score, rank_candidates, rank_top_weekly_setups
+from ranking_engine import STRATEGY_INTRADAY, STRATEGY_SWING, build_intraday_ranking_debug, calculate_ranking, calculate_weekly_score, enrich_actionable_candidate, rank_candidates, rank_top_weekly_setups, swing_debug_thresholds
 from signal_logic import evaluate_signal
 from symbol_loader import get_cached_symbols, load_nasdaq_symbols
 from telegram_notifier import send_buy_alert, send_sell_alert, send_position_alert
@@ -2181,6 +2181,7 @@ async def build_system_health() -> dict:
     scheduler_status = await get_scheduler_status()
     auto_status = await build_auto_trading_status()
     circuit = await get_circuit_breaker_state()
+    reconciliation = await reconciliation_lifecycle.get_reconciliation_status()
     broker_decision = evaluate_broker_freshness(watchdog_status, broker_snapshot)
 
     local_gateway_connected = bool(broker_decision.get("local_gateway_connected"))
@@ -2205,6 +2206,9 @@ async def build_system_health() -> dict:
         degraded_reasons.append("Direct IBKR/TWS unavailable; using fresh LOCAL_GATEWAY_PUSH snapshot")
     if circuit.get("tripped"):
         blocking_reasons.append(f"Circuit breaker tripped: {circuit.get('reason') or 'unknown reason'}")
+    reconciliation_open_count = _reconciliation_open_issue_count(reconciliation)
+    if reconciliation_open_count > 0:
+        blocking_reasons.append(f"Reconciliation open_count={reconciliation_open_count}")
     if auto_status.get("blocked"):
         degraded_reasons.extend(auto_status.get("blocking_reasons") or [])
     degraded_reasons.extend(auto_status.get("degraded_reasons") or [])
@@ -2239,6 +2243,7 @@ async def build_system_health() -> dict:
         "last_scan_time": scanner.get("last_scan_at"),
         "last_broker_sync": broker_snapshot.get("synced_at") or broker_snapshot.get("received_at"),
         "connection_source": broker_decision.get("freshness_source"),
+        "reconciliation": {**(reconciliation or {}), "open_count": _reconciliation_open_issue_count(reconciliation)},
         "blocking_reasons": unique_blocking,
         "degraded_reasons": unique_degraded,
     }
@@ -2745,17 +2750,26 @@ async def api_rebuild_top_weekly():
 
 def _is_actionable_buy_candidate(row: dict) -> bool:
     signal = str(row.get("signal") or "").strip().upper()
-    if signal != "BUY" or signal in {"SKIPPED", "ERROR", "NEUTRAL"}:
+    if signal in {"SELL", "SKIPPED", "ERROR", "NEUTRAL"}:
         return False
     if row.get("rejected_by_ranking"):
         return False
-    price = _safe_float(row.get("price") or row.get("current_price") or row.get("entry_price"))
-    volume = _safe_float(row.get("volume") or row.get("current_volume") or row.get("avg_volume"))
-    if price < float(getattr(config, "MIN_PRICE", 0) or 0):
+    if not bool(row.get("buy_signal", signal == "BUY")):
         return False
-    min_volume = float(getattr(config, "MIN_AVG_VOLUME", getattr(config, "MIN_AVERAGE_VOLUME", 0)) or 0)
-    if volume < min_volume:
+    price = _safe_float(row.get("entry_price") or row.get("price") or row.get("current_price"))
+    min_price = float(getattr(config, "MIN_PRICE", 0) or 0)
+    if price < min_price:
         return False
+    explicit_market_price = _safe_float(row.get("price") or row.get("current_price"))
+    if explicit_market_price > 0 and explicit_market_price < min_price:
+        return False
+    strategy = strategy_portfolio.normalize_strategy_type(row.get("strategy_type"))
+    if strategy == STRATEGY_SWING:
+        avg_volume = _safe_float(row.get("avg_volume") or row.get("average_volume") or row.get("volume") or row.get("current_volume"))
+        current_volume = _safe_float(row.get("volume") or row.get("current_volume") or avg_volume)
+        min_swing_volume = float(getattr(config, "SWING_MIN_AVERAGE_VOLUME", 500_000) or 500_000)
+        if avg_volume < min_swing_volume or current_volume < min_swing_volume:
+            return False
     if _safe_float(row.get("entry_price")) <= 0:
         return False
     if _safe_float(row.get("stop_loss")) <= 0:
@@ -2763,25 +2777,68 @@ def _is_actionable_buy_candidate(row: dict) -> bool:
     return True
 
 
+def _ranking_minimum_for_strategy(strategy_type: str) -> float:
+    strategy = strategy_portfolio.normalize_strategy_type(strategy_type)
+    if strategy == STRATEGY_INTRADAY:
+        return float(getattr(config, "INTRADAY_MIN_SCORE_TO_BUY", 55) or 55)
+    return float(swing_debug_thresholds().get("min_score", 65))
+
+
 async def _get_actionable_ranking_top(strategy_type: str, limit: int) -> list[dict]:
+    strategy_type = strategy_portfolio.normalize_strategy_type(strategy_type)
     fetch_limit = max(int(limit or 5) * 5, 50)
-    rows = await database.get_ranking_candidates(strategy_type, rejected=False, limit=fetch_limit)
-    rows = [row for row in rows if _is_actionable_buy_candidate(row)]
-    if len(rows) < int(limit or 5):
+    source_rows = await database.get_ranking_candidates(strategy_type, rejected=False, limit=fetch_limit)
+    if len(source_rows) < fetch_limit:
         latest = [
             r for r in await database.get_latest_candidates(200)
             if strategy_portfolio.normalize_strategy_type(r.get("strategy_type")) == strategy_type
-            and _is_actionable_buy_candidate(r)
         ]
-        ranked = rank_candidates(latest, strategy_type, top_n=fetch_limit)
-        existing_symbols = {str(row.get("symbol") or "").upper() for row in rows}
-        for row in ranked["selected"]:
-            symbol = str(row.get("symbol") or "").upper()
-            if symbol not in existing_symbols and _is_actionable_buy_candidate(row):
-                rows.append(row)
-                existing_symbols.add(symbol)
+        existing_symbols = {str(row.get("symbol") or "").upper() for row in source_rows}
+        source_rows.extend([r for r in latest if str(r.get("symbol") or "").upper() not in existing_symbols])
+    ranked = rank_candidates(source_rows, strategy_type, top_n=fetch_limit, minimum_score=_ranking_minimum_for_strategy(strategy_type))
+    rows = [enrich_actionable_candidate(row, strategy_type) for row in ranked["ranked"]]
+    rows = [row for row in rows if _is_actionable_buy_candidate(row)]
     rows.sort(key=lambda item: (item.get("ranking_score") or 0, item.get("score") or item.get("weekly_score") or 0), reverse=True)
     return rows[: int(limit or 5)]
+
+
+async def _build_ranking_debug_risk(strategy_type: str = STRATEGY_INTRADAY, limit: int = 25) -> list[dict]:
+    from position_sizing_engine import PositionSizingInput, evaluate_position_sizing
+    import portfolio_risk_engine
+
+    strategy_type = strategy_portfolio.normalize_strategy_type(strategy_type)
+    candidates = await _get_actionable_ranking_top(strategy_type, limit)
+    open_positions = await database.get_open_positions()
+    portfolio_risk = await portfolio_risk_engine.get_portfolio_risk()
+    account_equity = float(config.effective_virtual_trading_capital())
+    rows: list[dict] = []
+    for candidate in candidates:
+        sizing = evaluate_position_sizing(PositionSizingInput(
+            row=candidate,
+            open_positions=open_positions,
+            account_equity=account_equity,
+            market_regime={"strategy_type": strategy_type},
+            execution_quality={},
+            portfolio_risk=portfolio_risk,
+        ))
+        entry = _safe_float(sizing.get("entry_price") or candidate.get("entry_price"))
+        stop = _safe_float(sizing.get("stop_loss") or candidate.get("stop_loss"))
+        shares = _safe_float(sizing.get("recommended_share_quantity") or sizing.get("quantity"))
+        risk_dollars = _safe_float(sizing.get("risk"))
+        rows.append({
+            "symbol": str(candidate.get("symbol") or "").upper(),
+            "strategy_type": strategy_type,
+            "entry_price": entry,
+            "stop_loss": stop,
+            "take_profit": candidate.get("take_profit") or candidate.get("take_profit_1"),
+            "calculated_shares": shares,
+            "position_value": sizing.get("position_size") or sizing.get("recommended_position_size_usd"),
+            "risk_dollars": risk_dollars,
+            "risk_percent": round((risk_dollars / account_equity) * 100, 4) if account_equity > 0 else 0.0,
+            "risk_reasons": sizing.get("block_reasons") or sizing.get("reduction_reasons") or [],
+            "allowed": bool(sizing.get("allowed") and shares > 0),
+        })
+    return rows
 
 
 @app.get("/api/ranking/top-intraday")
@@ -2811,6 +2868,13 @@ async def api_ranking_debug_intraday(limit: int = 500, top_log_limit: int = 25):
 async def api_ranking_top_swing(limit: int = 5):
     rows = await _get_actionable_ranking_top(STRATEGY_SWING, limit)
     return JSONResponse({"ok": True, "strategy_type": STRATEGY_SWING, "candidates": rows}, headers=no_cache_headers())
+
+
+@app.get("/api/ranking/debug-risk")
+async def api_ranking_debug_risk(strategy_type: str = STRATEGY_INTRADAY, limit: int = 25):
+    strategy = strategy_portfolio.normalize_strategy_type(strategy_type)
+    rows = await _build_ranking_debug_risk(strategy, max(1, int(limit or 25)))
+    return JSONResponse({"ok": True, "strategy_type": strategy, "candidates": rows}, headers=no_cache_headers())
 
 
 @app.get("/api/ranking/rejected")

@@ -83,3 +83,15 @@ def test_intraday_position_does_not_receive_swing_exit_action_in_swing_mode():
     )
     assert update["action"] != "SWING_MAX_HOLD_DAYS"
     assert update.get("exit_engine") == "intraday_exit"
+
+
+def test_intraday_exit_engine_ignores_swing_positions_directly():
+    import intraday_exit_engine as iee
+
+    update = iee.evaluate_exit(
+        {"symbol": "SWNG", "strategy_type": "SWING"},
+        {"pnl_pct": 5.0, "vwap_lost": True},
+    )
+
+    assert update["triggered"] is False
+    assert update["reason"] == "not_intraday_position"

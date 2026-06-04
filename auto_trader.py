@@ -33,7 +33,7 @@ from position_sizing_engine import (
 from market_regime import get_market_regime
 from strategy_portfolio import STRATEGY_INTRADAY, normalize_strategy_type
 from trade_quality_engine import STRATEGY_REJECT, classify_candidate
-from ranking_engine import rank_candidates
+from ranking_engine import enrich_actionable_candidate, rank_candidates
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +75,15 @@ def _broker_snapshot_freshness(snapshot: dict | None) -> dict:
     if age is not None and age > max_age:
         reasons.append(f"Broker snapshot is stale ({age:.1f}s > {max_age}s)")
     return {"fresh": fresh, "connected": connected, "age_seconds": age, "max_age_seconds": max_age, "reasons": reasons}
+
+
+def intraday_buy_limit_for_regime(regime: str | None, default: int | None = None) -> int:
+    regime_key = str(regime or "").upper()
+    if regime_key in {"DEFENSIVE", "RISK_OFF", "BEAR"}:
+        return 1
+    if regime_key == "ELEVATED":
+        return 3
+    return int(default if default is not None else getattr(config, "INTRADAY_TOP_N", 5))
 
 
 async def _require_fresh_broker_snapshot_for_auto_trading() -> tuple[bool, dict]:
@@ -577,6 +586,13 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
     allow_new_buys = market.get("allow_new_buys", True)
     min_score_override = int(market.get("min_score_override", active_settings.get("swing_min_score", MIN_SCORE_TO_BUY)))
     size_factor = float(market.get("position_size_factor", 1.0))
+    regime_key = str(regime or "").upper()
+    defensive_or_elevated = regime_key in {"DEFENSIVE", "ELEVATED", "RISK_OFF", "BEAR"}
+    crash_protection = regime_key in {"CRASH_PROTECTION", "HALT"}
+    max_new_intraday_buys = intraday_buy_limit_for_regime(regime, getattr(config, "INTRADAY_TOP_N", 5))
+    if defensive_or_elevated:
+        allow_new_buys = True
+        size_factor *= min(float(market.get("position_size_factor", 1.0) or 1.0), 0.5)
     if strategy_mode.is_intraday_mode(active_strategy_mode):
         min_score_override = int(active_settings.get("intraday_min_score") or active_rules["min_score_to_buy"])
         size_factor *= float(active_rules["position_size_factor"])
@@ -624,6 +640,8 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
     ranking_selected: dict[str, dict] = {}
     ranking_rejected: dict[str, dict] = {}
     for strategy, rows, limit in ((STRATEGY_INTRADAY, intraday_rows, getattr(config, "INTRADAY_TOP_N", 5)), ("SWING", swing_rows, getattr(config, "SWING_TOP_N", 5))):
+        if strategy == STRATEGY_INTRADAY:
+            limit = min(int(limit), max_new_intraday_buys)
         result = rank_candidates(rows, strategy, top_n=int(limit))
         for item in result["selected"]:
             ranking_selected[str(item.get("symbol", "")).upper()] = item
@@ -644,14 +662,16 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
         intraday_mode_active = strategy_mode.is_intraday_mode(active_strategy_mode)
         if symbol in ranking_selected:
             row = {**row, **ranking_selected[symbol], "rejected_by_ranking": False}
+            row = enrich_actionable_candidate(row, normalize_strategy_type(row.get("strategy_type")), market_regime=regime)
         elif symbol in ranking_rejected:
             row = {**row, **ranking_rejected[symbol], "rejected_by_ranking": True}
+        signal = row.get("signal")
         score = int(row.get("aggressive_score") or row.get("intraday_aggressive_score") or row.get("intraday_momentum_score") or row.get("weekly_score") or row.get("score") or 0)
 
         aggressive_entry_allowed = bool(row.get("aggressive_entry_allowed"))
         intraday_entry_allowed = bool(row.get("intraday_entry_allowed"))
         legacy_entry_allowed = bool(row.get("entry_allowed"))
-        intraday_candidate = aggressive_entry_allowed or intraday_entry_allowed or legacy_entry_allowed or (signal == "BUY")
+        intraday_candidate = aggressive_entry_allowed or intraday_entry_allowed or legacy_entry_allowed or bool(row.get("buy_signal")) or (signal == "BUY")
 
         if intraday_mode_active and intraday_candidate:
             await database.safe_record_trade_journal_event({
@@ -687,13 +707,13 @@ async def process_auto_trading(scan_results: list[dict]) -> None:
                 reason = market_hours.get("reason") or "US regular market is closed"
                 await _journal_buy_decision(row, "BUY_BLOCKED_BY_SAFETY_GATE", "BLOCKED", reason, market, {"market_hours": market_hours})
                 continue
-            if not allow_new_buys:
+            if crash_protection or not allow_new_buys:
                 await _journal_buy_decision(row, "BUY_CANDIDATE_REJECTED", "REJECTED", f"Market regime blocks new buys: {regime}", market)
                 continue
             if (not intraday_mode_active) and score < min_score_override:
                 await _journal_buy_decision(row, "BUY_CANDIDATE_REJECTED", "REJECTED", f"Score too low ({score} < {min_score_override})", market)
                 continue
-            if intraday_mode_active and not (aggressive_entry_allowed or intraday_entry_allowed or legacy_entry_allowed):
+            if intraday_mode_active and not (aggressive_entry_allowed or intraday_entry_allowed or legacy_entry_allowed or row.get("buy_signal")):
                 await _journal_buy_decision(row, "INTRADAY_BUY_BLOCKED", "BLOCKED", "; ".join(row.get("rejection_reasons") or ["Intraday BUY blocked"]), market)
                 continue
             trade_quality = classify_candidate(row, market_regime=market, market_hours=market_hours)
