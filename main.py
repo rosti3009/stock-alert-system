@@ -54,7 +54,7 @@ from market_regime_engine import get_cached_market_regime, get_market_regime_his
 from market_regime import get_market_regime
 from data_fetcher import fetch_intraday_bars, fetch_stock_data
 from indicators import compute_indicators
-from ranking_engine import STRATEGY_INTRADAY, STRATEGY_SWING, calculate_ranking, calculate_weekly_score, rank_candidates, rank_top_weekly_setups
+from ranking_engine import STRATEGY_INTRADAY, STRATEGY_SWING, build_intraday_ranking_debug, calculate_ranking, calculate_weekly_score, rank_candidates, rank_top_weekly_setups
 from signal_logic import evaluate_signal
 from symbol_loader import get_cached_symbols, load_nasdaq_symbols
 from telegram_notifier import send_buy_alert, send_sell_alert, send_position_alert
@@ -2788,6 +2788,23 @@ async def _get_actionable_ranking_top(strategy_type: str, limit: int) -> list[di
 async def api_ranking_top_intraday(limit: int = 5):
     rows = await _get_actionable_ranking_top(STRATEGY_INTRADAY, limit)
     return JSONResponse({"ok": True, "strategy_type": STRATEGY_INTRADAY, "candidates": rows}, headers=no_cache_headers())
+
+
+@app.get("/api/ranking/debug-intraday")
+async def api_ranking_debug_intraday(limit: int = 500, top_log_limit: int = 25):
+    latest = [
+        row for row in await database.get_latest_candidates(limit=max(int(limit or 500), 1))
+        if strategy_portfolio.normalize_strategy_type(row.get("strategy_type")) == STRATEGY_INTRADAY
+    ]
+    ranked = await database.get_ranking_candidates(STRATEGY_INTRADAY, rejected=None, limit=max(int(limit or 500), 1))
+    by_symbol = {str(row.get("symbol") or "").upper(): row for row in latest}
+    for row in ranked:
+        symbol = str(row.get("symbol") or "").upper()
+        if symbol and symbol not in by_symbol:
+            by_symbol[symbol] = row
+    final_candidates = await _get_actionable_ranking_top(STRATEGY_INTRADAY, int(getattr(config, "INTRADAY_TOP_N", 5)))
+    payload = build_intraday_ranking_debug(list(by_symbol.values()), final_candidates=final_candidates, top_log_limit=top_log_limit)
+    return JSONResponse({"ok": True, "strategy_type": STRATEGY_INTRADAY, **payload}, headers=no_cache_headers())
 
 
 @app.get("/api/ranking/top-swing")
