@@ -151,3 +151,38 @@ def test_pushed_broker_snapshot_becomes_source_of_truth(tmp_path, monkeypatch):
         database.DB_PATH = original_db
         main.database.DB_PATH = original_main_db
         config.BROKER_PUSH_TOKEN = original_token
+
+
+def test_debug_intraday_reports_filter_counts_and_reasons(monkeypatch):
+    rows = [
+        _candidate("GOOD", STRATEGY_INTRADAY, relative_volume=2.0, avg_volume=1_000_000, dollar_volume=10_000_000, ranking_score=90),
+        _candidate("LOWRV", STRATEGY_INTRADAY, relative_volume=0.5, avg_volume=1_000_000, dollar_volume=10_000_000, ranking_score=90),
+        _candidate("LOWDV", STRATEGY_INTRADAY, relative_volume=2.0, avg_volume=1_000_000, dollar_volume=100_000, ranking_score=90),
+        _candidate("LOWSCORE", STRATEGY_INTRADAY, relative_volume=2.0, avg_volume=1_000_000, dollar_volume=10_000_000, ranking_score=40),
+    ]
+
+    async def fake_latest(*_args, **_kwargs):
+        return rows
+
+    async def fake_ranked(*_args, **_kwargs):
+        return []
+
+    async def fake_top(*_args, **_kwargs):
+        return [rows[0]]
+
+    monkeypatch.setattr(main.database, "get_latest_candidates", fake_latest)
+    monkeypatch.setattr(main.database, "get_ranking_candidates", fake_ranked)
+    monkeypatch.setattr(main, "_get_actionable_ranking_top", fake_top)
+    payload = TestClient(main.app).get("/api/ranking/debug-intraday").json()
+
+    assert payload["ok"] is True
+    assert payload["scanned"] == 4
+    assert payload["passed_volume"] == 3
+    assert payload["passed_relative_volume"] == 2
+    assert payload["passed_score"] == 1
+    assert payload["passed_risk"] == 1
+    assert payload["final_candidates"] == 1
+    assert payload["top_rejections"]["low_relative_volume"] == 1
+    assert payload["top_rejections"]["low_dollar_volume"] == 1
+    assert payload["top_rejections"]["score_too_low"] == 1
+    assert payload["thresholds"]["min_score"] == config.RANKING_MIN_SCORE

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
+import logging
+
 import config
 from strategy_portfolio import STRATEGY_INTRADAY, STRATEGY_SWING, normalize_strategy_type
+
+log = logging.getLogger(__name__)
 
 RANKING_COMPONENTS = (
     "technical_score",
@@ -196,3 +201,132 @@ def rank_top_weekly_setups(rows: list[dict], limit: int = 10) -> list[dict]:
         row["weekly_score"] = row.get("ranking_score")
         row["weekly_reasons"] = [row.get("ranking_reason")]
     return ranked
+
+
+def intraday_debug_thresholds() -> dict[str, float]:
+    return {
+        "min_score": float(getattr(config, "RANKING_MIN_SCORE", 65.0) or 0.0),
+        "min_relative_volume": float(getattr(config, "INTRADAY_MIN_RELATIVE_VOLUME", getattr(config, "MIN_RELATIVE_VOLUME", 1.0)) or 0.0),
+        "min_average_volume": float(getattr(config, "MIN_AVG_VOLUME", getattr(config, "MIN_AVERAGE_VOLUME", 0.0)) or 0.0),
+        "min_dollar_volume": float(getattr(config, "INTRADAY_MIN_DOLLAR_VOLUME", getattr(config, "MIN_DOLLAR_VOLUME", 0.0)) or 0.0),
+    }
+
+
+def _intraday_average_volume(row: dict) -> float:
+    return _f(row.get("avg_volume") or row.get("average_volume") or row.get("volume") or row.get("current_volume"), 0.0)
+
+
+def intraday_filter_rejection_reasons(row: dict, thresholds: dict[str, float] | None = None) -> list[str]:
+    thresholds = thresholds or intraday_debug_thresholds()
+    reasons: list[str] = []
+    if _relative_volume(row) < thresholds["min_relative_volume"]:
+        reasons.append("low_relative_volume")
+    if _intraday_average_volume(row) < thresholds["min_average_volume"]:
+        reasons.append("low_average_volume")
+    if _dollar_volume(row) < thresholds["min_dollar_volume"]:
+        reasons.append("low_dollar_volume")
+    score = _f(row.get("ranking_score") or row.get("intraday_momentum_score") or row.get("aggressive_score") or row.get("score"), 0.0)
+    if score < thresholds["min_score"]:
+        reasons.append("score_too_low")
+    if str(row.get("signal") or "").strip().upper() != "BUY":
+        reasons.append("not_buy_signal")
+    if _f(row.get("entry_price"), 0.0) <= 0:
+        reasons.append("missing_entry_price")
+    if _f(row.get("stop_loss"), 0.0) <= 0:
+        reasons.append("missing_stop_loss")
+    if row.get("rejected_by_ranking"):
+        reasons.append("rejected_by_ranking")
+    return list(dict.fromkeys(reasons))
+
+
+def build_intraday_ranking_debug(rows: list[dict], *, final_candidates: list[dict] | None = None, top_log_limit: int = 25) -> dict[str, Any]:
+    thresholds = intraday_debug_thresholds()
+    scanned = len(rows)
+    pass_counts = defaultdict(int)
+    rejection_counter: Counter[str] = Counter()
+    rejected_symbols_by_reason: dict[str, list[str]] = defaultdict(list)
+    diagnostics: list[dict[str, Any]] = []
+
+    ranked_rows: list[dict] = []
+    for row in rows:
+        enriched = {**row, "strategy_type": STRATEGY_INTRADAY}
+        if enriched.get("ranking_score") is None:
+            enriched = {**enriched, **calculate_ranking(enriched, STRATEGY_INTRADAY, minimum_score=thresholds["min_score"])}
+        ranked_rows.append(enriched)
+
+    ranked_rows.sort(key=lambda item: (_f(item.get("ranking_score"), 0.0), _f(item.get("score") or item.get("weekly_score"), 0.0)), reverse=True)
+
+    for row in ranked_rows:
+        symbol = str(row.get("symbol") or "").upper()
+        rv = _relative_volume(row)
+        avg_volume = _intraday_average_volume(row)
+        dollar_volume = _dollar_volume(row)
+        ranking_score = _f(row.get("ranking_score"), 0.0)
+        passed_volume = avg_volume >= thresholds["min_average_volume"] and dollar_volume >= thresholds["min_dollar_volume"]
+        passed_relative_volume = passed_volume and rv >= thresholds["min_relative_volume"]
+        passed_score = passed_relative_volume and ranking_score >= thresholds["min_score"]
+        reasons = intraday_filter_rejection_reasons(row, thresholds)
+        passed_risk = passed_score and not any(reason in reasons for reason in ("not_buy_signal", "missing_entry_price", "missing_stop_loss", "rejected_by_ranking"))
+        if passed_volume:
+            pass_counts["passed_volume"] += 1
+        if passed_relative_volume:
+            pass_counts["passed_relative_volume"] += 1
+        if passed_score:
+            pass_counts["passed_score"] += 1
+        if passed_risk:
+            pass_counts["passed_risk"] += 1
+        if reasons:
+            rejection_counter.update(reasons)
+            for reason in reasons:
+                if symbol and len(rejected_symbols_by_reason[reason]) < 50:
+                    rejected_symbols_by_reason[reason].append(symbol)
+        diagnostics.append({
+            "symbol": symbol,
+            "ranking_score": ranking_score,
+            "relative_volume": rv,
+            "average_volume": avg_volume,
+            "dollar_volume": dollar_volume,
+            "rejection_reasons": reasons,
+            "ranking_reason": row.get("ranking_reason"),
+        })
+
+    for row in diagnostics[:max(0, int(top_log_limit or 0))]:
+        if row["rejection_reasons"]:
+            log.info(
+                "INTRADAY ranking rejection symbol=%s score=%.2f rvol=%.2f avg_volume=%.0f dollar_volume=%.0f reasons=%s ranking_reason=%s",
+                row["symbol"],
+                row["ranking_score"],
+                row["relative_volume"],
+                row["average_volume"],
+                row["dollar_volume"],
+                ",".join(row["rejection_reasons"]),
+                row.get("ranking_reason"),
+            )
+
+    final_count = len(final_candidates) if final_candidates is not None else pass_counts["passed_risk"]
+    payload: dict[str, Any] = {
+        "scanned": scanned,
+        "passed_volume": pass_counts["passed_volume"],
+        "passed_relative_volume": pass_counts["passed_relative_volume"],
+        "passed_score": pass_counts["passed_score"],
+        "passed_risk": pass_counts["passed_risk"],
+        "final_candidates": final_count,
+        "top_rejections": dict(rejection_counter.most_common(10)),
+        "thresholds": thresholds,
+        "rejected_symbols_by_reason": dict(rejected_symbols_by_reason),
+        "top_ranked_diagnostics": diagnostics[:max(0, int(top_log_limit or 0))],
+    }
+    if final_count == 0 and rejection_counter:
+        recommendations = []
+        most_common = rejection_counter.most_common(3)
+        for reason, _count in most_common:
+            if reason == "low_relative_volume":
+                recommendations.append(f"Consider lowering min_relative_volume below {thresholds['min_relative_volume']:.2f} or prioritizing symbols with live RVOL enrichment.")
+            elif reason == "low_dollar_volume":
+                recommendations.append(f"Consider lowering min_dollar_volume below ${thresholds['min_dollar_volume']:,.0f} if fills remain acceptable.")
+            elif reason == "low_average_volume":
+                recommendations.append(f"Consider lowering min_average_volume below {thresholds['min_average_volume']:,.0f} or expanding the scanner universe to more liquid symbols.")
+            elif reason == "score_too_low":
+                recommendations.append(f"Consider lowering min_score below {thresholds['min_score']:.0f} or tuning intraday scoring inputs.")
+        payload["recommendations"] = recommendations
+    return payload
