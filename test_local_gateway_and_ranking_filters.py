@@ -185,4 +185,110 @@ def test_debug_intraday_reports_filter_counts_and_reasons(monkeypatch):
     assert payload["top_rejections"]["low_relative_volume"] == 1
     assert payload["top_rejections"]["low_dollar_volume"] == 1
     assert payload["top_rejections"]["score_too_low"] == 1
-    assert payload["thresholds"]["min_score"] == config.RANKING_MIN_SCORE
+    assert payload["thresholds"]["min_score"] == config.INTRADAY_MIN_SCORE_TO_BUY
+
+
+def test_intraday_enrichment_generates_actionable_entry_stop_and_target():
+    from ranking_engine import enrich_actionable_candidate
+
+    row = _candidate(
+        "ACT",
+        STRATEGY_INTRADAY,
+        signal="",
+        entry_price=None,
+        stop_loss=None,
+        current_price=20,
+        atr=0.4,
+        relative_volume=1.2,
+        avg_volume=500_000,
+        dollar_volume=3_000_000,
+        ranking_score=70,
+    )
+
+    enriched = enrich_actionable_candidate(row, STRATEGY_INTRADAY)
+
+    assert enriched["buy_signal"] is True
+    assert enriched["signal"] == "BUY"
+    assert enriched["entry_price"] == 20
+    assert enriched["stop_loss"] < enriched["entry_price"]
+    assert enriched["take_profit"] > enriched["entry_price"]
+    assert enriched["strategy_type"] == STRATEGY_INTRADAY
+
+
+def test_top_intraday_uses_fallback_entry_and_stop(monkeypatch):
+    async def fake_ranked(*_args, **_kwargs):
+        return []
+
+    async def fake_latest(*_args, **_kwargs):
+        return [_candidate(
+            "FALL",
+            STRATEGY_INTRADAY,
+            signal="",
+            entry_price=None,
+            stop_loss=None,
+            current_price=30,
+            atr_percent=2,
+            relative_volume=1.1,
+            avg_volume=600_000,
+            dollar_volume=4_000_000,
+            ranking_score=75,
+        )]
+
+    monkeypatch.setattr(main.database, "get_ranking_candidates", fake_ranked)
+    monkeypatch.setattr(main.database, "get_latest_candidates", fake_latest)
+    payload = TestClient(main.app).get("/api/ranking/top-intraday").json()
+
+    assert [row["symbol"] for row in payload["candidates"]] == ["FALL"]
+    assert payload["candidates"][0]["buy_signal"] is True
+    assert payload["candidates"][0]["entry_price"] == 30
+    assert payload["candidates"][0]["stop_loss"] > 0
+
+
+def test_swing_top_is_independent_of_intraday_relative_volume(monkeypatch):
+    async def fake_ranked(strategy_type, *_args, **_kwargs):
+        if strategy_type == STRATEGY_SWING:
+            return [_candidate(
+                "SWNG",
+                STRATEGY_SWING,
+                relative_volume=0.1,
+                avg_volume=700_000,
+                dollar_volume=6_000_000,
+                ranking_score=80,
+            )]
+        return []
+
+    async def fake_latest(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(main.database, "get_ranking_candidates", fake_ranked)
+    monkeypatch.setattr(main.database, "get_latest_candidates", fake_latest)
+    payload = TestClient(main.app).get("/api/ranking/top-swing").json()
+
+    assert [row["symbol"] for row in payload["candidates"]] == ["SWNG"]
+    assert payload["candidates"][0]["strategy_type"] == STRATEGY_SWING
+
+
+def test_debug_risk_exposes_exact_reasons(monkeypatch):
+    async def fake_top(*_args, **_kwargs):
+        return [_candidate("RISK", STRATEGY_INTRADAY, entry_price=10, stop_loss=9, take_profit=11.5)]
+
+    async def fake_positions():
+        return []
+
+    async def fake_portfolio_risk():
+        return {"total_portfolio_exposure_percent": 0, "total_open_risk_percent": 0}
+
+    monkeypatch.setattr(main, "_get_actionable_ranking_top", fake_top)
+    monkeypatch.setattr(main.database, "get_open_positions", fake_positions)
+    monkeypatch.setattr(main.portfolio_risk_engine, "get_portfolio_risk", fake_portfolio_risk)
+    payload = TestClient(main.app).get("/api/ranking/debug-risk").json()
+
+    row = payload["candidates"][0]
+    assert {"symbol", "strategy_type", "entry_price", "stop_loss", "take_profit", "calculated_shares", "position_value", "risk_dollars", "risk_percent", "risk_reasons", "allowed"} <= set(row)
+    assert row["symbol"] == "RISK"
+
+
+def test_defensive_regime_limits_intraday_new_buys_to_top_one_to_three():
+    assert auto_trader.intraday_buy_limit_for_regime("DEFENSIVE", 5) == 1
+    assert auto_trader.intraday_buy_limit_for_regime("ELEVATED", 5) == 3
+    assert auto_trader.intraday_buy_limit_for_regime("RISK_ON", 5) == 5

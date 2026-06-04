@@ -205,15 +205,104 @@ def rank_top_weekly_setups(rows: list[dict], limit: int = 10) -> list[dict]:
 
 def intraday_debug_thresholds() -> dict[str, float]:
     return {
-        "min_score": float(getattr(config, "RANKING_MIN_SCORE", 65.0) or 0.0),
-        "min_relative_volume": float(getattr(config, "INTRADAY_MIN_RELATIVE_VOLUME", getattr(config, "MIN_RELATIVE_VOLUME", 1.0)) or 0.0),
-        "min_average_volume": float(getattr(config, "MIN_AVG_VOLUME", getattr(config, "MIN_AVERAGE_VOLUME", 0.0)) or 0.0),
-        "min_dollar_volume": float(getattr(config, "INTRADAY_MIN_DOLLAR_VOLUME", getattr(config, "MIN_DOLLAR_VOLUME", 0.0)) or 0.0),
+        "min_score": float(getattr(config, "INTRADAY_MIN_SCORE_TO_BUY", 55.0) or 55.0),
+        "min_relative_volume": float(getattr(config, "INTRADAY_MIN_RELATIVE_VOLUME", 1.0) or 1.0),
+        "min_average_volume": float(getattr(config, "INTRADAY_MIN_AVERAGE_VOLUME", 300_000.0) or 300_000.0),
+        "min_dollar_volume": float(getattr(config, "INTRADAY_MIN_DOLLAR_VOLUME", 2_000_000.0) or 2_000_000.0),
+    }
+
+
+def swing_debug_thresholds(regime: str | None = None) -> dict[str, float]:
+    defensive = str(regime or "").upper() in {"DEFENSIVE", "ELEVATED", "RISK_OFF", "BEAR"}
+    default_min = 72.0 if defensive else 65.0
+    return {
+        "min_score": float(getattr(config, "SWING_MIN_SCORE_TO_BUY", default_min) or default_min),
+        "min_average_volume": float(getattr(config, "SWING_MIN_AVERAGE_VOLUME", 500_000.0) or 500_000.0),
+        "min_dollar_volume": float(getattr(config, "SWING_MIN_DOLLAR_VOLUME", 5_000_000.0) or 5_000_000.0),
     }
 
 
 def _intraday_average_volume(row: dict) -> float:
     return _f(row.get("avg_volume") or row.get("average_volume") or row.get("volume") or row.get("current_volume"), 0.0)
+
+
+def _entry_price(row: dict) -> float:
+    return _f(row.get("entry_price") or row.get("current_price") or row.get("price") or row.get("limit_price") or row.get("close"), 0.0)
+
+
+def _atr(row: dict, price: float) -> float:
+    atr = _f(row.get("atr") or row.get("atr_value"), 0.0)
+    if atr > 0:
+        return atr
+    atr_pct = _f(row.get("atr_percent") or row.get("atr_pct") or row.get("intraday_volatility_percent"), 0.0)
+    return price * (atr_pct / 100.0) if price > 0 and atr_pct > 0 else 0.0
+
+
+def _spread_acceptable(row: dict, strategy: str) -> bool:
+    spread = _spread(row)
+    if spread is None:
+        return True
+    max_spread = 2.5 if strategy == STRATEGY_INTRADAY else 3.0
+    return spread <= max_spread
+
+
+def _slippage_acceptable(row: dict) -> bool:
+    slippage = _slippage(row)
+    return slippage is None or slippage <= 1.5
+
+
+def enrich_actionable_candidate(row: dict, strategy_type: str, *, market_regime: str | None = None) -> dict:
+    """Add BUY/entry/stop/target fields when a ranked row satisfies strategy quality gates."""
+
+    strategy = normalize_strategy_type(strategy_type)
+    thresholds = intraday_debug_thresholds() if strategy == STRATEGY_INTRADAY else swing_debug_thresholds(market_regime or row.get("market_regime") or row.get("regime"))
+    minimum_score = thresholds["min_score"]
+    enriched = {**row, "strategy_type": strategy}
+    if enriched.get("ranking_score") is None:
+        enriched = {**enriched, **calculate_ranking(enriched, strategy, minimum_score=minimum_score)}
+    score = _f(enriched.get("ranking_score") or enriched.get("intraday_momentum_score") or enriched.get("aggressive_score") or enriched.get("weekly_score") or enriched.get("score"), 0.0)
+    avg_volume = _intraday_average_volume(enriched)
+    dollar_volume = _dollar_volume(enriched)
+    rv = _relative_volume(enriched)
+
+    liquidity_ok = avg_volume >= thresholds["min_average_volume"] and dollar_volume >= thresholds["min_dollar_volume"]
+    if strategy == STRATEGY_INTRADAY:
+        liquidity_ok = liquidity_ok and rv >= thresholds["min_relative_volume"]
+    quality_ok = score >= minimum_score and liquidity_ok and _spread_acceptable(enriched, strategy) and _slippage_acceptable(enriched)
+
+    entry = _entry_price(enriched)
+    atr = _atr(enriched, entry)
+    stop = _f(enriched.get("stop_loss"), 0.0)
+    if entry > 0 and (stop <= 0 or stop >= entry):
+        if strategy == STRATEGY_INTRADAY:
+            stop = entry - (atr * 1.2) if atr > 0 else entry * 0.98
+        else:
+            support = _f(enriched.get("support") or enriched.get("support_level"), 0.0)
+            stop = support if 0 < support < entry else (entry - (atr * 2.0) if atr > 0 else entry * 0.92)
+        stop = max(0.01, stop)
+    risk = entry - stop if entry > 0 and stop > 0 and stop < entry else 0.0
+    rr = 1.8 if strategy == STRATEGY_INTRADAY else 2.5
+    take_profit = _f(enriched.get("take_profit") or enriched.get("take_profit_1"), 0.0)
+    if risk > 0 and take_profit <= 0:
+        take_profit = entry + (risk * rr)
+
+    buy_signal = bool(quality_ok and entry > 0 and risk > 0)
+    signal = str(enriched.get("signal") or "").upper()
+    if buy_signal and signal not in {"SELL", "SKIPPED", "ERROR"}:
+        signal = "BUY"
+
+    return {
+        **enriched,
+        "signal": signal or enriched.get("signal"),
+        "buy_signal": buy_signal,
+        "entry_price": round(entry, 4) if entry > 0 else enriched.get("entry_price"),
+        "stop_loss": round(stop, 4) if stop > 0 else enriched.get("stop_loss"),
+        "take_profit": round(take_profit, 4) if take_profit > 0 else enriched.get("take_profit"),
+        "take_profit_1": round(take_profit, 4) if take_profit > 0 else enriched.get("take_profit_1"),
+        "risk_reward_ratio": rr,
+        "holding_period_target": "intraday" if strategy == STRATEGY_INTRADAY else "several_days",
+        "actionable_thresholds": thresholds,
+    }
 
 
 def intraday_filter_rejection_reasons(row: dict, thresholds: dict[str, float] | None = None) -> list[str]:
@@ -228,11 +317,13 @@ def intraday_filter_rejection_reasons(row: dict, thresholds: dict[str, float] | 
     score = _f(row.get("ranking_score") or row.get("intraday_momentum_score") or row.get("aggressive_score") or row.get("score"), 0.0)
     if score < thresholds["min_score"]:
         reasons.append("score_too_low")
-    if str(row.get("signal") or "").strip().upper() != "BUY":
+    actionable = enrich_actionable_candidate(row, STRATEGY_INTRADAY)
+    raw_signal = str(row.get("signal") or "").strip().upper()
+    if raw_signal in {"SELL", "SKIPPED", "ERROR", "NEUTRAL"}:
         reasons.append("not_buy_signal")
-    if _f(row.get("entry_price"), 0.0) <= 0:
+    if _f(actionable.get("entry_price"), 0.0) <= 0:
         reasons.append("missing_entry_price")
-    if _f(row.get("stop_loss"), 0.0) <= 0:
+    if _f(actionable.get("stop_loss"), 0.0) <= 0:
         reasons.append("missing_stop_loss")
     if row.get("rejected_by_ranking"):
         reasons.append("rejected_by_ranking")

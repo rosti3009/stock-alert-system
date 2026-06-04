@@ -1142,8 +1142,35 @@ function statusText(ok, healthyText, badText){
   return ok ? healthyText : badText;
 }
 
+function reconciliationOpenCount(health){
+  const recon = health.reconciliation || {};
+  return Number(recon.open_count ?? recon.open_issues_count ?? recon.issues_count ?? 0) || 0;
+}
+
+function computeDashboardSystemStatus(health){
+  const autoTrading = health.auto_trading_status || {};
+  const systemBlockingReasons = health.blocking_reasons || [];
+  const blocked = Boolean(autoTrading.blocked)
+    || systemBlockingReasons.length > 0
+    || Boolean(health.circuit_breaker_tripped)
+    || health.broker_snapshot_fresh === false
+    || reconciliationOpenCount(health) > 0;
+  if(blocked){
+    return "BLOCKED";
+  }
+  if(autoTrading.enabled === true
+      && autoTrading.blocked === false
+      && (autoTrading.blocking_reasons || []).length === 0
+      && health.broker_snapshot_fresh === true
+      && health.circuit_breaker_tripped === false
+      && reconciliationOpenCount(health) === 0){
+    return "ACTIVE";
+  }
+  return (health.degraded_reasons || []).length || autoTrading.enabled === false ? "DEGRADED" : "ACTIVE";
+}
+
 function updateOperationalHealth(){
-  const status = dashboardHealth.status || dashboardHealth.system_status || "DEGRADED";
+  const status = computeDashboardSystemStatus(dashboardHealth);
   const statusEl = document.getElementById("systemStatus");
   statusEl.textContent = status;
   statusEl.className = status === "HEALTHY" || status === "ACTIVE" ? "system-active" : status === "BLOCKED" || status === "ERROR" ? "system-blocked" : "system-degraded";
@@ -1159,7 +1186,7 @@ function updateOperationalHealth(){
   document.getElementById("healthTws").textContent = localGatewayConnected
     ? "LOCAL GATEWAY CONNECTED"
     : statusText(brokerConnected, "CONNECTED", "OFFLINE");
-  document.getElementById("healthWatchdog").textContent = dashboardHealth.status === "BLOCKED"
+  document.getElementById("healthWatchdog").textContent = status === "BLOCKED"
     ? "BLOCKED"
     : statusText(dashboardHealth.watchdog_connected, "HEALTHY", "DEGRADED");
   document.getElementById("healthScanner").textContent = scanner.scan_running ? "RUNNING" : "READY";
@@ -1168,7 +1195,7 @@ function updateOperationalHealth(){
   document.getElementById("healthCircuit").textContent = (dashboardHealth.circuit_breaker_tripped ?? circuit.tripped) ? "TRIPPED" : "CLEAR";
   document.getElementById("healthStartup").textContent = startup.ok === false ? "PENDING" : "PASSED";
 
-  const reasons = (dashboardHealth.blocking_reasons || []).concat(dashboardHealth.degraded_reasons || [], autoTrading.blocking_reasons || []);
+  const reasons = (dashboardHealth.blocking_reasons || []).concat(dashboardHealth.degraded_reasons || [], autoTrading.blocking_reasons || [], autoTrading.degraded_reasons || []);
   const operations = dashboardHealth.last_operations || {};
   const latest = Object.values(operations).sort((a,b) => String(b.timestamp || "").localeCompare(String(a.timestamp || "")))[0];
   document.getElementById("lastOperationSummary").textContent = latest
@@ -1179,7 +1206,7 @@ function updateOperationalHealth(){
   document.getElementById("lastOpSystem").textContent = lastOperationText(operations, ["reconnect_tws","restart_scanner","restart_watchdog","refresh_live_tracker"]);
   document.getElementById("lastOpTrading").textContent = autoTrading.blocked
     ? "Auto trader blocked: " + (autoTrading.blocking_reasons || []).slice(0,2).join(" · ")
-    : lastOperationText(operations, ["enable_auto_trading","disable_auto_trading","switch_strategy_mode","switch_training_profile","toggle_intraday_swing"]);
+    : "Auto Trading: " + (autoTrading.enabled ? "ENABLED" : "DISABLED");
   document.getElementById("lastOpRecovery").textContent = lastOperationText(operations, ["reset_circuit_breaker","run_startup_recovery","reconcile_positions","rebuild_trade_reviews"]);
   document.getElementById("lastOpEmergency").textContent = lastOperationText(operations, ["close_all_positions","emergency_stop"]) || "Paper-only protections remain enforced by API.";
 }

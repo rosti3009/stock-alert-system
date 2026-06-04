@@ -1,5 +1,6 @@
 import asyncio
 import time
+from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient
 
@@ -157,7 +158,7 @@ def test_startup_recovery_run_timeout_does_not_hang(monkeypatch):
 
 def test_trading_status_includes_freshness_diagnostics(monkeypatch):
     monkeypatch.setattr(main.watchdog, "get_watchdog_status", _async_return({"stale_data": {"tws_mirror": True, "execution_sync": True}, "trading_blocked": True, "blocking_reasons": ["TWS mirror sync stale", "Execution sync stale"], "last_tws_mirror_sync_at": None, "last_execution_sync_at": None}))
-    monkeypatch.setattr(main.database, "get_latest_broker_sync_snapshot", _async_return({"connected": 1, "synced_at": "2026-01-01T00:00:00+00:00", "executions_json": "[]", "positions_json": "[]", "open_orders_json": "[]", "errors_json": "[]"}))
+    monkeypatch.setattr(main.database, "get_latest_broker_sync_snapshot", _async_return({"connected": 1, "synced_at": datetime.now(timezone.utc).isoformat(), "executions_json": "[]", "positions_json": "[]", "open_orders_json": "[]", "errors_json": "[]"}))
     monkeypatch.setattr(main.database, "get_open_positions", _async_return([]))
     monkeypatch.setattr(main.database, "get_active_paper_session", _async_return({}))
     monkeypatch.setattr(main.database, "get_realized_pnl", _async_return(0.0))

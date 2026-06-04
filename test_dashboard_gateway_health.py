@@ -346,3 +346,63 @@ def test_system_health_fields_are_consistent(tmp_path, monkeypatch):
         assert data["status"] in {"ACTIVE", "DEGRADED", "BLOCKED"}
     finally:
         teardown_db(original_db)
+
+
+def test_dashboard_source_of_truth_active_not_stale_blocked(tmp_path, monkeypatch):
+    original_db = setup_db(tmp_path)
+
+    async def fake_watchdog_status():
+        return {
+            "healthy": True,
+            "tws_connected": False,
+            "trading_blocked": False,
+            "blocking_reasons": [],
+            "degraded_reasons": [],
+        }
+
+    async def no_reconciliation_issues():
+        return {
+            "ok": True,
+            "issues_count": 0,
+            "open_count": 0,
+            "open_issues_count": 0,
+            "issues": [],
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    try:
+        run_async(reset_circuit_breaker())
+        run_async(database.save_broker_sync_snapshot(fresh_gateway_snapshot()))
+        run_async(database.set_app_state(main.AUTO_TRADING_ENABLED_KEY, "true"))
+        run_async(startup_recovery.save_startup_recovery_status({
+            "ok": False,
+            "state": "FAILED",
+            "reason": "direct TWS unavailable in gateway mode",
+            "steps": [],
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }))
+        monkeypatch.setattr(main.config, "IBKR_PAPER_TRADING", True)
+        monkeypatch.setattr(main.config, "IBKR_ENABLE_REAL_TRADING", False)
+        monkeypatch.setattr(main.watchdog, "get_watchdog_status", fake_watchdog_status)
+        monkeypatch.setattr(main.reconciliation_lifecycle, "get_reconciliation_status", no_reconciliation_issues)
+
+        auto_status = run_async(main.build_auto_trading_status())
+        health = run_async(main.build_system_health())
+
+        assert auto_status["enabled"] is True
+        assert auto_status["blocked"] is False
+        assert auto_status["blocking_reasons"] == []
+        dashboard_blocked = (
+            auto_status["blocked"]
+            or bool(health["blocking_reasons"])
+            or health["circuit_breaker_tripped"]
+            or health["broker_snapshot_fresh"] is False
+            or health["reconciliation"]["open_count"] > 0
+        )
+        assert dashboard_blocked is False
+        assert health["blocking_reasons"] == []
+        assert health["broker_snapshot_fresh"] is True
+        assert health["circuit_breaker_tripped"] is False
+        assert health["reconciliation"]["open_count"] == 0
+    finally:
+        teardown_db(original_db)
