@@ -305,6 +305,42 @@ def _force_close_intraday_positions_job() -> None:
         log.exception("Scheduled intraday force-close failed: %s", exc)
 
 
+AUTO_TRADING_ENABLE_SUCCESS_MESSAGE = "Auto trading enabled after safety checks passed"
+AUTO_TRADING_INFO_REASON_PREFIXES = (
+    "Auto trading enabled",
+)
+
+
+def _is_auto_trading_info_reason(reason: object) -> bool:
+    text = str(reason or "").strip()
+    return bool(text) and any(text.startswith(prefix) for prefix in AUTO_TRADING_INFO_REASON_PREFIXES)
+
+
+def _unique_reason_strings(reasons, *, include_info: bool = True) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for reason in reasons or []:
+        text = str(reason or "").strip()
+        if not text or text in seen:
+            continue
+        if not include_info and _is_auto_trading_info_reason(text):
+            continue
+        seen.add(text)
+        unique.append(text)
+    return unique
+
+
+async def _get_latest_auto_trading_operation() -> dict | None:
+    operations = await _get_dashboard_operations()
+    candidates = [
+        operation
+        for key, operation in operations.items()
+        if key in {"enable_auto_trading", "disable_auto_trading"} and isinstance(operation, dict)
+    ]
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: str(item.get("timestamp") or ""), reverse=True)[0]
+
 AUTO_TRADING_ENABLED_KEY = "auto_trading_enabled"
 AUTO_TRADING_STATE_SOURCE_KEY = "auto_trading_state_source"
 AUTO_TRADING_STATE_REASON_KEY = "auto_trading_state_reason"
@@ -2138,18 +2174,43 @@ async def build_auto_trading_status() -> dict:
     if source == "unknown" and not app_enabled:
         source = "app_state"
 
+    reconciliation = await reconciliation_lifecycle.get_reconciliation_status()
+    reconciliation_open_count = _reconciliation_open_issue_count(reconciliation)
+    last_operation = await _get_latest_auto_trading_operation()
+    state_reason = app_state.get("reason")
+    if not last_operation and state_reason:
+        last_operation = {
+            "action": "enable_auto_trading" if app_enabled else "disable_auto_trading",
+            "status": "success" if app_enabled else "unknown",
+            "message": state_reason,
+            "details": {"auto_trading_enabled": app_enabled},
+            "timestamp": None,
+            "source": source,
+        }
+
     blocking_reasons: list[str] = []
     degraded_reasons: list[str] = []
+    info_reasons: list[str] = []
+    if _is_auto_trading_info_reason(state_reason):
+        info_reasons.append(state_reason)
+    if last_operation and _is_auto_trading_info_reason(last_operation.get("message")):
+        info_reasons.append(last_operation.get("message"))
     if settings_enabled != app_enabled:
         degraded_reasons.append("Strategy settings auto-trader flag disagrees with runtime state; runtime state wins")
     if not app_enabled:
-        blocking_reasons.append(app_state.get("reason") or "Auto trader disabled in app state")
+        if state_reason and not _is_auto_trading_info_reason(state_reason):
+            blocking_reasons.append(state_reason)
+        else:
+            blocking_reasons.append("Auto trader disabled in app state")
     if not paper_enabled:
         blocking_reasons.append("Paper trading safety is not enabled")
     if circuit.get("tripped"):
         blocking_reasons.append(f"Circuit breaker tripped: {circuit.get('reason') or 'unknown reason'}")
+    if reconciliation_open_count > 0:
+        blocking_reasons.append(f"Reconciliation open_count={reconciliation_open_count}")
     if watchdog_status.get("trading_blocked"):
-        blocking_reasons.extend(watchdog_status.get("blocking_reasons") or ["Watchdog blocked trading"])
+        watchdog_reasons = _unique_reason_strings(watchdog_status.get("blocking_reasons") or [], include_info=False)
+        blocking_reasons.extend(watchdog_reasons or ["Watchdog blocked trading"])
     if not broker_connected:
         blocking_reasons.append("Broker source-of-truth snapshot is stale or disconnected")
     elif not broker_fresh:
@@ -2158,13 +2219,23 @@ async def build_auto_trading_status() -> dict:
     if broker_decision.get("local_gateway_connected") and not broker_decision.get("direct_connected"):
         degraded_reasons.append("Direct IBKR/TWS unavailable; using fresh LOCAL_GATEWAY_PUSH snapshot")
 
+    unique_blocking = _unique_reason_strings(blocking_reasons, include_info=False)
+    unique_degraded = [
+        reason
+        for reason in _unique_reason_strings(degraded_reasons, include_info=False)
+        if reason not in unique_blocking
+    ]
+    unique_info = _unique_reason_strings(info_reasons)
+
     return {
-        "enabled": app_enabled,
+        "enabled": app_enabled and not unique_blocking,
         "source": source,
         "paper_trading_enabled": paper_enabled,
-        "blocked": bool(blocking_reasons),
-        "blocking_reasons": list(dict.fromkeys(str(r) for r in blocking_reasons if r)),
-        "degraded_reasons": list(dict.fromkeys(str(r) for r in degraded_reasons if r)),
+        "blocked": bool(unique_blocking),
+        "blocking_reasons": unique_blocking,
+        "info_reasons": unique_info,
+        "degraded_reasons": unique_degraded,
+        "last_operation": last_operation,
         "broker_connected": broker_connected,
         "local_gateway_connected": bool(broker_decision.get("local_gateway_connected")),
         "broker_snapshot_fresh": broker_fresh,
@@ -2200,7 +2271,8 @@ async def build_system_health() -> dict:
     elif broker_snapshot_stale:
         degraded_reasons.extend(freshness.get("reasons") or ["Broker snapshot is stale"])
     if watchdog_status.get("trading_blocked"):
-        blocking_reasons.extend(watchdog_status.get("blocking_reasons") or [])
+        watchdog_reasons = _unique_reason_strings(watchdog_status.get("blocking_reasons") or [], include_info=False)
+        blocking_reasons.extend(watchdog_reasons or ["Watchdog blocked trading"])
     degraded_reasons.extend(watchdog_status.get("degraded_reasons") or [])
     if local_gateway_connected and not broker_decision.get("direct_connected"):
         degraded_reasons.append("Direct IBKR/TWS unavailable; using fresh LOCAL_GATEWAY_PUSH snapshot")
@@ -2213,9 +2285,9 @@ async def build_system_health() -> dict:
         degraded_reasons.extend(auto_status.get("blocking_reasons") or [])
     degraded_reasons.extend(auto_status.get("degraded_reasons") or [])
 
-    unique_blocking = list(dict.fromkeys(str(r) for r in blocking_reasons if r))
+    unique_blocking = _unique_reason_strings(blocking_reasons, include_info=False)
     unique_degraded = [
-        r for r in list(dict.fromkeys(str(r) for r in degraded_reasons if r))
+        r for r in _unique_reason_strings(degraded_reasons, include_info=False)
         if r not in unique_blocking
     ]
     if unique_blocking:
@@ -2245,6 +2317,7 @@ async def build_system_health() -> dict:
         "connection_source": broker_decision.get("freshness_source"),
         "reconciliation": {**(reconciliation or {}), "open_count": _reconciliation_open_issue_count(reconciliation)},
         "blocking_reasons": unique_blocking,
+        "info_reasons": auto_status.get("info_reasons") or [],
         "degraded_reasons": unique_degraded,
     }
 
@@ -2304,7 +2377,7 @@ async def api_auto_trading_enable():
             status_code=403,
         )
 
-    reason = "Auto trading enabled after safety checks passed"
+    reason = AUTO_TRADING_ENABLE_SUCCESS_MESSAGE
     await _set_auto_trading_state(True, source="api_auto_trading_enable", reason=reason)
     return await _operation_response(
         "enable_auto_trading",
