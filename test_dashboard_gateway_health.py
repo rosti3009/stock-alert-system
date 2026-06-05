@@ -154,6 +154,64 @@ def test_auto_trading_enable_status_runtime_state_wins_over_stale_config(tmp_pat
     finally:
         teardown_db(original_db)
 
+def test_auto_trading_success_message_is_info_not_blocker_after_deploy(tmp_path, monkeypatch):
+    original_db = setup_db(tmp_path)
+
+    async def fake_watchdog_status():
+        return {
+            "healthy": True,
+            "tws_connected": False,
+            "trading_blocked": False,
+            "blocking_reasons": [],
+            "degraded_reasons": [],
+        }
+
+    async def no_reconciliation_issues():
+        return {
+            "ok": True,
+            "issues_count": 0,
+            "open_count": 0,
+            "open_issues_count": 0,
+            "issues": [],
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    async def stale_strategy_settings():
+        return {"auto_trader_enabled": False, "risk_profile": "unit-test"}
+
+    try:
+        run_async(reset_circuit_breaker())
+        run_async(database.save_broker_sync_snapshot(fresh_gateway_snapshot()))
+        run_async(database.set_app_state(main.AUTO_TRADING_ENABLED_KEY, "true"))
+        run_async(database.set_app_state(main.AUTO_TRADING_STATE_SOURCE_KEY, "api_auto_trading_enable"))
+        run_async(database.set_app_state(main.AUTO_TRADING_STATE_REASON_KEY, main.AUTO_TRADING_ENABLE_SUCCESS_MESSAGE))
+        run_async(main._record_dashboard_operation(
+            "enable_auto_trading",
+            "success",
+            message=main.AUTO_TRADING_ENABLE_SUCCESS_MESSAGE,
+            details={"auto_trading_enabled": True},
+        ))
+        monkeypatch.setattr(main.config, "IBKR_PAPER_TRADING", True)
+        monkeypatch.setattr(main.config, "IBKR_ENABLE_REAL_TRADING", False)
+        monkeypatch.setattr(main.watchdog, "get_watchdog_status", fake_watchdog_status)
+        monkeypatch.setattr(main.reconciliation_lifecycle, "get_reconciliation_status", no_reconciliation_issues)
+        monkeypatch.setattr(main.database, "get_strategy_settings", stale_strategy_settings)
+
+        status = payload(run_async(main.api_auto_trading_status()))
+        health = payload(run_async(main.api_system_health()))
+
+        assert status["enabled"] is True
+        assert status["blocked"] is False
+        assert status["blocking_reasons"] == []
+        assert main.AUTO_TRADING_ENABLE_SUCCESS_MESSAGE in status["info_reasons"]
+        assert status["last_operation"]["message"] == main.AUTO_TRADING_ENABLE_SUCCESS_MESSAGE
+        assert main.AUTO_TRADING_ENABLE_SUCCESS_MESSAGE not in status["degraded_reasons"]
+        assert "Strategy settings auto-trader flag disagrees with runtime state; runtime state wins" in status["degraded_reasons"]
+        assert health["auto_trader_enabled"] is True
+        assert health["blocking_reasons"] == []
+    finally:
+        teardown_db(original_db)
+
 def test_watchdog_treats_fresh_local_gateway_as_connected(tmp_path, monkeypatch):
     original_db = setup_db(tmp_path)
     try:
