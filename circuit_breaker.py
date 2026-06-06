@@ -79,6 +79,11 @@ async def get_circuit_breaker_state() -> dict:
     }
 
 
+async def current_circuit_breaker_state() -> dict:
+    """Return the live persisted circuit-breaker state, not recovery history payloads."""
+    return await get_circuit_breaker_state()
+
+
 async def reset_circuit_breaker(reason: str = "Manual circuit breaker reset") -> dict:
     await database.delete_app_states([CIRCUIT_BREAKER_STATE_KEY, *IBKR_ERROR_STATE_KEYS])
     await database.safe_record_trade_journal_event({

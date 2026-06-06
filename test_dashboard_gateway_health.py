@@ -212,6 +212,87 @@ def test_auto_trading_success_message_is_info_not_blocker_after_deploy(tmp_path,
     finally:
         teardown_db(original_db)
 
+
+def test_auto_trading_status_ignores_stale_startup_recovery_circuit_snapshot(tmp_path, monkeypatch):
+    original_db = setup_db(tmp_path)
+
+    async def fake_watchdog_status():
+        return {
+            "healthy": True,
+            "tws_connected": False,
+            "trading_blocked": False,
+            "blocking_reasons": [],
+            "degraded_reasons": [],
+            "stale_data": {"tws_mirror": False, "execution_sync": False, "market_data": False},
+        }
+
+    async def no_reconciliation_issues():
+        return {
+            "ok": True,
+            "issues_count": 0,
+            "open_count": 0,
+            "open_issues_count": 0,
+            "issues": [],
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    stale_reason = "Circuit breaker tripped: TWS connection failed: [Errno 111] Connection refused"
+
+    try:
+        run_async(startup_recovery.save_startup_recovery_status({
+            "ok": False,
+            "state": "FAILED",
+            "reason": "TWS connection failed: [Errno 111] Connection refused",
+            "steps": [],
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }))
+        run_async(database.save_broker_sync_snapshot(fresh_gateway_snapshot()))
+        run_async(reset_circuit_breaker())
+        run_async(database.set_app_state(main.AUTO_TRADING_ENABLED_KEY, "false"))
+        run_async(database.set_app_state(main.AUTO_TRADING_STATE_REASON_KEY, stale_reason))
+        run_async(main._record_dashboard_operation(
+            "enable_auto_trading",
+            "blocked",
+            message=stale_reason,
+            details={"auto_trading_enabled": False, "circuit_breaker": {"tripped": True, "reason": stale_reason}},
+        ))
+        monkeypatch.setattr(main.config, "IBKR_PAPER_TRADING", True)
+        monkeypatch.setattr(main.config, "IBKR_ENABLE_REAL_TRADING", False)
+        monkeypatch.setattr(main.watchdog, "get_watchdog_status", fake_watchdog_status)
+        monkeypatch.setattr(main.reconciliation_lifecycle, "get_reconciliation_status", no_reconciliation_issues)
+
+        status = payload(run_async(main.api_auto_trading_status()))
+        health = run_async(main.build_system_health())
+
+        assert status["enabled"] is True
+        assert status["blocked"] is False
+        assert status["blocking_reasons"] == []
+        assert status["local_gateway_connected"] is True
+        assert status["broker_snapshot_fresh"] is True
+        assert health["local_gateway_connected"] is True
+        assert health["broker_snapshot_fresh"] is True
+        assert health["circuit_breaker_tripped"] is False
+        assert health["reconciliation"]["open_count"] == 0
+
+        dashboard_blocked = (
+            status["blocked"]
+            or bool(health["blocking_reasons"])
+            or health["circuit_breaker_tripped"]
+            or health["broker_snapshot_fresh"] is False
+            or health["reconciliation"]["open_count"] > 0
+        )
+        dashboard_status = "BLOCKED" if dashboard_blocked else "ACTIVE" if (
+            status["enabled"] is True
+            and status["blocked"] is False
+            and status["blocking_reasons"] == []
+            and health["broker_snapshot_fresh"] is True
+            and health["circuit_breaker_tripped"] is False
+            and health["reconciliation"]["open_count"] == 0
+        ) else "DEGRADED"
+        assert dashboard_status == "ACTIVE"
+    finally:
+        teardown_db(original_db)
+
 def test_watchdog_treats_fresh_local_gateway_as_connected(tmp_path, monkeypatch):
     original_db = setup_db(tmp_path)
     try:
