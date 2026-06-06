@@ -31,6 +31,7 @@ import watchdog
 import live_position_tracker
 from circuit_breaker import (
     auto_clear_recoverable_circuit_breaker,
+    current_circuit_breaker_state,
     get_circuit_breaker_state,
     get_ibkr_error_count,
     get_last_auto_recovery,
@@ -314,6 +315,15 @@ AUTO_TRADING_INFO_REASON_PREFIXES = (
 def _is_auto_trading_info_reason(reason: object) -> bool:
     text = str(reason or "").strip()
     return bool(text) and any(text.startswith(prefix) for prefix in AUTO_TRADING_INFO_REASON_PREFIXES)
+
+
+def _is_stale_recovery_circuit_reason(reason: object) -> bool:
+    text = str(reason or "").strip().lower()
+    return bool(text) and (
+        "circuit breaker tripped" in text
+        or "tws connection failed" in text
+        or "connection refused" in text
+    )
 
 
 def _unique_reason_strings(reasons, *, include_info: bool = True) -> list[str]:
@@ -2159,7 +2169,7 @@ async def build_auto_trading_status() -> dict:
     app_state = await _get_auto_trading_state()
     settings = await database.get_strategy_settings()
     active_mode = await strategy_mode.get_strategy_mode()
-    circuit = await get_circuit_breaker_state()
+    circuit = await current_circuit_breaker_state()
     watchdog_status = await watchdog.get_watchdog_status()
     broker_snapshot = await database.get_latest_broker_sync_snapshot() or {}
     broker_freshness = broker_snapshot_freshness(broker_snapshot)
@@ -2167,17 +2177,29 @@ async def build_auto_trading_status() -> dict:
     broker_fresh = bool(broker_decision.get("broker_sync_fresh"))
     broker_connected = bool(broker_decision.get("effective_connected"))
 
-    app_enabled = bool(app_state.get("enabled"))
-    settings_enabled = bool(settings.get("auto_trader_enabled", True))
+    raw_app_enabled = bool(app_state.get("enabled"))
     paper_enabled = bool(getattr(config, "IBKR_PAPER_TRADING", False)) and not bool(getattr(config, "IBKR_ENABLE_REAL_TRADING", False))
-    source = app_state.get("source") or ("app_state" if not app_enabled else "default")
-    if source == "unknown" and not app_enabled:
+    source = app_state.get("source") or ("app_state" if not raw_app_enabled else "default")
+    if source == "unknown" and not raw_app_enabled:
         source = "app_state"
 
     reconciliation = await reconciliation_lifecycle.get_reconciliation_status()
     reconciliation_open_count = _reconciliation_open_issue_count(reconciliation)
-    last_operation = await _get_latest_auto_trading_operation()
     state_reason = app_state.get("reason")
+    current_gateway_health_clears_recovery_history = bool(
+        broker_decision.get("local_gateway_connected")
+        and broker_fresh
+        and reconciliation_open_count == 0
+        and not circuit.get("tripped")
+    )
+    ignore_stale_recovery_disable = bool(
+        not raw_app_enabled
+        and current_gateway_health_clears_recovery_history
+        and _is_stale_recovery_circuit_reason(state_reason)
+    )
+    app_enabled = raw_app_enabled or ignore_stale_recovery_disable
+    settings_enabled = bool(settings.get("auto_trader_enabled", True))
+    last_operation = await _get_latest_auto_trading_operation()
     if not last_operation and state_reason:
         last_operation = {
             "action": "enable_auto_trading" if app_enabled else "disable_auto_trading",
