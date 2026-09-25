@@ -19,6 +19,7 @@ import account_sync
 import broker_sync
 import broker_adapter
 import chatgpt_bridge
+import dashboard_auth
 import execution_sync
 import tws_mirror
 import reconciliation_engine
@@ -1644,6 +1645,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Stock Alerts", lifespan=lifespan)
 app.include_router(chatgpt_bridge.router)
+app.middleware("http")(dashboard_auth.dashboard_remote_auth_middleware)
 
 # ==========================================
 # MARKET DATA GUARD API
