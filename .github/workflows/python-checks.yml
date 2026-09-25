@@ -1,0 +1,43 @@
+name: Python checks
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile Python sources
+        env:
+          CHATGPT_BRIDGE_TOKEN: "CI_TEST_TOKEN_ABCDEFGHIJKLMNOPQRSTUVWXYZ_123456"
+          CHATGPT_BRIDGE_ALLOW_SUBMIT: "false"
+          CHATGPT_BRIDGE_IBKR_HOST: "127.0.0.1"
+          CHATGPT_BRIDGE_IBKR_PORT: "7497"
+          IBKR_ENABLE_REAL_TRADING: "false"
+          IBKR_PAPER_TRADING: "true"
+        run: python -m compileall -q .
+
+      - name: Run bridge unit tests
+        env:
+          CHATGPT_BRIDGE_TOKEN: "CI_TEST_TOKEN_ABCDEFGHIJKLMNOPQRSTUVWXYZ_123456"
+          CHATGPT_BRIDGE_ALLOW_SUBMIT: "false"
+          CHATGPT_BRIDGE_IBKR_HOST: "127.0.0.1"
+          CHATGPT_BRIDGE_IBKR_PORT: "7497"
+          IBKR_ENABLE_REAL_TRADING: "false"
+          IBKR_PAPER_TRADING: "true"
+        run: python -m unittest -v test_chatgpt_bridge.py
