@@ -8,14 +8,26 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
 _REMOTE_AUTH_ENABLED = os.getenv("DASHBOARD_REMOTE_AUTH_ENABLED", "true").strip().lower() in {"1","true","yes","on"}
-_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "stocks.skipperil.co.il").strip().lower()
+_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "").strip().lower()
 _USER = os.getenv("DASHBOARD_BASIC_USER", "").strip()
 _PASSWORD = os.getenv("DASHBOARD_BASIC_PASSWORD", "").strip()
 
 
 def _is_remote_dashboard_request(request: Request) -> bool:
-    host = (request.headers.get("host") or "").split(":", 1)[0].strip().lower()
-    return bool(_PUBLIC_HOST and host == _PUBLIC_HOST)
+    raw_host = (request.headers.get("host") or "").strip().lower()
+    host = raw_host
+    if raw_host.startswith("[") and "]" in raw_host:
+        host = raw_host[1:raw_host.index("]")]
+    elif ":" in raw_host:
+        host = raw_host.split(":", 1)[0]
+
+    if host in {"127.0.0.1", "localhost", "::1"}:
+        return False
+    if _PUBLIC_HOST:
+        return host == _PUBLIC_HOST
+    # With no fixed public hostname (for example, a Quick Tunnel), protect
+    # every non-loopback request as remote.
+    return True
 
 
 def _authorized(request: Request) -> bool:
