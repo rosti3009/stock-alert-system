@@ -171,14 +171,21 @@ def post_snapshot(snapshot: dict, api_url: str, token: str, timeout: float = 10.
 
 def run_gateway() -> int:
     load_dotenv()
-    parser = argparse.ArgumentParser(description="Push local IBKR/TWS broker snapshots to the Render backend.")
+    parser = argparse.ArgumentParser(description="Push local IBKR/TWS broker snapshots to the configured Stock Alert backend.")
     parser.add_argument("--host", default=os.getenv("IBKR_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=_env_int("IBKR_PORT", 7497))
     parser.add_argument("--client-id", type=int, default=_env_int("IBKR_CLIENT_ID", 17))
-    parser.add_argument("--api-url", default=os.getenv("RENDER_API_URL", "https://stock-alert-system-moit.onrender.com"))
-    parser.add_argument("--token", default=os.getenv("BROKER_PUSH_TOKEN", "change-me"))
+    parser.add_argument(
+        "--api-url",
+        default=os.getenv("BROKER_API_URL") or os.getenv("RENDER_API_URL") or "http://127.0.0.1:8000",
+    )
+    parser.add_argument("--token", default=os.getenv("BROKER_PUSH_TOKEN", ""))
     parser.add_argument("--interval", type=float, default=_env_float("BROKER_PUSH_INTERVAL_SECONDS", 15.0))
     args = parser.parse_args()
+
+    token = str(args.token or "").strip()
+    if len(token) < 32 or token.lower() in {"change-me", "changeme", "default", "test"}:
+        raise SystemExit("BROKER_PUSH_TOKEN must be a strong unique token of at least 32 characters")
 
     interval = min(30.0, max(10.0, args.interval))
     stopping = False
