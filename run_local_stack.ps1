@@ -92,6 +92,11 @@ if ($python -eq "py") {
     & python -m pip install -r requirements.txt
 }
 
+$twsTcp = Test-NetConnection -ComputerName "127.0.0.1" -Port 7497 -WarningAction SilentlyContinue
+if (-not $twsTcp.TcpTestSucceeded) {
+    throw "TWS Paper API is not reachable on 127.0.0.1:7497. Start TWS Paper and enable Socket Clients before continuing."
+}
+
 $apiArgs = if ($python -eq "py") { "-3.12 -m uvicorn main:app --host 127.0.0.1 --port 8000" } else { "-m uvicorn main:app --host 127.0.0.1 --port 8000" }
 $api = Start-Process -FilePath $python -ArgumentList $apiArgs -WorkingDirectory $PSScriptRoot -PassThru
 
@@ -102,6 +107,18 @@ try {
 } catch {
     Stop-Process -Id $api.Id -Force -ErrorAction SilentlyContinue
     throw "FastAPI did not start successfully: $($_.Exception.Message)"
+}
+
+try {
+    $bridgeHeaders = @{ Authorization = "Bearer $bridgeToken" }
+    $accountCheck = Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/chatgpt/account" -Headers $bridgeHeaders -TimeoutSec 15
+    if (-not $accountCheck.ok -or -not [string]$accountCheck.account -or -not ([string]$accountCheck.account).ToUpper().StartsWith("DU")) {
+        throw "Bridge did not return a verified IBKR Paper account."
+    }
+    Write-Host "TWS Paper bridge: account $($accountCheck.account) verified" -ForegroundColor Green
+} catch {
+    Stop-Process -Id $api.Id -Force -ErrorAction SilentlyContinue
+    throw "ChatGPT Bridge/TWS Paper read verification failed: $($_.Exception.Message)"
 }
 
 $remoteUrl = ""
@@ -133,6 +150,19 @@ Write-Host ""
 Write-Host "Stock Alert System started." -ForegroundColor Green
 Write-Host "Local dashboard:  http://127.0.0.1:8000/"
 Write-Host "Remote dashboard: $remoteUrl"
+if ($remoteUrl -like "https://*") {
+    try {
+        $remoteUser = Get-EnvFileValue "DASHBOARD_BASIC_USER"
+        $remotePass = Get-EnvFileValue "DASHBOARD_BASIC_PASSWORD"
+        $basicRaw = [Text.Encoding]::UTF8.GetBytes("$remoteUser`:$remotePass")
+        $basic = [Convert]::ToBase64String($basicRaw)
+        Start-Sleep -Seconds 2
+        $remoteCheck = Invoke-WebRequest -UseBasicParsing -Uri $remoteUrl -Headers @{ Authorization = "Basic $basic" } -TimeoutSec 20
+        Write-Host "Remote dashboard check: HTTP $($remoteCheck.StatusCode)" -ForegroundColor Green
+    } catch {
+        Write-Host "Remote dashboard self-check warning: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
 Write-Host "FastAPI PID:       $($api.Id)"
 Write-Host "cloudflared PID:   $($tunnel.Id)"
 Write-Host ""
