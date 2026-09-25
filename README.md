@@ -25,7 +25,7 @@ http://127.0.0.1:8000/
 
 ## Public dashboard through Cloudflare
 
-No SkipperIL or other unrelated domain is required.
+No unrelated project domain is required.
 
 By default, `run_local_stack.ps1` uses a free Cloudflare Quick Tunnel when no fixed hostname is configured. It prints a temporary URL in this form:
 
