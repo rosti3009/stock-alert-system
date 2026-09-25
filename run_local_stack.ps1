@@ -65,7 +65,7 @@ if ([string]::IsNullOrWhiteSpace($dashPass)) {
 }
 
 Ensure-EnvValue "DASHBOARD_REMOTE_AUTH_ENABLED" "true"
-Ensure-EnvValue "DASHBOARD_PUBLIC_HOST" "stocks.skipperil.co.il"
+$publicHost = Get-EnvFileValue "DASHBOARD_PUBLIC_HOST"
 Ensure-EnvValue "CHATGPT_BRIDGE_ALLOW_SUBMIT" "false"
 Ensure-EnvValue "CHATGPT_BRIDGE_IBKR_HOST" "127.0.0.1"
 Ensure-EnvValue "CHATGPT_BRIDGE_IBKR_PORT" "7497"
@@ -73,12 +73,6 @@ Ensure-EnvValue "IBKR_PAPER_TRADING" "true"
 Ensure-EnvValue "IBKR_ENABLE_REAL_TRADING" "false"
 
 $tunnelToken = Get-EnvFileValue "CLOUDFLARE_TUNNEL_TOKEN"
-if ([string]::IsNullOrWhiteSpace($tunnelToken)) {
-    Write-Host ""
-    Write-Host "CLOUDFLARE_TUNNEL_TOKEN is not set in .env." -ForegroundColor Yellow
-    Write-Host "Add the token for the existing Cloudflare tunnel 'stock-alert-system' and re-run." -ForegroundColor Yellow
-    exit 2
-}
 
 $python = $null
 if (Get-Command py -ErrorAction SilentlyContinue) { $python = "py" }
@@ -103,12 +97,35 @@ try {
     throw "FastAPI did not start successfully: $($_.Exception.Message)"
 }
 
-$tunnel = Start-Process -FilePath "cloudflared" -ArgumentList @("tunnel","--no-autoupdate","run","--token",$tunnelToken) -WorkingDirectory $PSScriptRoot -PassThru
+$remoteUrl = ""
+if (-not [string]::IsNullOrWhiteSpace($tunnelToken) -and -not [string]::IsNullOrWhiteSpace($publicHost)) {
+    $tunnel = Start-Process -FilePath "cloudflared" -ArgumentList @("tunnel","--no-autoupdate","run","--token",$tunnelToken) -WorkingDirectory $PSScriptRoot -PassThru
+    $remoteUrl = "https://$publicHost/"
+} else {
+    $logDir = Join-Path $PSScriptRoot ".runtime"
+    if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
+    $cfOut = Join-Path $logDir "cloudflared.out.log"
+    $cfErr = Join-Path $logDir "cloudflared.err.log"
+    Remove-Item $cfOut,$cfErr -Force -ErrorAction SilentlyContinue
+
+    $tunnel = Start-Process -FilePath "cloudflared" -ArgumentList @("tunnel","--no-autoupdate","--url","http://127.0.0.1:8000") -WorkingDirectory $PSScriptRoot -RedirectStandardOutput $cfOut -RedirectStandardError $cfErr -PassThru
+    Start-Sleep -Seconds 5
+
+    $combined = ""
+    if (Test-Path $cfOut) { $combined += (Get-Content $cfOut -Raw -ErrorAction SilentlyContinue) }
+    if (Test-Path $cfErr) { $combined += "`n" + (Get-Content $cfErr -Raw -ErrorAction SilentlyContinue) }
+    $match = [regex]::Match($combined, "https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+    if ($match.Success) {
+        $remoteUrl = $match.Value + "/"
+    } else {
+        $remoteUrl = "(Quick Tunnel started; check .runtime/cloudflared.err.log for the public URL)"
+    }
+}
 
 Write-Host ""
 Write-Host "Stock Alert System started." -ForegroundColor Green
 Write-Host "Local dashboard:  http://127.0.0.1:8000/"
-Write-Host "Remote dashboard: https://stocks.skipperil.co.il/"
+Write-Host "Remote dashboard: $remoteUrl"
 Write-Host "FastAPI PID:       $($api.Id)"
 Write-Host "cloudflared PID:   $($tunnel.Id)"
 Write-Host ""
