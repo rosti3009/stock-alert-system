@@ -8,7 +8,6 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
 _REMOTE_AUTH_ENABLED = os.getenv("DASHBOARD_REMOTE_AUTH_ENABLED", "true").strip().lower() in {"1","true","yes","on"}
-_PUBLIC_HOST = os.getenv("DASHBOARD_PUBLIC_HOST", "").strip().lower()
 _USER = os.getenv("DASHBOARD_BASIC_USER", "").strip()
 _PASSWORD = os.getenv("DASHBOARD_BASIC_PASSWORD", "").strip()
 
@@ -21,14 +20,8 @@ def _is_remote_dashboard_request(request: Request) -> bool:
     elif ":" in raw_host:
         host = raw_host.split(":", 1)[0]
 
-    if host in {"127.0.0.1", "localhost", "::1"}:
-        return False
-    if _PUBLIC_HOST:
-        return host == _PUBLIC_HOST
-    # With no fixed public hostname (for example, a Quick Tunnel), protect
-    # every non-loopback request as remote.
-    return True
-
+    # Every non-loopback request is remote and must pass dashboard auth.
+    return host not in {"127.0.0.1", "localhost", "::1"}
 
 def _authorized(request: Request) -> bool:
     auth = request.headers.get("authorization") or ""
