@@ -73,6 +73,13 @@ Ensure-EnvValue "IBKR_PAPER_TRADING" "true"
 Ensure-EnvValue "IBKR_ENABLE_REAL_TRADING" "false"
 
 $tunnelToken = Get-EnvFileValue "CLOUDFLARE_TUNNEL_TOKEN"
+$useNamedTunnel = (-not [string]::IsNullOrWhiteSpace($tunnelToken)) -and (-not [string]::IsNullOrWhiteSpace($publicHost))
+if (-not $useNamedTunnel) {
+    # Quick Tunnel hostnames are random. Clear any stale fixed hostname before FastAPI starts
+    # so dashboard_auth protects every non-loopback Host header.
+    Ensure-EnvValue "DASHBOARD_PUBLIC_HOST" ""
+    $publicHost = ""
+}
 
 $python = $null
 if (Get-Command py -ErrorAction SilentlyContinue) { $python = "py" }
@@ -98,7 +105,7 @@ try {
 }
 
 $remoteUrl = ""
-if (-not [string]::IsNullOrWhiteSpace($tunnelToken) -and -not [string]::IsNullOrWhiteSpace($publicHost)) {
+if ($useNamedTunnel) {
     $tunnel = Start-Process -FilePath "cloudflared" -ArgumentList @("tunnel","--no-autoupdate","run","--token",$tunnelToken) -WorkingDirectory $PSScriptRoot -PassThru
     $remoteUrl = "https://$publicHost/"
 } else {
